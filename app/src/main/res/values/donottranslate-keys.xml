@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+	<string-array name="preferences_solver_search_time_entry_key_array">
+		<item>60</item>
+		<item>600</item>
+		<item>3600</item>
+		<item>0</item>
+	</string-array>
+	<string-array name="preferences_optimizer_search_time_entry_key_array">
+		<item>60</item>
+		<item>600</item>
+		<item>3600</item>
+		<item>0</item>
+	</string-array>
+    <string-array name="preferences_optimizer_optimization_entry_key_array">
+        <!-- Items in this list must be valid indexes in TOptimization in YASS.pas -->
+        <item>0</item>
+        <item>1</item>
+        <item>2</item>
+        <item>3</item>
+        <item>4</item>
+    </string-array>
+	<string-array name="preferences_optimizer_search_method_order_entry_key_array">
+		<!-- Items in this list must be valid indexes in TOptimizerSearchMethodOrder in yassjni.pas -->
+		<item>0</item>
+		<item>1</item>
+		<item>2</item>
+		<item>3</item>
+	</string-array>
+</resources>

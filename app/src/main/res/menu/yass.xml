@@ -1,0 +1,25 @@
+<menu xmlns:android="http://schemas.android.com/apk/res/android" >
+
+    <item
+        android:id="@+id/action_solve"
+        android:title="@string/action_solve"
+        android:showAsAction="always" />
+
+    <item
+        android:id="@+id/action_optimize"
+        android:title="@string/action_optimize"
+        android:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/action_paste_puzzle"
+        android:title="@string/action_paste_puzzle"/>
+
+    <item
+        android:id="@+id/action_copy_solution"
+        android:title="@string/action_copy_solution"/>
+
+    <item
+        android:id="@+id/action_settings"
+        android:title="@string/action_settings"/>
+
+</menu>

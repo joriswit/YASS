@@ -1,0 +1,63 @@
+<resources>
+    <string name="app_name">YASS</string>
+    <string name="action_solve">Solve</string>
+    <string name="action_optimize">Optimize</string>
+    <string name="back_to_edit_mode_confirm">Are you sure you want to discard the current solution, and go back to edit mode?</string>
+    <string name="native_library_load_error">Failed to load solver library.</string>
+    <string name="solving_initial_status_text">Solving…</string>
+    <string name="optimizing_initial_status_text">Optimizing…</string>
+    <string name="current_solution_label_text">Solution:</string>
+    <string name="current_solution_text">%1$d/%2$d</string>
+    <string name="paste_solution_title_text">Existing solution needed</string>
+    <string name="paste_solution_text">An existing solution is required to optimize. You can paste your solution here, or you can cancel and first run the solver.</string>
+    <string name="paste_solution_invalid_title_text">Not a valid solution</string>
+    <string name="paste_solution_invalid_text">The solution is not a valid position for the current puzzle.</string>
+    <string name="action_paste_puzzle">Paste puzzle</string>
+    <string name="action_copy_solution">Copy solution</string>
+    <string name="clipboard_description">Solution</string>
+    <string name="action_settings">Settings</string>
+    <string name="settings_reset_to_defaults">Settings have been reset to defaults</string>
+    <string name="title_activity_settings">YASS Solver &amp; Optimizer Settings</string>
+    <string name="preferences_solver_title_text">Solver settings</string>
+    <string name="preferences_solver_search_time_title_text">Solver search time</string>
+    <string-array name="preferences_solver_search_time_entry_text_array">
+        <item>1 minute</item>
+        <item>10 minutes (default)</item>
+        <item>1 hour</item>
+        <item>unlimited</item>
+    </string-array>
+    <string name="preferences_optimizer_title_text">Optimizer settings</string>
+    <string name="preferences_optimizer_search_time_title_text">Optimizer search time</string>
+    <string-array name="preferences_optimizer_search_time_entry_text_array">
+        <item>1 minute</item>
+        <item>10 minutes</item>
+        <item>1 hour (default)</item>
+        <item>unlimited</item>
+    </string-array>
+    <string name="preferences_optimizer_optimization_title_text">Optimization</string>
+    <string-array name="preferences_optimizer_optimization_entry_text_array">
+        <item>Moves, pushes</item>
+        <item>Pushes, moves (default)</item>
+        <item>Pushes only</item>
+        <item>Box lines, moves</item>
+        <item>Box lines, pushes</item>
+    </string-array>
+    <string name="preferences_optimizer_search_method_order_title_text">Optimizer search method order</string>
+    <string-array name="preferences_optimizer_search_method_order_entry_text_array">
+        <item>PRV - Permutations, rearrangements, vicinity (default)</item>
+        <item>VPR - Vicinity, permutations, rearrangements</item>
+        <item>PRVG - Permutations, rearrangements, vicinity, global</item>
+        <item>VPRG - Vicinity, permutations, rearrangements, global</item>
+    </string-array>
+    <string name="preferences_optimizer_vicinity_search_title_text">Optimizer vicinity search</string>
+    <string name="preferences_optimizer_vicinity_search_box1_enabled_title_text">Box 1</string>
+    <string name="preferences_optimizer_vicinity_search_box2_enabled_title_text">Box 2</string>
+    <string name="preferences_optimizer_vicinity_search_enabled_text">Enabled</string>
+    <string name="preferences_optimizer_vicinity_search_vicinity_squares_text">Vicinity squares</string>
+    <string name="preferences_optimizer_vicinity_search_default_text">(default: Enabled with %1$d squares)</string>
+    <string name="preferences_optimizer_vicinity_search_summary_disabled_text">Disabled</string>
+    <plurals name="preferences_optimizer_vicinity_search_summary_enabled_text">
+        <item quantity="one">Enabled, %1$d vicinity square</item>
+        <item quantity="other">Enabled, %1$d vicinity squares</item>
+    </plurals>
+</resources>
