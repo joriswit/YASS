@@ -445,12 +445,12 @@ public class YASSActivity extends Activity {
 
                 playbackSolution();
 
-                updateToolbar();
-
                 Intent resultIntent = new Intent();
                 resultIntent.putExtra("SOLUTION", result);
                 setResult(RESULT_OK, resultIntent);
             }
+            updateToolbar();
+
             mDialog.dismiss();
         }
 
