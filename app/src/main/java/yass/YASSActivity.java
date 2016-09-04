@@ -309,6 +309,11 @@ public class YASSActivity extends Activity {
                     bv.invalidate();
                 }
                 return true;
+            case R.id.action_copy_puzzle:
+                ClipboardManager clipboardBoard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+                ClipData clipBoard = ClipData.newPlainText(getString(R.string.clipboard_description), mBoard.toXSB());
+                clipboardBoard.setPrimaryClip(clipBoard);
+                return true;
             case R.id.action_copy_solution:
                 ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
                 ClipData clip = ClipData.newPlainText(getString(R.string.clipboard_description), mSolution);

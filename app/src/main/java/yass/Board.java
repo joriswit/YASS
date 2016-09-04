@@ -56,9 +56,14 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
     }
 
     public String toXSBWithoutNewline() {
+        return toXSB().replace("\n", "");
+    }
+
+    public String toXSB() {
         StringBuilder outputBuffer = new StringBuilder();
         for (String line : this) {
             outputBuffer.append(line);
+            outputBuffer.append("\n");
         }
         return outputBuffer.toString();
     }

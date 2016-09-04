@@ -13,6 +13,7 @@
     <string name="paste_solution_invalid_title_text">Not a valid solution</string>
     <string name="paste_solution_invalid_text">The solution is not a valid position for the current puzzle.</string>
     <string name="action_paste_puzzle">Paste puzzle</string>
+    <string name="action_copy_puzzle">Copy puzzle</string>
     <string name="action_copy_solution">Copy solution</string>
     <string name="clipboard_description">Solution</string>
     <string name="action_settings">Settings</string>

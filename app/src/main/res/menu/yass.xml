@@ -15,6 +15,10 @@
         android:title="@string/action_paste_puzzle"/>
 
     <item
+        android:id="@+id/action_copy_puzzle"
+        android:title="@string/action_copy_puzzle"/>
+
+    <item
         android:id="@+id/action_copy_solution"
         android:title="@string/action_copy_solution"/>
 
