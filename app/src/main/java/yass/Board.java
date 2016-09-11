@@ -84,6 +84,9 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
                 }
             }
         }
+        if (playerX == -1 || playerY == -1) {
+            return false;
+        }
         int nextPosX = playerX, nextPosY = playerY, secondPosX = playerX, secondPosY = playerY;
         switch (Character.toLowerCase(direction)) {
             case 'u':
