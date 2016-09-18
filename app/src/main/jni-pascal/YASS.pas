@@ -1,6 +1,6 @@
-﻿{
+{
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.136b June 20, 2016
+Version 2.137 - August 27, 2016
 Copyright (c) 2016 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -71,7 +71,7 @@ You should have received a copy of the GNU General Public License along with thi
   {$M 1048576,2097152}                         {stack size, minimum 1 MiB}
   {///$STACKCHECKS ON}                         {stack checks, only for debugging}
 {$ENDIF}
-      
+
 {$IFDEF FPC}
   {$MODE DELPHI} {$PACKENUM 1}                 {use this with FPC only}
   {$UNDEF DELPHI}                              {for safety}
@@ -117,6 +117,7 @@ const
   LEFT_PAREN               = '(';
   LF                       = Chr(10); CRLF = CR+LF;
   NL                       = CRLF; {newline}
+//NL                       = {$IFDEF WINDOWS} CRLF; {$ELSE} LF; {$ENDIF} {newline}
   NULL_CHAR                = Chr(0);
   PERIOD                   = '.';
   QUOTE                    = '''';
@@ -138,6 +139,9 @@ const
 
   SIXTEEN_KIBI             = 16*ONE_KIBI;
 
+  WINDOWS_FILE_NAME_PATH_DELIMITER
+                           = BACKSLASH;
+
 {Constants and type declarations required before declaring other constants and other types}
 
 type                                           {first some number types}
@@ -156,7 +160,7 @@ const
   BITS_PER_UNSIGNED_INTEGER= BITS_PER_BYTE*SizeOf(UInt);
   MAX_BOARD_WIDTH          = 50;
   MAX_BOX_COUNT            = High(UInt8);      {limited by the slot 'BoxNo' in 'TMove'; must be a 2^N-1 number where 'N' is an integer > 0, so the value can be used as a bit mask to isolate a box number or a goal number}
-  MAX_HISTORY_BOX_MOVES    = 700;              {actually, it's pushes, not moves; originally it was limited by stack-size, but the tables for the recursive search are now allocated outside the stack; each +100 pushes cost ~1 MiB extra static data area}
+  MAX_HISTORY_BOX_MOVES    = 1000;             {actually, it's pushes, not moves; originally it was limited by stack-size, but the tables for the recursive search are now allocated outside the stack; each +100 pushes cost ~1 MiB extra static data area}
   MAX_OPTIMIZER_SEARCH_DEPTH
                            = 99;               {must be < 'MAX_HISTORY_BOX_MOVES' div 4}
   MAX_ROOM_COUNT           = High(UInt8);      {maximum number of rooms on the board}
@@ -211,19 +215,23 @@ type
   {caution: if more directions are added to 'TDirection' (e.g., for the Hexoban variant), then 'TDeadlockSetFlag' must be updated accordingly}
   TDeadlockSetFlag         = (dsfControllerSet,dsfDiagonalCenterSquares,dsfFreezeSet,
                               dsfHasDisconnectedInnerFloors,
+                              dsfHasFakedFreezingSquares,
                               dsfHasOnlyListedFloors,
                               dsfHasUnspecifiedInnerFloors,
                               dsfIsADeadlock,
                               dsfIsADeadlockButTableOverflow,
+                              dsIsAGameStateDeadlockCandidate, {the deadlock-set candidate is the current game state}
                               dsfIsANoProgressDeadlockCandidate,
                               dsfIsANoProgressPattern, {a no-progress-pattern is not necessarily a deadlock}
                               dsfIsAnOverflowSet,
-                              dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence, {meaning the deadlock status cannot be deducted from the status and reachability of squares inside the fenced-in area for a corral-type deadlock}
+                              dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence, {meaning the deadlock status cannot be deduced from the status and the reachability of squares inside the fenced-in area for a corral-type deadlock}
+                              dsfPeelOffNonCorralBoxes,
                               dsfPlayerIsInsideSet,dsfPlayerMustBeOutsideSet,
+                              dsfPlayerMustBeOutsideFreezeSet,
                               dsfTestForFreezingSquare,dsfTestFrozenGoalsSet,
                               dsfUp,dsfLeft,dsfDown,dsfRight);
   TGoalSet                 = TBoxSet;
-  TLevelStatisticsFlag     = (lsfMovesImproved,lsfOptimalSolution,lsfPushesImproved,lsfSecondaryMetricsImproved);
+  TLevelStatisticsFlag     = (lsfMovesImproved,lsfOptimalSolution,lsfPushesImproved,lsfSecondaryMetricsImproved,lsfZeroPushSolution);
   TLevelStatisticsFlags    = set of TLevelStatisticsFlag;
   TMove                    = packed record BoxNo:TBoxNo; Direction:TDirection; end; {'packed': sequence of unaligned slots, without gaps}
   THashValue               = Int64;
@@ -247,6 +255,7 @@ type
                               prFailed,
                               prTimeout,
                               prTerminatedByUser);
+  TRoomNo                  = 0..MAX_ROOM_COUNT;
   TScore                   = UInt16;   {e.g., scores and pushes in a position stored in the transposition table; see 'TPosition'}
   TSearchLimits            = record    {limits controlling the currently running search; solving or optimizing a level may require multiple searches with different limits}
     DepthLimit             : Integer;  {maximum search depth}
@@ -255,7 +264,7 @@ type
                              end;
   TSearchMethod            = (smBackward,smForward,smOptimize,smPerimeter);
   TSmallBoxSet             = set of 0..MAX_SMALL_BOX_SET_COUNT-1; {game box numbers [1..n] are mapped to set box numbers [0..n-1]}
-  TSquareColor             = (scWhite,scLightGray,scDarkGray,scBlack); {order must not change; meaning in deadlock set calculation: outside square, floor, box, wall}
+  TSquareColor             = (scWhite,scLightGray,scDarkGray,scBlack); {order must not change; meaning in deadlock-set calculation: outside square, floor, box, wall}
   TTimeStamp               = UInt32;
   TVicinitySettings        = array[0..MAX_VICINITY_BOX_COUNT+1] of Integer;     {the vicinity settings are right-justified and in descending order with first and last element as zero-value sentinels}
 
@@ -271,26 +280,28 @@ const
 
   FLAG_BOX_REACHABLE_SQUARE= 32;               {flags used for each square}
   FLAG_BOX_START_SQUARE    = 64;
-  FLAG_GATE_SQUARE         = 128;
-  FLAG_ILLEGAL_BOX_SQUARE  = 256;
-  FLAG_NOT_SELECTED_SQUARE = 512;
-  FLAG_SQUARE_SET          = 1024;
-  FLAG_TUNNEL_UP           = 2048;
-  FLAG_TUNNEL_LEFT         = 4096;
-  FLAG_TUNNEL_DOWN         = 8192;
-  FLAG_TUNNEL_RIGHT        = 16384;
-  FLAG_VISITED_SQUARE      = 32768;
-  BOARD_SQUARE_FLAGS       = FLAG_BOX_REACHABLE_SQUARE+FLAG_BOX_START_SQUARE+FLAG_GATE_SQUARE+FLAG_ILLEGAL_BOX_SQUARE+
+  FLAG_DOOR_SQUARE         = 128;              {a floor with neighboring floors on both sides along one axis; all other neighbor squares are walls}
+  FLAG_GATE_SQUARE         = 256;              {a floor with neighboring floors on both sides along at least one axis; splits the board in separate rooms}
+  FLAG_ILLEGAL_BOX_SQUARE  = 512;
+  FLAG_NOT_SELECTED_SQUARE = 1024;
+  FLAG_SQUARE_SET          = 2048;
+  FLAG_TUNNEL_UP           = 4096;
+  FLAG_TUNNEL_LEFT         = 8192;
+  FLAG_TUNNEL_DOWN         = 16384;
+  FLAG_TUNNEL_RIGHT        = 32768;
+  FLAG_VISITED_SQUARE      = 65536;
+//FLAG_WALL_GATE_SQUARE    = 131072;
+  BOARD_SQUARE_FLAGS       = FLAG_BOX_REACHABLE_SQUARE+FLAG_BOX_START_SQUARE+FLAG_DOOR_SQUARE+FLAG_GATE_SQUARE+FLAG_ILLEGAL_BOX_SQUARE+
                              FLAG_NOT_SELECTED_SQUARE+FLAG_SQUARE_SET+
                              FLAG_TUNNEL_UP+FLAG_TUNNEL_LEFT+FLAG_TUNNEL_DOWN+FLAG_TUNNEL_RIGHT+
-                             FLAG_VISITED_SQUARE;
+                             FLAG_VISITED_SQUARE; //+FLAG_WALL_GATE_SQUARE;
 
-  CH_BOX                   = 'b'; CH_BOX_ON_GOAL           = 'B'; {all board characters and move characters must be 7-bit ASCII characters}
-  CH_BOX_XSB               = '$'; CH_BOX_ON_GOAL_XSB       = '*';
+  CH_BOX                   = 'b';   CH_BOX_ON_GOAL           = 'B'; {all board characters and move characters must be 7-bit ASCII characters}
+  CH_BOX_XSB               = '$';   CH_BOX_ON_GOAL_XSB       = '*';
   CH_GOAL                  = '.';
-  CH_FLOOR                 = SPACE;
-  CH_PLAYER                = 'p'; CH_PLAYER_ON_GOAL        = 'P';
-  CH_PLAYER_XSB            = '@'; CH_PLAYER_ON_GOAL_XSB    = '+';
+  CH_FLOOR                 = SPACE; CH_NON_BLANK_FLOOR       = '-';
+  CH_PLAYER                = 'p';   CH_PLAYER_ON_GOAL        = 'P';
+  CH_PLAYER_XSB            = '@';   CH_PLAYER_ON_GOAL_XSB    = '+';
   CH_SQUARE_SET            = '%';
   CH_WALL                  = '#';
 
@@ -310,9 +321,11 @@ const
   DEFAULT_DEADLOCK_SETS_BOX_LIMIT_FOR_PRECALCULATED_SETS
                            = 8;                          {limits the search for expanded deadlock-sets}
   DEFAULT_DEADLOCK_SETS_BOX_LIMIT_FOR_DYNAMIC_SETS
-                           = 16;                         {box limit for dynamically calculated deadlock sets during the search (solver only)}
+                           = 16;                         {box limit for dynamically calculated deadlock-sets during the search (solver only)}
   DEFAULT_LOG_FILE_ENABLED = False;
   DEFAULT_MEMORY_BYTE_SIZE = 64*ONE_MEBI;                {64 MiB}
+  DEFAULT_OPEN_LIST_ESCAPE_INTERVAL
+                           = 7;                          {must be a 2^N-1 integer, where N is a positive integer}
   DEFAULT_PUSH_COUNT_LIMIT : Int64 = High(Int64);        {number of pushes to generate before giving up; high-value of a 64-bit integer amounts to 'unlimited'; if the value is lowered, then the text in 'ShowHelp()' must change accordingly}
   DEFAULT_MOVE_STEP_INCREMENT
                            = 5;
@@ -336,7 +349,7 @@ const
                            = 10 {minutes} * 60 {seconds} * 1000 {milliseconds};
   DEFAULT_STOP_WHEN_SOLVED = True;                       {'True': stop when a solution has been found, i.e., don't search for shorter solutions}
   DEFAULT_VICINITY_SETTINGS: TVicinitySettings = (0,0,0,20,10,0); {the vicinity settings are right-justified and in descending order with first and last element as zero-value sentinels}
-  DIRECTION_BIT_COUNT      = 3;                          {caution: must cover the number of directions}
+  DIRECTION_BIT_COUNT      = 2;                          {caution: must cover the number of directions}
   DIRECTION_BIT_MASK       = (1 shl DIRECTION_BIT_COUNT)-1;
   DIRECTION_COUNT          = Succ(Ord(High(TDirection))-Ord(Low(TDirection))); {number of directions}
   DIRECTION_TO_AXIS        : array[TDirection] of TAxis
@@ -355,11 +368,26 @@ const
   EMPTY_GOAL_PENALTY       = 32;               {penalty per unfilled target square (goal or parking space) during a packing order search; preferably a 2^n number for fast multiplications}
   FLAG_POSITION_BASE       = 1;
   FLAG_POSITION_VISITED    = 2;
+  FROZEN_GOALS_PATTERN_THRESHOLD
+                           = 2;
   GAME_LINE_LENGTH         = 70;               {print line length for games, i.e., solutions and snapshots}
   GOAL_BIT_SHIFT_COUNT     = 24;               {each square on the board contains its goal number or packing order set number, if any, in the upper bits}
   GRAPH_FILE_EXT           = '.tmp';           {the nodes from the backward search are temporarilty saved to a disk file when the solver performs a perimeter search, i.e., a backward search followed by a forward search}
   INFINITY                 = (MaxInt div 2)-1; {(-INFINITY), (2*INFINITY), and (2*(-INFINITY)) must be legal integer values}
+  INITIAL_PARKING_POSITION_COUNT_LIMIT         {the point at which to abandon the initial parking operations calculated by the packing order, if the search so far has been unsuccessful}
+                           = 5*ONE_MILLION;
+  LAZY_BOX_BOX_COUNT_PERCENTILE
+                           = 20;               {the boxes with the fewest pushes since the last progress checkpoint get a bonus for being pushed during the next checkpoint interval}
+  LAZY_BOX_DEFAULT_PUSH_BONUS
+                           = 2;                {a push costs 1 unit, and moving a box 1 square away from a target square also costs 1 unit; giving a bonus of 2 units nullifies these costs}
+  LAZY_BOX_MAXIMUM_PUSH_BONUS
+                           = 2;
+  LAZY_BOX_PUSH_COUNT_PERCENTILE               {the boxes with the fewest pushes since the last progress checkpoint get a bonus for being pushed during the next checkpoint interval}
+                           = 1;                {1% doesn't sound like much, but it seems to be a reasonable choice; it covers all 0-push boxes as well as boxes with only a few pushes since the last progress checkpoint}
+
   LOG_FILE_EXT             = '.log';
+  MIN_OPEN_LIST_ESCAPE_INTERVAL
+                           = 7;
   MAX_BACKWARD_SEARCH_POSITIONS                {saving the entire game graph to disk can be a time-consuming task; in order to reserve time for a subsequent forward search, the backward search doesn't necessarily use all the available memory}
                            = High(Integer);    {'High': unlimited, i.e., use all the available memory, also for the backward search}
   MAX_BOARD_HEIGHT         = MAX_BOARD_WIDTH;
@@ -369,13 +397,13 @@ const
   MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND
                            = 100;              {with more boxes it may take a long time to calculate a lower bound}
   MAX_DEADLOCK_SEARCH_DEPTH
-                           = 50;               {maximum search depth for the deadlock search which tries to prove that a given game state is a deadlock}
+                           = 24;               {maximum search depth for the deadlock search which tries to prove that a given board constellation is a deadlock; must be less than high(byte); must be small because of exponential growth}
   MAX_DEADLOCK_SET_CANDIDATE_PUSH_COUNT
-                           = 100*ONE_THOUSAND; {arbitrary limit but the hope is to ensure a reasonable bound on the running time}
-  MAX_DEADLOCK_SETS        = 16*ONE_KIBI;      {must be <= High( Int16 ); typically, there aren't more than 500-600 precalculated deadlock sets, and with more sets the performance begins to suffer}
+                           = 100*ONE_THOUSAND; {arbitrary limit but the hope is to ensure a reasonable upper bound on the running time}
+  MAX_DEADLOCK_SETS        = 16*ONE_KIBI;      {must be <= High( Int16 ); typically, there aren't more than 1000 precalculated deadlock-sets, and with more sets the performance begins to suffer}
   MAX_DEADLOCK_SETS_PER_SQUARE
-                           = MAX_DEADLOCK_SETS;{arbitrary maximum number of deadlock set numbers per square; it must be bigger than 'MIN_DEADLOCK_SETS_PER_SQUARE'}
-  MAX_DEADLOCK_SETS_SQUARES_OUTSIDE_FENCE      {'outside-fence' squares are only saved for some of the deadlock sets}
+                           = MAX_DEADLOCK_SETS;{arbitrary maximum number of deadlock-set numbers per square; it must be bigger than 'MIN_DEADLOCK_SETS_PER_SQUARE'}
+  MAX_DEADLOCK_SETS_SQUARES_OUTSIDE_FENCE      {'outside-fence' squares are only saved for some of the deadlock-sets}
                            = 8*ONE_KIBI;
   MAX_DEADLOCK_SETS_SEARCH_TIME_MS
                            = 5 * 60 * ONE_THOUSAND; {arbitrary limit but should provide a reasonable bound on the running time}
@@ -390,8 +418,8 @@ const
                            = 1;                {the optimizer performs this number of successful global-optimization searches before it changes optimization method}
   MAX_PACKING_ORDER_CALCULATION_TIME_MS        {maximum time for precalculation of a packing order; a somewhat arbitrary limit, but the precalculation should not take up too large a fraction of the total running time}
                            = 90 {seconds} * ONE_THOUSAND; {milliseconds}
-  MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS         {maximum park-box attempts for the packing order calculation; the number should be small enough to guarantee a reasonably small running time upper bound}
-                           =400*ONE_KIBI;
+  MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS        {maximum park-box attempts for the packing order calculation; the number should be small enough to guarantee a reasonably small running time upper bound}
+                           = 500*ONE_KIBI;
   MAX_SEARCH_TIME_LIMIT_MS = High(Integer)-1001; {'-1001': high-values are reserved for meaning 'unlimited'}
   MAX_SINGLE_STEP_MOVES    = MAX_BOARD_WIDTH*MAX_BOARD_HEIGHT+DIRECTION_COUNT*MAX_BOX_COUNT;
   MAX_TRANSPOSITION_TABLE_BYTE_SIZE            {limit the transposition table byte size to a signed integer and leave some memory free for other purposes}
@@ -400,13 +428,13 @@ const
                            {$IFDEF PLUGIN_MODULE}
                              (MaxInt div 10) * 9; {only use 90% of the total memory address space; the host program might run other memory-consuming tasks in parallel with the plug-in}
                            {$ELSE}
-                             MaxInt - 16*ONE_MEBI;
+                             MaxInt - 32*ONE_MEBI;
                            {$ENDIF}
   MAX_VICINITY_SQUARES     = {MAX_BOARD_WIDTH*MAX_BOARD_HEIGHT} 999; {the only reason for the 999-limit is that it allows a settings window to operate with 3-digits only for the spin-edit controls}
-  MIN_BOX_LIMIT_FOR_DYNAMIC_DEADLOCK_SETS      {calculating and storing dynamic deadlock sets are time-consuming operations; the minimum box limit must be reasonably small}
+  MIN_BOX_LIMIT_FOR_DYNAMIC_DEADLOCK_SETS      {calculating and storing dynamic deadlock-sets are time-consuming operations; the minimum box limit must be reasonably small}
                            = 6;
   MIN_DEADLOCK_SETS_PER_SQUARE
-                           = 255;              {arbitrary minimum number of elements in a vector with deadlock set numbers, but it should at least provide room for closed edges}
+                           = 255;              {arbitrary minimum number of elements in a vector with deadlock-set numbers, but it should at least provide room for closed edges}
   MIN_NO_PROGRESS_DEADLOCK_SET_CANDIDATE_BOX_COUNT
                            = 3;                {threshold for checking whether not-pushed boxes should be checked for being deadlocked}
   MIN_SEARCH_TIME_FOR_EACH_SEARCH_METHOD_MS    {if there is less search time left, then special rules apply regarding which solver methods to use; for instance, one of the methods may get all the running time instead of giving all methods a try}
@@ -445,8 +473,8 @@ const
   PLAYER_POSITION_MASK     = PLAYER_POSITION_MOVE_AXIS-1;
 
   PLAYERS_REACHABLE_SQUARES_TIMESTAMP_UPPER_BOUND                   {timestamp upper bound; timestamps wrap around when the upper bound is reached; at that time the individual squares are reset to '0' for floors and 'high-value' for wall squares}
-                           = High(TTimeStamp)-2*5*MAX_BOARD_SIZE;   {'*5': must be >= '*5' to ensure that 'CalculatePlayersDistanceToReachableSquares' works correctly}
-                                                                    {'*2': so 'CalculatePlayersReachableSquares' and 'CalculateCorralSquares' starting with cleared timestamps can visit all player access areas without timestamp wrap around}
+                           = High(TTimeStamp)-(2*5*MAX_BOARD_SIZE); {'*5': must be >= '*5' = '*(1+number of directions)' to ensure that 'CalculatePlayersDistanceToReachableSquares' works correctly}
+                                                                    {'*2': so 'CalculatePlayersReachableSquares' and 'CalculateCorralSquares' starting with cleared timestamps can visit all player access areas without a timestamp wrap around}
 
   POSITION_BEST_PATH_TAG   : UInt8 = 1 shl (DIRECTION_BIT_COUNT);   {flag-bit in 'TPosition.Move.Direction'; optimizer only}
   POSITION_DEADLOCK_TAG    : UInt8 = 1 shl (DIRECTION_BIT_COUNT+4); {flag-bit in 'TPosition.Move.Direction'; solver only; the value must be '1 shl (DIRECTION_BIT_COUNT+4)'}
@@ -457,6 +485,8 @@ const
   POSITION_OPEN_TAG        : UInt8 = 1 shl (DIRECTION_BIT_COUNT+1); {flag-bit in 'TPosition.Move.Direction'}
   POSITION_PACKING_ORDER_TAG
                            : UInt8 = 1 shl (DIRECTION_BIT_COUNT);   {flag-bit in 'TPosition.Move.Direction'; solver only; the value must be '1 shl DIRECTION_BIT_COUNT', e.g., see 'DoPush()' and 'UndoPush()'}
+  POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG
+                           : UInt8 = 1 shl (DIRECTION_BIT_COUNT+5); {flag-bit in 'TPosition.Move.Direction'; solver only}
   POSITION_PATH_TAG        : UInt8 = 1 shl (DIRECTION_BIT_COUNT+2); {flag-bit in 'TPosition.Move.Direction'}
   POSITION_REVISIT_TAG     : UInt8 = 1 shl (DIRECTION_BIT_COUNT+3); {flag-bit in 'TPosition.Move.Direction'; solver only}
   POSITION_TARGET_TAG      : UInt8 = 1 shl (DIRECTION_BIT_COUNT+4); {flag-bit in 'TPosition.Move.Direction'; optimizer only}
@@ -478,24 +508,25 @@ const
     {of the game graph, hence, the threshold can be as low as '2'; otherwise,   }
     {the threshold  - because of the incompleteness - should be so high that    }
     {room pruning only is triggered for large levels, where an exhaustive search}
-    {probably is out of reach anyway; '16' may be a good threshold in that case;}
-                           = 2;
-  SEARCH_STATE_INDEX_CORRAL_PRUNING                   {the corral pruning needs to calculate the player's reachable squares inside each "pocket" or "room" on the board made by the boxes}
-                           = MAX_HISTORY_BOX_MOVES+4; {must be the highest index in the 'TSolver.SearchStates' vector because it's used in the vector declaration; see also 'SEARCH_STATE_INDEX_DO_PUSH'}
+    {probably is out of reach anyway; '32' may be a good threshold in that case;}
+                           = {2;} 64;                                           {64: in effect disabling room pruning for practically all levels which are so small that the solver can handle them}
+  SEARCH_STATE_INDEX_CORRAL_PRUNING                                             {the corral pruning needs to calculate the player's reachable squares inside each "room" on the board made by the boxes}
+                           = MAX_HISTORY_BOX_MOVES+4;                           {must be the highest index in the 'TSolver.SearchStates' vector because it's used in the vector declaration; see also 'SEARCH_STATE_INDEX_DO_PUSH'}
   SEARCH_STATE_INDEX_DO_PUSH
-                           = MAX_HISTORY_BOX_MOVES+3; {private 'TSolver.SearchStates' vector member for 'DoPush()' and 'IsALegalPush()'; see also 'SEARCH_STATE_INDEX_CORRAL_PRUNING'}
+                           = MAX_HISTORY_BOX_MOVES+3;                           {private 'TSolver.SearchStates' vector member for 'DoPush()' and 'IsALegalPush()'; see also 'SEARCH_STATE_INDEX_CORRAL_PRUNING'}
   SEARCH_STATE_INDEX_SCRATCHPAD_1
-                           = MAX_HISTORY_BOX_MOVES+2; {'TSolver.SearchStates' vector member scratchpad 1}
-  SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_CHECKING_DEADLOCK_CANDIDATE_SEARCH
-                           = MAX_HISTORY_BOX_MOVES+1; {'TSolver.SearchStates' vector member scratchpad 1}
+                           = MAX_HISTORY_BOX_MOVES+2;                           {'TSolver.SearchStates' vector member scratchpad 1}
+  SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH
+                           = MAX_HISTORY_BOX_MOVES+1;                           {private 'TSolver.SearchStates' vector member for 'CalculateDeadlockSets.CommitDeadlockSet.CheckDeadlockSetCandidate.Check()'}
 
   SOKOBAN_PLUGIN_STATUS_TEXT_BUFFER_SIZE
-                           = 256; {must match the Sokoban plugin specification; includes null-character terminator}
+                           = 256;                                               {must match the Sokoban plugin specification; includes a null-character terminator}
   SOKOBAN_FILE_EXT         = '.sok';
   SOKOBAN_PLUGIN_CALL_BACK_FUNCTION_THRESHOLD_TIME_MS
-                           = 3 {seconds} * 1000 {milli seconds};
-  SOLVER_PROGRESS_CHECK_POINT_INTERVAL
-                           = 10*ONE_THOUSAND; {check for progress each time this number of positions have been expanded}
+                           = 3 {seconds} * 1000                                 {milli seconds};
+  SOLVER_PROGRESS_CHECKPOINT_INTERVAL
+                           = 10*ONE_THOUSAND;                                   {check for progress each time this number of positions have been expanded}
+
   TT_AVERAGE_BUCKET_SIZE   = 16; {transposition table: on average, each lookup visits half the number of items in a bucket}
 
 {Texts}
@@ -506,7 +537,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.136a';
+                           = '2.137';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -597,11 +628,13 @@ const
 {Types}
 
 type
-  TBoard                   = array[0..MAX_BOARD_SIZE]   of UInt;
+  TBoardSquareValue        = UInt; {the contents of a board square, as opposed to a square index}
+  TBoard                   = array[0..MAX_BOARD_SIZE]   of TBoardSquareValue;
   TBoardAsTextLines        = array[0..MAX_BOARD_HEIGHT] of String[255]; //String[MAX_BOARD_WIDTH];
   TBoardOfBooleans         = array[0..MAX_BOARD_SIZE]   of Boolean;
   TBoardOfBoxSets          = array[0..MAX_BOARD_SIZE]   of TBoxSet;
   TBoardOfBytes            = array[0..MAX_BOARD_SIZE]   of UInt8;
+  TBoardOfDirections       = array[0..MAX_BOARD_SIZE]   of TDirection;
   TBoardOfDirectionSets    = array[0..MAX_BOARD_SIZE]   of TDirectionSet;
   TBoardOfGoalSets         = array[0..MAX_BOARD_SIZE]   of TGoalSet;
   TBoardOfIntegers         = array[0..MAX_BOARD_SIZE]   of Integer;
@@ -617,11 +650,13 @@ type
     TimeStamp              : TTimeStamp;
                              end;
   TBoxArrayOfIntegers      = array[TBoxNo] of Integer;
+  TBoxArrayOfUnsignedIntegers
+                           = array[TBoxNo] of Cardinal;
   TBoxGoalSets             = array[TBoxNo] of TBoxSetWithCount; {for each box/goal, a set of box/goal numbers, e.g., for a mapping from goal numbers to pull-reachable box starting positions for each goal}
   TBoxNumbers              = array[TBoxNo] of TBoxNo;
   TBoxSquare               = Integer; {must be a signed integer-type value so negated values can indicate a flag value for the square}
   PBoxSquare               = ^TBoxSquare;
-  TBoxSquare2              = UInt16; {for compact box square vectors, e.g., TCorralPositions.BoxSquare'}
+  TBoxSquare2              = Int16; {for compact box square vectors, e.g., TCorralPositions.BoxSquare'}
   PBoxSquare2              = ^TBoxSquare2;
   TBoxSquares2             = array[TBoxNo] of TBoxSquare2;
   TBoxSquares              = array[TBoxNo] of TBoxSquare;
@@ -638,27 +673,36 @@ type
     Count                  : Integer;
     Squares                : TBoxSquares;
                              end;
+  TBoxSquareValues         = array[TBoxNo] of TBoardSquareValue; {board square values for the boxes, as opposed to box square indices}
+  TGoalSquareValues        = TBoxSquareValues;
+  TSquareDirectionArrayOfInteger
+                           = array[0..MAX_BOARD_SIZE,TDirection] of Integer;
   TColRow                  = packed record Col,Row: UInt8; end;
-
+  TNeighborSquareSet       = record
+    Count                  : Integer;
+    Squares                : array[0..DIRECTION_COUNT] of Integer; {element 0 not used}
+    end;
   TDeadlockSearchHistoryGameState
                            = record
     BoxNo                  : TBoxNo; {last pushed box leading to this position}
     BoxPos                 : TBoxSquares2;
     HashValue              : THashValue;
     PlayerPos              : Integer; {normalized player position}
+    TableItemBoxesOnBoardCount
+                           : Integer;
   end;
   TDeadlockSearchHistory   = array[0..MAX_DEADLOCK_SEARCH_DEPTH]
                              of TDeadlockSearchHistoryGameState;
   TDeadlockSearchTranspositionTable
   {the number of items in the deadlock search transposition table must
-   match "highest index + 1" and must be a 2^N number, where N is a
+   match "highest index + 1" and it must be a 2^N number, where N is a
    non-negative integer; the size must be small because each game state produced
    during the search is matched against each item in the transposition table}
                            = array[ 0 .. 127 ] of TDeadlockSearchHistoryGameState;
   TDeadlockSetCapacities   = array[0..MAX_DEADLOCK_SETS] of Integer;
   TDeadlockSetFlagsSet     = set of TDeadlockSetFlag;
   TDeadlockSetCandidate    = record
-    Boxes                  : TBoardSquareSet;
+    Boxes                  : TBoardSquareSet;                           {the numbers of the squares containing boxes}
     Capacity               : Integer;
     CenterSquare           : Integer;
     EscapedBoxesCountDown  : Integer;
@@ -671,11 +715,11 @@ type
     SquareOutsideFence     : Integer;                                   {for a fence-type (corral-type) deadlock, a square which is known to be outside the fence}
     SquaresOutsideFence    : TBoardSquareSet;                           {more squares known to be outside the fence}
                              end;
-  TDeadlockSetNo           = UInt16;                                    {a deadlock set number}
-  TDeadlockSetNumbers      = array [ 0 .. ( MaxInt div SizeOf( TDeadlockSetNo ) ) - 1 ] of TDeadlockSetNo; {vector with deadlock set numbers}
+  TDeadlockSetNo           = UInt16;                                    {a deadlock-set number}
+  TDeadlockSetNumbers      = array [ 0 .. ( MaxInt div SizeOf( TDeadlockSetNo ) ) - 1 ] of TDeadlockSetNo; {vector with deadlock-set numbers}
   PDeadlockSetNumbers      = ^TDeadlockSetNumbers;
   TSquareDeadlockSetNumbers
-                           = array[0..MAX_BOARD_SIZE] of PDeadlockSetNumbers; {for each square, the deadlock set numbers it's a part of}
+                           = array[0..MAX_BOARD_SIZE] of PDeadlockSetNumbers; {for each square, the deadlock-set numbers it's a part of}
   TDeadlockSets            = record
     AdjacentOpenSquaresLimit                                            {limits the search for expanded deadlock-sets}
                            : Integer;
@@ -694,21 +738,22 @@ type
     FloorCount             : array[0..MAX_DEADLOCK_SETS] of Int16;
     HashKey                : array[0..MAX_DEADLOCK_SETS] of THashValue;
     History                : TDeadlockSearchHistory;                    {contains all pushes along the current path in the depth-first deadlock search which tries to prove that a game state is a deadlock; allocated globally to reduce runtime stack size}
-    SequenceNo             : Integer;                                   {sequential deadlock set numbers for printing; internal numbers differ from sequence numbers when redundant deadlocks are pruned}
-    LevelTotalPushCount    : Integer;                                   {total number of generated pushes for all tested candidates for current level}
-    NewDynamicDeadlockSets : Boolean;                                   {'True': the solver main loop must backtrack to the start position so new deadlocks are considered when a position is selected for expansion}
     IsALegalPushOverflowingSetsCount                                    {global result value for 'IsALegalPush'}
                            : Integer;
     IsALegalPushOverflowingSets                                         {global result value for 'IsALegalPush'}
                            : array[0..MAX_DEADLOCK_SETS] of Integer;
+    LevelTotalPushCount    : Integer;                                   {total number of generated pushes for all tested candidates for current level}
+    NewDynamicDeadlockSets : Boolean;                                   {'True': the solver main loop must backtrack to the start position so new deadlocks are considered when a position is selected for expansion}
+    NoProgressDeadlockCheckTimeMS                                       {time spent on checking for deadlocks at the "no progress" checkpoints}
+                           : TTimeMS;
+    OverflowSetsCount      : Integer;
     PrecalculatedSetsCount : Integer;                                   {number of precalculated deadlock-sets, as opposed to the dynamic deadlock-sets}
-    PrecalculatedSquareSetNumbers                                       {for each square, the precalculated deadlock-sets it's a part of}
-                           : TSquareDeadlockSetNumbers;
     RedundantSetsCount     : Integer;                                   {newcoming sets may make previously found sets redundant}
-    SequenceNumbers        : array[0..MAX_DEADLOCK_SETS] of Integer;    {deadlock-sets are sequentially numbered in the log-file, but redundant sets are pruned, hence, 'Index' and 'SequenceNo' may defer}
-    SessionDeadlockSetsCount                                            {total number of deadlock sets for all processed levels}
+    SequenceNo             : Integer;                                   {sequential deadlock-set numbers for printing; internal numbers differ from sequence numbers when redundant deadlocks are pruned}
+    SequenceNumbers        : array[0..MAX_DEADLOCK_SETS] of Integer;    {deadlock-sets are sequentially numbered in the log-file, but redundant sets are pruned, hence, 'Index' and 'SequenceNumbers' may defer}
+    SessionDeadlockSetsCount                                            {total number of deadlock-sets for all processed levels}
                            : Integer;
-    SessionDeadlockSetsTableOverflowCount                               {total number of deadlock sets not saved because of table overflows for all processed levels}
+    SessionDeadlockSetsTableOverflowCount                               {total number of deadlock-sets not saved because of table overflows for all processed levels}
                            : Integer;
     SessionPlayerMustBeOutsideSetCount
                            : Integer;
@@ -718,29 +763,33 @@ type
     SquareSetCount         : array[0..MAX_BOARD_SIZE]    of Integer;    {for each square, the number of deadlock-sets it's a part of}
     SquareSetNumbers       : TSquareDeadlockSetNumbers;                 {for each square, the deadlock-sets it's a part of}
     SquareOutsideFence     : array[0..MAX_DEADLOCK_SETS] of TBoxSquare2;{for single-room corral-type deadlocks, the most recent player position that has been proved to be outside the fence}
-    SquaresOutsideFence    : array[0..MAX_DEADLOCK_SETS_SQUARES_OUTSIDE_FENCE] of TBoxSquare2; {'outside-fence' squares are only saved for some deadlock sets}
+    SquaresOutsideFence    : array[0..MAX_DEADLOCK_SETS_SQUARES_OUTSIDE_FENCE] of TBoxSquare2; {'outside-fence' squares are only saved for some deadlock-sets}
     SquaresOutsideFenceIndex
                            : array[0..MAX_DEADLOCK_SETS] of Int16;      {index into the 'SquaresOutsideFence' vector; the indexed cell contains the square count, and the actual squares follow in the cells 'index+1' .. 'index+n'}
     SquaresOutsideFenceTop : Integer;                                   {the last used item in 'SquaresOutsideFence', i.e., the next free index is 'SquaresOutsideFenceTop' + 1}
     Statistics             : array[0..MAX_DEADLOCK_SETS] of Cardinal;   {number of times each deadlock has been triggered}
+    TestedCandidatesCount  : Integer;
     TimeLimitMS            : TTimeMS;
     TimeMS                 : TTimeMS;
     {the small transposition table defined here contains selected game states during the depth-first deadlock search which tries to prove that a game state is a deadlock; it's allocated globally to reduce runtime stack size}
     TranspositionTable     : TDeadlockSearchTranspositionTable;
+    UnderflowSetsCount     : Integer;
                              end;
   TRoomSquare              = record
-     RoomNo                : Integer; {the number of the room to which this square belongs, if any}
+     RoomNo                : TRoomNo; {the number of the room to which this square belongs, if any}
      StraightLineEntryPointDistances
                            : array[TDirection] of Byte; {for each line emanating from the square, the distance to the nearest square outside the room in that direction, if any}
                              end;
   TRooms                   = record
     Count                  : Integer;
-//  RoomBoxCount           : array[0..MAX_ROOM_COUNT] of UInt8; {number of boxes in each room for the current game state; not in production}
+//  RoomBoxCount           : array[TRoomNo] of UInt8; {number of boxes in each room for the current game state; not in production}
     Squares                : array[0..MAX_BOARD_SIZE] of TRoomSquare;
                              end;
   TGame                    = record
     Board                  : TBoard; {current game state; 'Board' = 'BoxPos' + 'PlayerPos'}
     BoardHeight            : Integer;
+    BoxReachableSquaresCount {number of squares on the board which at least one of the boxes can reach}
+                           : Integer;
     BoardSize              : Integer; {(Width+2)*(Height*2): the extra 2 is for a wall-filled border}
     BoardWidth             : Integer;
     BoxCount               : Integer;
@@ -749,7 +798,7 @@ type
     DistanceToNearestGoal  : TBoardOfIntegers;
     DistanceToNearestBoxStartPosition
                            : TBoardOfIntegers;
-    EndPlayerPos           : Integer; {player's end position in the original snapshot/solution}                           
+    EndPlayerPos           : Integer; {player's end position in the original snapshot/solution}
     FloorCount             : Integer; {number of floor squares on the board}
     FreezeTestTimeStamps   : TBoardTimeStamps; {timestamps for visited squares/axis during a freeze-test}
     GoalCount              : Integer;
@@ -766,13 +815,13 @@ type
                            : Integer;
     OriginalSolutionPushCount
                            : Integer;
-    PackingOrderPushCount  : Integer; {number of pushes on current path that stem from packing-order search}
+    PackingOrderPushCount  : Integer; {number of pushes on current path which stem from packing-order search}
     PlayerPos              : Integer; {current game state; 'Board' = 'BoxPos' + 'PlayerPos'}
     ReverseMode            : Boolean;
     Rooms                  : TRooms;
     ShowDeadlockSetsEnabled: Boolean;
     SimpleLowerBound       : Integer;
-    StartBoxPos            : TBoxSquares; {box starting position after board normalization by 'FillTubes'}
+    StartBoxPos            : TBoxSquares; {box starting positions after board normalization by 'FillTubes'}
     StartPlayerPos         : Integer; {player's starting position after board normalization by 'FillTubes'}
     SolutionPathHashValues : array[0..MAX_HISTORY_BOX_MOVES+1] of THashValue;
     SortedBoxSquares       : TBoxArrayOfIntegers;
@@ -796,6 +845,8 @@ type
     FileName               : String;
     GraphFile              : file of Byte;
                              end;
+  THashValueVector         = array[ 0 .. ( MaxInt div SizeOf( THashValue ) ) - 1 ] of THashValue;
+  PHashValueVector         = ^THashValueVector;
   TLegend                  = record
     CharToItem             : array[Low(Char)..High(Char)] of UInt8;
     XSBNotation            : Boolean;
@@ -881,20 +932,28 @@ type
                              end;
   TSquareGoalDistance      = array[0..MAX_BOARD_SIZE,TBoxNo] of UInt8; {'UInt8': otherwise the table gets unreasonable large; distances above are truncated to 254, and '255' is reserved for meaning 'INFINITY', i.e., no path to the square}
   TPackingOrder            = record
-    BoxCountThreshold      : Integer;  {threshold for trying to use a packing-order to solve the level}
+    BoxCountThreshold      : Integer;  {threshold for trying to use a packing-order for solving the level}
     DistancesBasedOnPackingOrder       {when non-zero, square->goal distances taking the packing order into account have been calculated and are available in the table at index 'normal goal number' + 'DistancesBasedOnPackingOrder' for each of the goals}
                            : Integer;
     Enabled                : Boolean;  {packing-order enabled/disabled}
     FirstSetMemberIndex    : array[0..MAX_BOX_COUNT+1] of Integer; {index of first goal member in 'SetMembers' for each set number, i.e., for each phase}
     GoalBoxSets            : TBoxGoalSets; {for each goal, the set of reachable box starting positions from the goal}
-    GoalSetNo              : array[TBoxNo] of TBoxNo; {mapping each goal number to its packing order set number, i.e., its phase}
+    GoalSetNo              : TBoxNumbers; {mapping each goal number to its packing order set number, i.e., its phase}
     GoalAndParkingSquareCount {total number of goals and parking squares; during packing order search, a box may be parked somewhere on the board before the box is brought to its final goal square}
+                           : Integer;
+    LastPhaseWithABoxParkedInASmallArea {the last (lowest) game phase where a box is parked because a goal square must be filled with a box coming from a relatively small area of the board}
                            : Integer;
     NextGoalAtSameSquare   : TBoxNumbers; {circular linked lists for goals/parking places sharing the same square; a square can at the same time be a real goal square and used as parking space one or more times}
     ParkedBoxDestinationGoalSetNo
                            : TBoxNumbers; {for each parked box, the set number of the goal the parked box came from; a parked box should preferably stay at its parking square until it's time to fill the goal the parked box originally came from}
     SetCount               : Integer;  {number of packing-order goal-sets, i.e., game phases when the packing order is used by the search for a solution}
     SetMembers             : TBoxNumbers; {goal sets, e.g., sets A,B, and C with 2,3, and 2 members look like: [0,a1,a2,b1,b2,b3,c1,c2] (vector element 0 is unused); the corresponding 'FirstSetMemberIndex' vector is: [0,1,3,6,8]; '8' is a sentinel}
+(*
+    SquareDirectionTimestamp
+                           : Integer; {for path calculations while trying to push boxes to goals and parking spaces}
+    SquareDirectionTimestamps
+                           : TSquareDirectionArrayOfInteger; {for path calculations while trying to push boxes to goals and parking spaces}
+*)
     SquareGoalDistance     : TSquareGoalDistance; {distances from each square to each goal or parking square}
     TimeMS                 : TTimeMS;  {precalculation time, milli seconds}
                              end;
@@ -919,7 +978,7 @@ type
 {   TimeStamp              : TPositionTimeStamp;} {slot removed in order to save space; high-value marks locked positions, e.g., nodes on current path}
     case TPositionType of                   {node-type dependent information for open nodes, closed nodes, and perimeter nodes}
       ptNull:
-        (GameState         : Uint32;        {the optimizer method 'vicinity search' stores the game-state for each position on the best path; the game-state is a [box-configuration-index, player-square] tuple}
+        (GameState         : Uint32;        {the optimizer method 'vicinity search' stores the game state for each position on the best path; the game state is a [box-configuration-index, player-square] tuple}
          Unused3           : Integer;
          PackingOrderAndSuccessorCount      {must cover 'PackingOrder' and 'SuccessorCount'}
                            : Integer);
@@ -958,7 +1017,7 @@ type
     HighValueItemCount     : Cardinal;      {number of positions with the highest possible score (used for a special list by the optimizer)}
     MaxValue               : Integer;       {highest stored score}
     MinValue               : Integer;       {lowest  stored score}
-    NoProgressRover        : Integer;       {once in a while choose a game state from this bucket for expansion, instead of taking a game state with the minimum score}
+    NoProgressRover        : Integer;       {sometimes choose a game state from this bucket for expansion, instead of taking a game state with the minimum score}
     SortCount              : Cardinal;
     WorstRover             : PPosition;
     WorstUnprotectedPosition
@@ -1003,18 +1062,22 @@ type
     Count                  : Cardinal;   {number of game positions stored in the transposition table}
     CorralBoxSquares       : TBoxSquaresMemoryBlock; {box squares belonging to the corrals stored in the transposition table together with the normal game positions}
     CurrentPosition        : PPosition;  {current position during the search, i.e., the game board state matches this position}
+    DebugHashValueCount    : Integer;
+    DebugHashValueIndex    : Integer;
+    DebugHashValues        : PHashValueVector;
     DebugPosition          : PPosition;  {global variable for debugging}
-    EndOfPositions         : Pointer;    {address past end of the transposition table items in the 'Positions' vector; from that address, the memory contains reserved areas like the hash buckets and the precalculated deadlock sets}
+    DebugPositionScore     : TScore;
     FreeList               : PPosition;  {linked list of unused positions}
     HashBucketCount        : Integer;    {vector-length of 'HashBuckets'; it must must be a power of 2 so masking with ('HashBucketCount'-1) produces a proper hash-bucket index}
     HashBucketMask         : Integer;    {'HashBucketCount' - 1}
     HashBuckets            : PPositionPointersVector; {the vector length must be a power of 2}
-    MemoryByteSize         : Cardinal;   {total memory size in bytes, including 'Positions', 'HashBuckets' and precalculated deadlock sets}
+    HighWaterMark          : Pointer;    {address past end of the transposition table items in the 'Positions' vector; starting from that address, the memory block contains reserved areas like the hash buckets and the precalculated deadlock-sets}
+    MemoryByteSize         : Cardinal;   {total memory size in bytes, including 'Positions', 'HashBuckets' and precalculated deadlock-sets}
     OpenPositions          : TOpenPositions;
     PartiallyExpandedPositionsList       {linked list of positions not fully expanded by the solver search; if the search doesn't find a solution, it may try a full expansion of these positions later}
                            : PPosition;
     PerimeterList          : PPosition;  {linked list of positions from a previous search in the opposite direction}
-    PerimeterListCount     : Cardinal;   {number of positions on 'PerimeterList'}
+    PerimeterListCount     : Cardinal;   {number of positions on 'PerimeterList'; high-value: file error while saving perimeter nodes to disk}
     Positions              : PPositionVector;
     SearchStatistics       : TSearchStatistics;
     SolutionPosition       : PPosition;
@@ -1030,7 +1093,7 @@ type
     InputFile              : TextFile;
     InputFileName          : String;
     LevelCount             : Cardinal;
-    PreviousTextLine       : String;    {actually, it's not always the previous line but rather the previous line that might be a game title}
+    PreviousTextLine       : String;    {not always the previous line; for instance, it may also be the most recently parsed line which might be a game title}
                              end;
   TPlayersReachableSquares = record
     Calculated             : Boolean;   {updated by 'CalculatePlayersReachableSquares'; the caller is responsible for proper initialization before calling 'TTAdd' and 'TTlookup'}
@@ -1060,12 +1123,20 @@ type
                              end;
   PSokobanStatus           = ^TSokobanStatus;
   TProgressCheckPoint      = record     {check solver progress each time a certain number of positions have been expanded}
+    BestGamePhase          : Integer;
     BestScore              : Integer;
-    BoxTimeStamps          : array[ TBoxNo ] of Cardinal;
+    BoxPushCounts          : TBoxArrayOfUnsignedIntegers;
+    BoxPushBonuses         : array[ TBoxNo ] of Byte;
+    BoxTimeStamps          : TBoxArrayOfUnsignedIntegers; {the last time the box was pushed}
+    LazyBoxPushBonus       : Integer; {the boxes with the fewest pushes since the last progress checkpoint get a bonus for being pushed during the next checkpoint interval}
+    LastCheckPointPushCount  {the number of pushes performed by the solver at the last progress checkpoint (the value of 'Solver.PushCount')}
+                           : Integer;
     NoProgressCount        : Integer;
-    PushCountDown          : Integer;
-    PushedBoxes            : array[0..MAX_BOX_COUNT] of Boolean;
-    Score                  : Integer;   {score at check point time}
+    OpenListEscapeInterval : Integer; {a 2^N-1 integer, where N is a positive integer}
+    PushCountDown          : Integer; {countdown to next checkpoint}
+    RandomState            : TRandomState;
+    Score                  : Integer;   {score at checkpoint time}
+    SortedBoxes            : TBoxNumberSet; {boxes sorted on number of pushes; the count denotes how many of the least frequently pushed boxes which get a bonus for being pushed during the next checkpoint interval}
                              end;
   TSolver                  = record
     AddedCorralBoxesCount  : Int64;
@@ -1073,6 +1144,7 @@ type
                            : Integer;   {maximum backward search limit (may differ from 'DepthLimit' in a perimeter-search, that is, first a backward search and then a forward search}
     CorralCount            : Int64;
     CorralSearchDepth      : Cardinal;
+    DisplayPushCountdown   : Integer;
     DeadEndCount           : Int64;
     DeadEndDuplicatesCount : Int64;
     Enabled                : Boolean;   {'True': solve levels; 'False': optimize existing solutions only}
@@ -1105,9 +1177,6 @@ type
     TimeCheckCount         : Integer;
     TimeMS                 : TTimeMS;   {time, milliseconds}
                              end;
-
-  TSquareDirectionArrayOfInteger
-                           = array[0..MAX_BOARD_SIZE,TDirection] of Integer;
   TUserInterface           = record
     Prompt                 : Boolean; {if 'False': don't confirm messages, i.e., in the console program version don't require the user to press [Enter] after messages; important messages may be lost, so use it at your own risk}
                              end;
@@ -1132,7 +1201,6 @@ var
   LogFile                  : TLogFile;
   Optimizer                : TOptimizer; {optimization info, i.e., settings and statistics}
   Positions                : TPositions; {transposition-table, open-queue, and statistics}
-  RandomState              : TRandomState;
   Reader                   : TReader;
   Solver                   : TSolver;
   UserInterface            : TUserInterface;
@@ -1211,7 +1279,11 @@ function  FirstPushToText(var PushNo__:Integer; var Text__:String):Boolean; forw
   function  InitializeGame(var PluginResult__:TPluginResult; var ErrorText__:String):Boolean; forward;
 {$ENDIF}
 function  IsAFreezingMove(FromSquareNo__,ToSquareNo__:Integer; ABoxFreezingOnAGoalSquareCountsAsAFreezingMove__:Boolean):Boolean; forward;
+function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection; PlayersReachableSquaresIndex__:Integer):Boolean; forward;
 function  LoadNextLevelFromFile(const OutputFileName__:String):Boolean; forward; {a simple version, parsing board and optional heading titles only}
+{$IFNDEF PLUGIN_MODULE}
+  function  Max(a__,b__:Integer):Integer; forward;
+{$ENDIF}
 procedure MovePlayer(PlayerPos__:Integer); forward;
 function  Msg(const Text__,Caption__:String):Boolean; forward;
 function  NextPushToText(var PushNo__:Integer; var Text__:String):Boolean; forward;
@@ -1361,9 +1433,9 @@ begin {returns a time measured in milliseconds; the base doesn't matter, the tim
 {$ENDIF}
 end;
 
-procedure InitializeRandomState(RandomNumber__:Integer);
+procedure InitializeRandomState(RandomNumber__:Integer; var RandomState__:TRandomState);
 begin
-  RandomState.RandomNumber:=Abs(RandomNumber__);
+  RandomState__.RandomNumber:=Max(1,Abs(RandomNumber__));
 end;
 
 function  IntToStr(Number__:Integer):String;
@@ -1426,12 +1498,13 @@ begin // precondition: 0 <= 'Number__' < ( BITS_PER_INTEGER - 1 )
   Result:=1 shl Number__;
 end;
 
-function  Random(Range__:Integer):Integer; {own random function so results are reproducable}
+function  Random(Range__:Integer; var RandomState__:TRandomState):Integer; {own random function so results are reproducable}
 const a=1366; c=150889; m=714025; {don't modify these values unless you know what you are doing}
 begin
-  RandomState.RandomNumber:=(a * (RandomState.RandomNumber mod m) + c) mod m;
-  if   Range__<>0 then Result:=RandomState.RandomNumber mod Range__
-  else Result:=0;
+  RandomState__.RandomNumber:=(a * (RandomState__.RandomNumber mod m) + c) mod m;
+  if   Range__=0 then {'True': return the random state value}
+       Result:=RandomState__.RandomNumber
+  else Result:=RandomState__.RandomNumber mod Range__;
 end;
 
 function  StrStartsWith(const Text__,Prefix__:String):Boolean;
@@ -1440,7 +1513,14 @@ begin
           (Length(Text__)>=Length(Prefix__)) and
           (Copy(  Text__,1,Length(Prefix__))=Prefix__);
 end;
-
+{$IFDEF WINDOWS}
+  function StrWithTrailingPathDelimiter(const Str__:String):String; {throws EOutOfMemory}
+  begin
+    if   (Str__='') or (Str__[Length(Str__)]=WINDOWS_FILE_NAME_PATH_DELIMITER) then
+         Result:=Str__
+    else Result:=Str__+WINDOWS_FILE_NAME_PATH_DELIMITER;
+  end;
+{$ENDIF}
 function  StrToInt(const s__:String; var i__:Integer):Boolean;
 var ErrorPos:Integer;
 begin
@@ -1554,20 +1634,25 @@ begin
   Result:=(Odd(Col) and Odd(Row)) or ((not Odd(Col)) and (not Odd(Row)));
 end;
 
-function  IsABlockedBoxSquareAlongAxis(Square__:Integer; Direction__:TDirection):Boolean; {considering walls only, i.e., boxes on the board are not taken into account}
+function  IsABlockedBoxSquareAlongAxis(Square__:Integer; Direction__:TDirection):Boolean;
 var Neighbor1,Neighbor2:Integer;
-begin
+begin {considers walls only, i.e., boxes on the board are not taken into account;}
+      {contrary to what the function name suggests, the parameter is a direction, not an axis}
   with Game do begin
     Neighbor1 := Board [ Square__ + SquareOffsetForward [ Direction__ ] ];      {note that 'Neighbor1' and 'Neighbor2' hold the contents of the squares, not the square numbers}
     Neighbor2 := Board [ Square__ - SquareOffsetForward [ Direction__ ] ];
-    Result:= (( Neighbor1 and WALL           ) <> 0 )                           {is there a wall on any of the neighbor squares?}
-             or
-             (( Neighbor2 and WALL           ) <> 0 )
-             or
-             ((( Neighbor1 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )                 {are both neighbors illegal squares?}
-              and
-              (( Neighbor2 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )
-             );
+    Result:= (
+              (( Neighbor1 and WALL           ) <> 0 )                          {is there a wall on any of the neighbor squares?}
+              or
+              (( Neighbor2 and WALL           ) <> 0 )
+              or
+              ((( Neighbor1 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )                {are both neighbors illegal box squares?}
+               and
+               (( Neighbor2 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )
+              )
+             )
+             and
+             ((Game.Board[Square__] and (WALL+FLAG_ILLEGAL_BOX_SQUARE+FLAG_BOX_REACHABLE_SQUARE+FLOOR))=FLAG_BOX_REACHABLE_SQUARE+FLOOR); {inlined 'IsALegalAndBoxReachableSquare()'}
     end;
 end;
 
@@ -1584,6 +1669,11 @@ end;
 function  IsABoxStartSquare(Square__:Integer):Boolean;
 begin {precondition: 'Game.DistanceToNearestBoxStartPosition'  has been calculated}
   Result:=Game.DistanceToNearestBoxStartPosition[Square__]=0;
+end;
+
+function  IsADoorSquare(Square__:Integer):Boolean;
+begin
+  Result:=(Game.Board[Square__] and FLAG_DOOR_SQUARE)<>0;
 end;
 
 function  IsAFloorSquare(Square__:Integer):Boolean;
@@ -1614,6 +1704,20 @@ end;
 function  IsAnEmptyFloorSquare(Square__:Integer):Boolean;
 begin
   Result:=(Game.Board[Square__] and (FLOOR+BOX))=FLOOR;
+end;
+
+function  IsANeighborSquare(Square__,NeighborSquare__:Integer; var Direction__:TDirection):Boolean;
+var Difference:Integer;
+    Direction:TDirection;
+begin {returns 'True' if the squares are neighbors}
+  Result:=False;
+  Difference:=NeighborSquare__-Square__;
+  for Direction:=Low(Direction) to High(Direction) do
+      if Difference=Game.SquareOffsetForward[Direction] then begin
+         Result:=True;
+         Direction__:=Direction;
+         break; {quick-and-dirty exit when the result is 'True'}
+         end;
 end;
 
 function  IsAPlayerSquare(Square__:Integer):Boolean;
@@ -1685,6 +1789,17 @@ begin {returns the minimum distance to the square, given the distances from each
          Result:=Distances__[Square__,Direction];
 end; {MinimumDistanceToSquare}
 
+function  NeighborSquareDirection(Square__,NeighborSquare__:Integer):TDirection;
+begin {precondition: 'Square__' and 'NeighborSquare__' are neighbors}
+  if        Square__ >  NeighborSquare__ then
+       if   Square__ =  Succ( NeighborSquare__ ) then
+            Result   := dLeft
+       else Result   := dUp
+  else if   Square__ =  Pred( NeighborSquare__ ) then
+            Result   := dRight
+       else Result   := dDown;
+end;
+
 function  OptimizerImprovementAsText(Position__:PPosition):String;
 begin
   if   Position__<>nil then with POptimizerPosition(Position__)^ do with Position do
@@ -1728,6 +1843,28 @@ begin {returns a non-zero value if the solver should terminate}
   else Result:=0;
 end;
 
+function  PreviousFreezeDeadlockSetWithNoFakedFreezingSquares(SetNo__:Integer):Integer;
+begin {returns the index of the previous freeze deadlock set which doesn't contain faked freezing squares;
+       for a freeze deadlock set with faked freezing squares (e.g., the squares in a tunnel with goal squares,
+       where the tunnel will be blocked if two boxes are pushed into the tunnel), this previous freeze deadlock set
+       contains the non-faked freezing squares;}
+  Result:=SetNo__;
+  with Game do with DeadlockSets do begin
+    while (Result>0)
+          and
+          ((not (dsfFreezeSet in Flags[Result]))
+           or
+           (dsfHasFakedFreezingSquares in Flags[Result])
+          ) do
+          Dec(Result);
+
+    if (Result=0) and (Count<MAX_DEADLOCK_SETS) then begin
+       Result:=Succ(Count); {fake an overflowing deadlock set}
+       Capacity[Result]:=-1;
+       end;
+    end;
+end;
+
 procedure SetSokobanStatusText(const Text__:String);
 {$IFNDEF CONSOLE_APPLICATION}
   var CharCount:Integer;
@@ -1756,6 +1893,45 @@ begin // test function only; not in production
     end;
 end;
 
+function  SortBoxes( var SortedBoxes__:TBoxNumbers; const Scores__:TBoxArrayOfUnsignedIntegers; TieBreaker__:Integer):Integer;
+var BoxNo,Index:Integer;
+    Score,SortedItemScore:Cardinal;
+begin {sorts the box numbers in ascending order on scores;
+       returns the number of boxes with zero score;
+       if the tiebreaker is non-zero, then the sorting order is randomized for
+       boxes with identical scores;}
+  Result:=0;
+  SortedBoxes__[0]:=0;
+  for BoxNo:=1 to Game.BoxCount do begin {sort the boxes using insertion sort}
+      Score:=Scores__[BoxNo];
+      Index:=Pred(BoxNo);
+      SortedItemScore:=Scores__[SortedBoxes__[Index]];
+      while ( SortedItemScore>Score)
+            or
+            ((SortedItemScore=Score)
+             and
+             Odd(Tiebreaker__)
+             and
+             (Index>0)) do begin
+            SortedBoxes__[Succ(Index)]:=SortedBoxes__[Index]; {move item up}
+            Dec(Index); {focus previous item}
+            SortedItemScore:=Scores__[SortedBoxes__[Index]];
+            end;
+      SortedBoxes__[Succ(Index)]:=BoxNo;
+      if TieBreaker__<>0 then {'True': randomize sorting order for boxes with identical scores}
+         Inc(Tiebreaker__); {use different tiebreaker values during the sort}
+      if Score=0 then {return the number of boxes with zero score}
+         Inc(Result);
+      end;
+{
+  for Index:=1 to Game.BoxCount do
+      Writeln( Index:4,
+               SortedBoxes__[Index]:10,
+               Scores__[SortedBoxes__[Index]]:10);
+  Readln;
+}
+end;
+
 function  SquareToChar(Square__:Integer):Char;
 var Col,Row:Integer;
 begin
@@ -1766,17 +1942,18 @@ begin
     PLAYER+GOAL: if   Legend.XSBNotation then
                       Result:=CH_PLAYER_ON_GOAL_XSB
                  else Result:=CH_PLAYER_ON_GOAL;
-    PLAYER+BOX, {can happen for deadlock sets}
+    PLAYER+BOX, {can happen for deadlock-sets}
     BOX        : if   Legend.XSBNotation then
                       Result:=CH_BOX_XSB
                  else Result:=CH_BOX;
-    PLAYER+BOX+GOAL, {can happen for deadlock sets}
+    PLAYER+BOX+GOAL, {can happen for deadlock-sets}
     BOX+GOAL   : if   Legend.XSBNotation then
                       Result:=CH_BOX_ON_GOAL_XSB
                  else Result:=CH_BOX_ON_GOAL;
     GOAL       : Result:=CH_GOAL;
     WALL       : Result:=CH_WALL;
 //  else         Result:=UNDERSCORE;
+//  else         Result:=CH_NON_BLANK_FLOOR;
     else         Result:=CH_FLOOR;
   end;
   if Game.Board[Square__]=FLAG_SQUARE_SET then Result:=CH_SQUARE_SET;
@@ -1786,7 +1963,7 @@ begin
           Msg(TEXT_INTERNAL_ERROR+': "SquareToChar"'+SPACE+IntToStr(Square__)+' = ['+IntToStr(Col)+','+IntToStr(Row)+'] : '+IntToStr(Game.Board[Square__]),TEXT_APPLICATION_TITLE);
           Result:='?'; {error}
           end
-     else {kludge: during calculation of deadlock sets, there are sometimes boxes on walls, e.g., during creation of controller/freeze-set deadlock pairs}
+     else {kludge: during calculation of deadlock-sets, there are sometimes boxes on walls, e.g., during creation of controller/freeze-set deadlock pairs}
           Result:=CH_WALL;
 end;
 
@@ -1803,8 +1980,14 @@ begin
   Result:=IntToStr(Col)+COMMA+IntToStr(Row);
 end;
 
+function  SAT(Square__:Integer):String; {'SquareToColRowAsText' abbreviated; for debuggin convenience}
+begin
+  Result:=SquareToColRowAsText(Square__);
+end;
+
 function  StraightLineVisibility(Square__,Distance__:Integer; Direction__:TDirection):Boolean;
-begin {Returns 'True' if the line of sight on the board in the given direction isn't blocked by walls or boxes; 'Square__' is the starting point but it isn't itself a part of the line of sight, i.e., it may be a wall or a box square}
+begin {returns 'True' if the line of sight on the board in the given direction isn't blocked by walls or boxes;
+       'Square__' is the starting point but it isn't itself a part of the line of sight, i.e., it may be a wall or a box square}
   with Game do begin
     Inc(Square__,SquareOffsetForward[Direction__]);
     while (Distance__>0) and
@@ -1942,7 +2125,7 @@ begin {a simple and not fool-proof implementation}
                                    end
                       else         Result:=False;
 
-          'd'       : if           HasCharCI(s,'a') then {deadlock sets complexity}
+          'd'       : if           HasCharCI(s,'a') then {deadlock-sets complexity}
                                    Result:=GetParameter(DeadlockSetsAdjacentOpenSquaresLimit__,0,3,0,ItemIndex)
                       else         Result:=False;
           'f'       : Result:=GetBooleanValue(OptimizationMethodEnabled__[Low(OptimizationMethodEnabled__)]); // optimizer fallback strategy enabled/disabled
@@ -2156,7 +2339,7 @@ begin
   Writeln('Usage: YASS <filename> [options]');
   Writeln('');
   Writeln('Options:');
-  Writeln('  -deadlocks <number>          : deadlock sets complexity level 0-3, default ',DEFAULT_DEADLOCK_SETS_ADJACENT_OPEN_SQUARES_LIMIT);
+  Writeln('  -deadlocks <number>          : deadlock-sets complexity level 0-3, default ',DEFAULT_DEADLOCK_SETS_ADJACENT_OPEN_SQUARES_LIMIT);
   Writeln('  -help                        : this overview');
   Writeln('  -level     <number> [ - <number> ] : level numbers to process, default "all"');
   Writeln('  -log                         : save search information to a logfile');
@@ -2236,16 +2419,24 @@ begin {$I-}
      end;
 end; {$I+}
 
-function  WriteBoardToLogFile(const Caption__:String):Boolean;
-var i:Integer; BoardAsTextLines:TBoardAsTextLines;
+function  WriteBoardToLogFile(const Text__:String; Margin__:Integer):Boolean;
+var i:Integer; Margin:String; BoardAsTextLines:TBoardAsTextLines;
 begin {$I-}
   Result:=LogFile.FileName<>'';
   if Result then with LogFile do begin
      BoardToTextLines(BoardAsTextLines);
      Writeln(TextFile);
-     //if Caption__<>'' then Writeln(TextFile,Caption__);
-     for i:=1 to Game.BoardHeight do Writeln(TextFile,BoardAsTextLines[i]);
-     if Caption__<>'' then Writeln(TextFile,Caption__);
+     Margin:='';
+     for i:= 1 to Margin__ do Margin:=Margin+SPACE;
+     //if Text__<>'' then Writeln(TextFile,Text__);
+     for i:=1 to Game.BoardHeight do begin
+         if Margin__>0 then Write(TextFile,Margin);
+         Writeln(TextFile,BoardAsTextLines[i]);
+         end;
+     if Text__<>'' then begin
+        if Margin__>0 then Write(TextFile,Margin);
+        Writeln(TextFile,Text__);
+        end;
      Result:=IOResult=0;
      end;
 end; {$I+}
@@ -2261,7 +2452,7 @@ end; {$I+}
 
 {-----------------------------------------------------------------------------}
 
-{Graph File}
+{Graph File (game states from the transposition table stored on disk)}
 
 function  CloseGraphFile:Boolean;
 begin {$I-}
@@ -2271,7 +2462,7 @@ begin {$I-}
        end
   else Result:=True;
   if   Result then GraphFile.FileName:=''
-  else Msg('Close Graph File: Close file failed: '+GraphFile.FileName,TEXT_APPLICATION_TITLE);
+  else Msg('Save game states to disk: Close file failed: '+GraphFile.FileName,TEXT_APPLICATION_TITLE);
 end; {$I+}
 
 function  CreateGraphFile(const FileName__:String):Boolean;
@@ -2279,10 +2470,16 @@ begin {$I-}
   Result:=False;
   if CloseGraphFile then with GraphFile do begin
      FileName:=FileNameWithExtension(FileName__,GRAPH_FILE_EXT);
+     {$IFDEF PLUGIN_MODULE}
+       {$IFDEF WINDOWS}
+         if ExtractFileDir(FileName)='' then
+            FileName:=StrWithTrailingPathDelimiter(GetCurrentDir)+FileName;
+       {$ENDIF}
+     {$ENDIF}
      Assign(GraphFile,FileName); Rewrite(GraphFile);
      Result:=IOResult=0;
      if not Result then begin
-        Msg('Create Graph File: Create file failed: '+FileName,TEXT_APPLICATION_TITLE);
+        Msg('Save game states to disk: Create file failed: '+FileName,TEXT_APPLICATION_TITLE);
         FileName:='';
         end;
      end;
@@ -2359,7 +2556,7 @@ function  WriteStatistics(OutputFileName__:String):Boolean;
 const SHORT_LINE_LENGTH=80;
 var
   i,j,Count,LineLength,SolvedCount,
-  NonOptimalSolutionCount,TotalGeneratedPushesCountMillion:Integer;
+  NonOptimalSolutionCount,SolvedLevelsTotalTimeMS,TotalGeneratedPushesCountMillion:Integer;
   UnsignedInteger32:UInt32; Integer64:Int64;
   s:String; Total:TLevelStatistics; This,Next:PLevelStatistics; F:Text;
 begin {$I-}
@@ -2367,7 +2564,8 @@ begin {$I-}
   Assign(F,s); Rewrite(F);
   Result:=IOResult=0;
   if Result then begin
-     This:=LevelStatistics; LevelStatistics:=nil; SolvedCount:=0;
+     This:=LevelStatistics; LevelStatistics:=nil;
+     SolvedCount:=0; SolvedLevelsTotalTimeMS:=0;
      LineLength:=SHORT_LINE_LENGTH;
      if not Solver.FindPushOptimalSolution then Inc(LineLength,8);
      if (not Solver.Enabled) and Optimizer.Enabled then Inc(LineLength,8);
@@ -2419,7 +2617,7 @@ begin {$I-}
      for i:=1 to LineLength do Write(F,HYPHEN); Writeln(F);
      //Write(F,'Level':36,'Minimum':8);
      Write(F,'Level':36);
-     if Solver.Enabled then Write(F,'Minimum':8)
+     if   Solver.Enabled then Write(F,'Pushes':8)
      else Write(F,'':8);
      if not Solver.FindPushOptimalSolution then Write(F,'':8);
      if (not Solver.Enabled) and Optimizer.Enabled then Write(F,'':8);
@@ -2427,7 +2625,7 @@ begin {$I-}
      Writeln(F,'Generated':13,'Generated':13,'Time':10);
      Write(F,'No':4,'W':3,'H':3,'Name':26);
      if not Solver.FindPushOptimalSolution then Write(F,'Moves':8);
-     if Solver.Enabled then Write(F,'Pushes':8)
+     if Solver.Enabled then Write(F,'':8)
      else if   Optimizer.Enabled then
                Write(F,'Moves':8,'Pushes':8)
           else Write(F,'':8);
@@ -2468,7 +2666,9 @@ begin {$I-}
        Inc(Total.OptimizerTimeMS,OptimizerTimeMS);
        Inc(Total.RoomPositionCount,RoomPositionCount);
 
-       if (Solver.Enabled and (PushCount<>0))
+       if (Solver.Enabled
+           and
+           ((PushCount<>0) or (lsfZeroPushSolution in Flags)))
           or
           ((not Solver.Enabled)
            and
@@ -2484,6 +2684,11 @@ begin {$I-}
           Inc(SolvedCount);
           if not (lsfOptimalSolution in Flags) then Inc(NonOptimalSolutionCount);
           end;
+
+       if Solver.Enabled
+          and
+          ((PushCount<>0) or (lsfZeroPushSolution in Flags)) then
+          Inc(SolvedLevelsTotalTimeMS,InitializationTimeMS+SolverTimeMS);
 
        i:=Pred(Integer(Reader.FirstLevelNo))+Count;
        Write(F,i:4,Width:3,Height:3);
@@ -2622,6 +2827,8 @@ begin {$I-}
         i:=Game.DeadlockSets.SessionDeadlockSetsCount+Game.DeadlockSets.SessionDeadlockSetsTableOverflowCount;
         Writeln(F,'Deadlocks - total calculated               : ',i:12);
         Writeln(F,'Deadlocks - player must be outside set     : ',Game.DeadlockSets.SessionPlayerMustBeOutsideSetCount:12);
+        Writeln(F,'Deadlocks - overflow sets                  : ',Game.DeadlockSets.OverflowSetsCount:12,' * 2');
+        Writeln(F,'Deadlocks - underflow sets                 : ',Game.DeadlockSets.UnderflowSetsCount:12,' * 2');
         Integer64:=Total.PositionCount-Total.ForwardPositionCount;
         Writeln(F,'Positions - backward search                : ',Integer64:12);
         Writeln(F,'Positions - forward search                 : ',Total.ForwardPositionCount:12);
@@ -2629,9 +2836,14 @@ begin {$I-}
         Writeln(F,'Positions - deadends                       : ',Solver.DeadEndCount:12);
         Writeln(F,'Positions - deadlocked open positions      : ',Total.DeadlockedOpenPositionsCount:12);
         Writeln(F,'Positions - total                          : ',Total.PositionCount:12);
+        Writeln(F,'Time - "no progress" deadlock analysis     : ',Game.DeadlockSets.NoProgressDeadlockCheckTimeMS:12,' milliseconds');
         Writeln(F,'Time - deadlock analysis                   : ',Total.DeadlockSetsTimeMS:12,' milliseconds');
-        Writeln(F,'Time - packing order                       : ',Total.PackingOrderTimeMS:12,' milliseconds');
+        Writeln(F,'Time - packing order calculation           : ',Total.PackingOrderTimeMS:12,' milliseconds');
         Writeln(F,'Time - small optimizations                 : ',Total.OptimizerTimeMS:12,' milliseconds');
+        if Solver.Enabled then
+           Writeln(
+                  F,
+                  'Time - solved levels                       : ',SolvedLevelsTotalTimeMS:12,' milliseconds');
         i:=Total.InitializationTimeMS+Total.SolverTimeMS+Total.OptimizerTimeMS;
         Writeln(F,'Time - total                               : ',i:12,' milliseconds');
         for i:=1 to LineLength do Write(F,HYPHEN); Writeln(F);
@@ -2697,7 +2909,7 @@ begin
     end;
 end;
 
-function  CalculateGateSquares:Integer; {finds all floor squares that split the board in two separate rooms}
+function  CalculateGateSquares:Integer; {finds all door squares and all gate squares; a gate square splits the board in separate rooms}
 var BoxNo,Square,NeighborSquare,OppositeNeighborSquare,OldPlayerPos:Integer; Direction:TDirection;
 begin {caution: assumes 4 directions only}
   with Game do begin
@@ -2709,13 +2921,17 @@ begin {caution: assumes 4 directions only}
         if (Board[Square] and {inline 'IsALegalAndBoxReachableSquare' and 'IsAGateSquare'}
             (WALL+FLAG_ILLEGAL_BOX_SQUARE+FLAG_BOX_REACHABLE_SQUARE+FLOOR+FLAG_GATE_SQUARE))
            =
-           FLAG_BOX_REACHABLE_SQUARE+FLOOR then
+           (FLAG_BOX_REACHABLE_SQUARE+FLOOR) then
            for Direction:=Low(Direction) to High(Direction) do begin //Succ(Low(Direction)) do begin
                NeighborSquare        :=Square+Game.SquareOffsetForward[Direction];
                OppositeNeighborSquare:=Square-Game.SquareOffsetForward[Direction];
                if IsAFloorSquare(NeighborSquare)
                   and
                   IsAFloorSquare(OppositeNeighborSquare) then begin
+                  if IsAWallSquare(Square+SquareOffsetLeft [Direction]) and
+                     IsAWallSquare(Square+SquareOffsetRight[Direction]) then
+                     Board[Square]:=Board[Square] or FLAG_DOOR_SQUARE;
+
                   if not (IsALegalAndBoxReachableSquare(Square+SquareOffsetLeft [Direction])
                           or
                           IsALegalAndBoxReachableSquare(Square+SquareOffsetRight[Direction])
@@ -2732,6 +2948,8 @@ begin {caution: assumes 4 directions only}
                      Dec(Game.Board[Square],BOX);
                      if (Squares[NeighborSquare]<>Squares[OppositeNeighborSquare]) then begin {'True': 'Square' splits the board in 2 separate rooms}
                         Board[Square]:=Board[Square] or FLAG_GATE_SQUARE;
+                        //if (Board[Square] and FLAG_DOOR_SQUARE)<>0 then
+                        //   Board[Square]:=Board[Square] or FLAG_WALL_GATE_SQUARE; {the gate square is surrounded by walls on both sides, not just by box-illegal squares}
                         Inc(Result);
                         end;
                      end
@@ -2832,7 +3050,7 @@ var Square,NextSquare:Integer;
     SquareIsBlockedByTwoWallsAlongTheOtherAxis:Boolean; Direction:TDirection;
 begin {caution: assumes 4 directions only}
   with Game do begin
-    for Square:=0 to BoardSize do Board[Square]:=Board[Square] and (not DIRECTION_TO_TUNNEL_FLAGS); {clear old flags, if any}
+    for Square:=0 to BoardSize do Board[Square]:=Board[Square] and (not DIRECTION_TO_TUNNEL_FLAGS); {clear old flags, if any; tunnel squares are different for a forward search and a backward search;}
     for Square:=0 to BoardSize do
         if IsALegalAndBoxReachableSquare(Square) then
            for Direction:=Low(Direction) to High(Direction) do begin
@@ -3038,6 +3256,21 @@ begin
       Writeln(BoardAsTextLines[Row]);
 end;
 
+procedure ShowBoardWithColumnsAndRows;
+var Col,Row:Integer; BoardAsTextLines:TBoardAsTextLines;
+begin
+  FillChar(BoardAsTextLines,SizeOf(BoardAsTextLines),0);
+  for Col:=1 to Game.BoardWidth do
+      Write(Col mod 10);
+  Writeln;
+  BoardToTextLines(BoardAsTextLines);
+  for Row:=1 to Game.BoardHeight do
+      Writeln(BoardAsTextLines[Row],Row:4);
+  for Col:=1 to Game.BoardWidth do
+      Write(Col mod 10);
+  Writeln;      
+end;
+
 procedure ShowBoxDistanceToAllSquares(const Distances__:TBoardOfIntegers);
 var Col,Row,Square,Distance:Integer;
 begin
@@ -3159,7 +3392,7 @@ begin
                    Board[i]:=FLAG_SQUARE_SET
               else Board[i]:=FLOOR;
 
-       if LogFile.FileName<>'' then WriteBoardToLogFile(s);
+       if LogFile.FileName<>'' then WriteBoardToLogFile(s,0);
 
        {$IFDEF CONSOLE_APPLICATION}
          if Game.ShowDeadlockSetsEnabled then begin
@@ -3225,7 +3458,7 @@ begin {precondition: the player's distance to reachable squares have been calcul
 end;
 
 procedure ShowDeadlockSet(Index__,CenterSquareNo__:Integer);
-var i,j,k,Col,Row:Integer; DeadlockSetHashValue:THashValue;
+var i,j,k,Col,Row,Margin:Integer; DeadlockSetHashValue:THashValue;
     s:String; Direction:TDirection; B:TBoard;
 begin {$I-}
   if Game.ShowDeadlockSetsEnabled or (LogFile.FileName<>'') then
@@ -3273,8 +3506,10 @@ begin {$I-}
              if dsfHasDisconnectedInnerFloors in Flags[Index__] then s:=s+ ' (Some inner floor squares do not belong to the center room)';
              end;
           s:=s+' Hash value: '+Int64ToStr(DeadlockSetHashValue);
-          if Flags[Index__]*[dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet]=[dsfPlayerMustBeOutsideSet] then begin
+          if (Flags[Index__]*[dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet]=[dsfPlayerMustBeOutsideSet]) or
+             (dsfPlayerMustBeOutsideFreezeSet in Flags[Index__]) then begin
              s:=s+'  The player must be outside the set.';
+
              i:=0;
              for Direction:=Low(Direction) to High(Direction) do
                  if DIRECTION_TO_DEADLOCK_SET_FLAG[Direction] in Flags[Index__] then
@@ -3291,7 +3526,9 @@ begin {$I-}
                        end;
                 end;
 
-             if (SquareOutsideFence[Index__]<>0) and (CenterSquare[Index__]<>0) then begin
+             if (SquareOutsideFence[Index__]<>0)
+                and
+                ((CenterSquare[Index__]<>0) or (dsfPlayerMustBeOutsideFreezeSet in Flags[Index__])) then begin
                 if   i=0 then
                      s:=s+' This is guaranteed if'
                 else s:=s+', or';
@@ -3327,16 +3564,27 @@ begin {$I-}
              s:=s+' boxes freeze at the squares in the following set.';
              end;
           if (dsfFreezeSet             in Flags[Index__])  and (Index__>0    ) and (dsfControllerSet in Flags[Pred(Index__)]) then begin
+             if (dsfPlayerMustBeOutsideFreezeSet in Flags[Index__]) then
+                s:=s+PERIOD;
              s:=s+'  This is a freeze set for the preceding controller set. Boxes at squares in this set must not freeze ';
              if   dsfIsAnOverflowSet in Flags[Index__] then
                   s:=s+'if the squares in the preceding controller set contain too many boxes.'
              else s:=s+'before the squares in the preceding controller set contain enough boxes.';
-             end;
+             if dsfHasFakedFreezingSquares in Flags[Index__] then begin
+                s:=s+' Some squares in the set may not really need to freeze.';
+                i:=PreviousFreezeDeadlockSetWithNoFakedFreezingSquares(Index__);
+                if (i>0) and (i<=Count) then
+                   s:=s+' The squares that really must freeze are the ones in deadlock set '+
+                      IntToStr(SequenceNumbers[PreviousFreezeDeadlockSetWithNoFakedFreezingSquares(Index__)])+PERIOD;
+                   end;
+             Margin:=8;
+             end
+          else Margin:=0;
           //if (dsfTestForFreezingSquare in Flags[Index__])  and (Index__>0    ) and (dsfControllerSet in Flags[Pred(Index__)])  then begin
           //   s:=s+'  This is a freeze set in a controller/freeze set pair. Boxes at these squares must not freeze before the squares in the preceding controller set contain enough boxes.';
           //   end;
           if LogFile.FileName<>'' then begin
-             WriteBoardToLogFile(s);
+             WriteBoardToLogFile(s,Margin);
              if (Capacity[Index__]<0) and (Index__<=PrecalculatedSetsCount) and
                 ((Flags[Index__]*[dsfControllerSet,dsfFreezeSet,dsfPlayerMustBeOutsideSet,dsfPlayerIsInsideSet])=[]) then
                 {some deadlock types are not tested here; the 'if' guard just ensures that no false positives are reported}
@@ -3346,8 +3594,9 @@ begin {$I-}
 
           {$IFDEF CONSOLE_APPLICATION}
             if Game.ShowDeadlockSetsEnabled then begin
-               Writeln; Writeln(s);
-               ShowBoard;
+               Writeln;
+               Writeln(s);
+               ShowBoardWithColumnsAndRows;
                if (Capacity[Index__]<0) and (Index__<=PrecalculatedSetsCount) and
                   ((Flags[Index__]*[dsfControllerSet,dsfFreezeSet,dsfPlayerMustBeOutsideSet,dsfPlayerIsInsideSet])=[]) then
                   {some deadlock types are not tested here; the 'if' guard just ensures that no false positives are reported}
@@ -3384,44 +3633,7 @@ end;
 {-----------------------------------------------------------------------------}
 
 {Moves}
-(*
-function  ChangePackingOrderPhase(Progress__:Boolean):Boolean;
-var i,j,GoalNo,NewPhase,SquareValue:Integer;
-begin {changes the packing order phase one step up or down; 'Progress__' = 'True' means advancing towards the solution (descreasing the phase)}
- with Game do with Solver.PackingOrder do begin
-   if   Progress__ then
-        NewPhase:=Pred(Phase)                                                   {advance towards a solution}
-   else NewPhase:=Succ(Phase);                                                  {retreat}
-   Result:=(NewPhase>=0) and (NewPhase<=SetCount);                              {note that phase may be 0 in which case the game state is a solved position (but not necessarily a solution; it can be the initial game state)}
 
-   if Result then begin
-      Phase:=NewPhase;
-
-      i:=FirstSetMemberIndex[     Phase ];                                      {the first goal/parking square for the current packing order phase}
-      j:=FirstSetMemberIndex[Succ(Phase)];                                      {the first goal/parking square for the next higher packing order phase}
-      PhaseSquareCount:=j-i;                                                    {the number of target squares for this packing order phase}
-      PhaseSquareCountDown:=PhaseSquareCount;                                   {initialize counting the number of unfilled target squares for this packing order phase}
-      if not Progress__ then Dec(CompletedSquaresCount,PhaseSquareCount);       {when retreating, first deduct the number of target squares for the new phase; the loop below counts the filled target squares for the new phase}
-
-      repeat GoalNo:=SetMembers[i];                                             {for each target square in the current phase}
-             SquareValue:=Board[Game.GoalPos[GoalNo]];                          {the contents of the target square}
-
-             if (SquareValue and BOX)<>0 then begin                             {'True': the target square contains a box}
-                Dec(PhaseSquareCountDown);                                      {one square less to fill during the current phase}
-                Inc(CompletedSquaresCount);                                     {update the number of completed target squares for this phase}
-                end;
-
-             if (SquareValue shr GOAL_BIT_SHIFT_COUNT)<>GoalNo then             {'True': the goal square is a target square during more than one phase; ensure that the square maps back from the board to the goal number belonging to this phase}
-                Inc(Board[Game.GoalPos[GoalNo]],
-                          +(GoalNo      shl GOAL_BIT_SHIFT_COUNT)               {add      the new phase goal number}
-                          -(SquareValue shr GOAL_BIT_SHIFT_COUNT));             {subtract the old goal number}
-
-             Inc(i);                                                            {advance to the next target square for this phase, if any}
-      until  i=j; {until all target squares for the current phase have been examined}
-      end;
-   end;
-end;
-*)
 function  DoPush(BoxNo__:Integer; Direction__:TDirection; PlayersReachableSquaresIndex__:Integer):Boolean;
 var i,j,k,FromSquare,InnerFloorsCount,Square,ToSquare,SquareSetNo:Integer; SetFlags:TDeadlockSetFlagsSet;
 begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].PlayersReachableSquares.Calculated'}
@@ -3429,7 +3641,7 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
       {after (sic) the push; ('IsALegalPush()' may have done it already)}
       {postcondition: '...PlayersReachableSquares.Calculated' reflects whether}
       {the calculation has been performed for the game state after the push;}
-      {returns 'False' is the push violates one or more deadlock sets}
+      {returns 'False' is the push violates one or more deadlock-sets}
   Result:=True;
   if BoxNo__<>0 then with Game do begin {only pushes are handled}
      Inc(PackingOrderPushCount,(Ord(Direction__) and POSITION_PACKING_ORDER_TAG) shr DIRECTION_BIT_COUNT);
@@ -3476,7 +3688,10 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
                  if   dsfPlayerMustBeOutsideSet in SetFlags then begin
                       if   (DIRECTION_TO_DEADLOCK_SET_FLAG[Direction__] in SetFlags) {'True': the last push direction tells that this is a deadlock}
                            or
-                           (Game.PlayerPos=SquareOutsideFence[SquareSetNo]) then {'True': the current player position matches the last found square that has been proved to be outside the fence}
+                           ((Game.PlayerPos=SquareOutsideFence[SquareSetNo])
+                            and
+                            (not (dsfFreezeSet in SetFlags))                    {'True': this is a normal deadlock-set or a controller set; controller sets have no 'SquareOutsideFence', so only normal deadlock-sets make their way to this statement}
+                           ) then                                               {'True': the current player position matches the last found square which has been proved to be outside the fence}
                            Result:=False
                       else if (CenterSquare[SquareSetNo]<>0) then begin         {'True': it's a fenced-in-area type of deadlock}
                               if
@@ -3498,7 +3713,7 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
                                             ((Game.Board[Square] and (WALL+BOX))=0) then begin {'True': the center square is an empty floor square}
                                             with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do begin
                                               if (InnerFloorsCount=0) or                 {'True': the number of floor squares inside the fenced-in area hasn't been calculated yet}
-                                                 (Squares[Square]<>TimeStamp) then begin {'True': the center square for this deadlock set is in a different "pocket" than the most recently calculated "pocket"}
+                                                 (Squares[Square]<>TimeStamp) then begin {'True': the center square for this deadlock-set is in a different "room" than the most recently calculated "room"}
                                                  Game.PlayerPos:=Square;                 {'Game.PlayerPos' is a global input parameter for 'CalculatePlayersReachableSquares()'}
                                                  InnerFloorsCount:=CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_DO_PUSH);
                                                  Game.PlayerPos:=FromSquare;
@@ -3521,7 +3736,7 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
                                             end;
 
                                          if Result then begin {'True': the game position hasn't been proved to be a deadlock yet}
-                                            j:=SquaresOutsideFenceIndex[SquareSetNo]; {get the index of the 'outside-fence' squares (i.e., player access areas), if any, for this deadlock set}
+                                            j:=SquaresOutsideFenceIndex[SquareSetNo]; {get the index of the 'outside-fence' squares (i.e., player access areas), if any, for this deadlock-set}
                                             if j>0 then  {'True': there is a list of 'outside-fence' squares for this deadlock; if the player can reach one or more of them, then the game position is a deadlock}
                                                for k:=1 to SquaresOutsideFence[j] do {the number of 'outside-fence' squares for this deadlock is located at this index; the actual squares follow in items 'index+1' .. 'index+n'}
                                                    if Squares[SquaresOutsideFence[j+k]]=TimeStamp then begin {'True': the player can reach the square outside the fence}
@@ -3532,7 +3747,7 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
 }
                                                       Result:=False;
                                                       SquareOutsideFence[SquareSetNo]:=FromSquare; {remember that most recent square which is known to be outside the fence}
-                                                      break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock set}
+                                                      break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock-set}
                                                       end;
                                             end;
                                          end
@@ -3552,22 +3767,48 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
                                  and
                                  ControllerAndFreezeSetPairsEnabled
                                  and
-                                 (((not (dsfIsAnOverflowSet in SetFlags))       {'True': this in an underflow controller/freeze pair of deadlock sets}
+                                 (((not (dsfIsAnOverflowSet in SetFlags))       {'True': this in an underflow controller/freeze pair of deadlock-sets}
                                    and
                                    (Capacity[Pred(SquareSetNo)]>0)              {'True': the squares in the controller-set don't contain the required number of boxes, hence, it's a deadlock}
                                   )
                                   or
-                                  ((dsfIsAnOverflowSet in SetFlags)             {'True': this in an overflow controller/freeze pair of deadlock sets}
+                                  ((dsfIsAnOverflowSet in SetFlags)             {'True': this in an overflow controller/freeze pair of deadlock-sets}
                                    and
-                                   (Capacity[Pred(SquareSetNo)]<0)              {'True': the squares in the controller-set contain to many boxes, hence, it's a deadlock}
+                                   (Capacity[Pred(SquareSetNo)]<0)              {'True': the squares in the controller-set contain too many boxes, hence, it's a deadlock}
                                   )
                                  )
                                  and
                                  ((not (dsfTestForFreezingSquare in SetFlags))  {'True': it's known from the precalculation, that when the squares in the freeze set have been filled, then the boxes at these squares have frozen}
                                   or
                                   IsAFreezingMove({FromSquare}0,ToSquare,True)  {'True': moving a box to the single square in the freeze set causes the box to freeze; ('0' instead of 'FromSquare' because the box has already been moved)}
-                                 ) then begin
-                                 Result:=False;
+                                 )
+                                 and
+                                 ((not (dsfHasFakedFreezingSquares in SetFlags))
+                                  or
+                                  (Capacity[PreviousFreezeDeadlockSetWithNoFakedFreezingSquares(SquareSetNo)]<0) {'True': all the non-faked freezing squares contain boxes}
+                                 )
+                                 then begin
+                                 if not (dsfPlayerMustBeOutsideFreezeSet in SetFlags) then
+                                    Result:=False
+                                 else
+                                    if (PlayersReachableSquaresIndex__>=0) then {'True': calculate the player's reachable squares and check if the player is outside the fence}
+                                       with Solver.SearchStates[PlayersReachableSquaresIndex__].PlayersReachableSquares do begin {in order to be a deadlock, the player must be outside the fence formed by the boxes}
+                                         if not Calculated then CalculatePlayersReachableSquares(PlayersReachableSquaresIndex__); {calculate the player's reachable squares if it hasn't been done already}
+                                         if Squares[SquareOutsideFence[SquareSetNo]]<>TimeStamp then begin {'True': the player can't reach the square which is guaranteed to be outside the fence}
+                                            j:=SquaresOutsideFenceIndex[SquareSetNo]; {get the index of the 'outside-fence' squares (i.e., player access areas), if any, for this deadlock-set}
+                                            if j>0 then {'True': there is a list of 'outside-fence' squares for this deadlock; if the player can reach one or more of them, then the game position is a deadlock}
+                                               for k:=1 to SquaresOutsideFence[j] do {the number of 'outside-fence' squares for this deadlock is located at this index; the actual squares follow in items 'index+1' .. 'index+n'}
+                                                   if Squares[SquaresOutsideFence[j+k]]=TimeStamp then begin {'True': the player can reach the square outside the fence}
+                                                      Result:=False;
+                                                      SquareOutsideFence[SquareSetNo]:=FromSquare; {remember that most recent square which is known to be outside the fence}
+                                                      break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock-set}
+                                                      end;
+                                            end
+                                         else begin {the player can reach the square which is guaranteed to be outside the fence}
+                                            Result:=False;
+                                            //SquareOutsideFence[SquareSetNo]:=Game.PlayerPos; {remember that most recent square which is known to be outside the fence}
+                                            end;
+                                         end;
 {
                                  ShowBoard;
                                  Write('Do push: freeze deadlock ',SquareSetNo,SPACE,Solver.PushCount);
@@ -3707,10 +3948,51 @@ begin {IsAFreezingMove}
              BoxIsBlockedAlongOneAxis( ToSquareNo__ , Low(        TDirection )   , ABoxIsBlockedOnANonGoalSquare ) and
              BoxIsBlockedAlongOneAxis( ToSquareNo__ , Succ( Low ( TDirection ) ) , ABoxIsBlockedOnANonGoalSquare ) and  {caution: 'Succ(Low...'): assumes 4 directions only}
              (ABoxIsBlockedOnANonGoalSquare or ABoxFreezingOnAGoalSquareCountsAsAFreezingMove__)
+//          )
+//          or
+            {a gate square splits the board in separate rooms; the player cannot
+             reach opposite sides of a box at a gate square if the gate square
+             is surrounded by walls, as opposed to squares just being
+             box-illegal squares;
+             pushing a box away from such a wall-gate square makes the box
+             freeze if the next square in the push direction is occupied by a
+             another box, or by a wall;
+             even though this really does make the box freeze, the check is
+             disabled because it's dangerous; it makes the function result
+             dependent on the player's position; the freeze/not freeze
+             classification is used by the deadlock detection to create
+             deadlock sets; often they have very intricate conditions regarding
+             the player position and the dependency/independency of the player
+             position, so it's preferable to return a player-independent
+             function result;
+            }
+//          ( ( ( OriginalFromSquareValue                              and FLAG_WALL_GATE_SQUARE ) <> 0 ) {'True': the box is pushed away from a wall-gate square}
+//            and
+//            ( ( Game.Board [ ( 2 * ToSquareNo__ ) - FromSquareNo__ ] and ( WALL + BOX )        ) <> 0 ) {'True': the next square in the push direction after the box has been pushed is occupied by another box, or by a wall}
+//            and
+//            ( ( ( Game.Board [ ToSquareNo__ ] and GOAL ) = 0 ) {'True': the box isn't pushed to goal square}
+//              or
+//              ABoxFreezingOnAGoalSquareCountsAsAFreezingMove__
+//            )
             );
 
   Game.Board [FromSquareNo__] := OriginalFromSquareValue;                       {put box, if any, back on the board}
 end; {IsAFreezingMove}
+
+function  IsALegalBoxPosition(BoxPos__:Integer):Boolean;
+var Direction:TDirection;
+begin {returns 'True' if a box can placed at the given square; some deadlocks depending on the player position are not taken into account;}
+  with Game do begin
+    Result:=IsALegalBoxSquare(BoxPos__);
+    for Direction:=Low(Direction) to High(Direction) do
+        if Result then begin
+           BoxPos[0]:=BoxPos__+SquareOffsetForward[Direction];
+           Result:=IsALegalPush(0,OPPOSITE_DIRECTION[Direction],-1);
+           end
+        else break;
+    BoxPos[0]:=0;
+    end;
+end;
 
 function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection; PlayersReachableSquaresIndex__:Integer):Boolean;
 var i,j,k,SquareSetNo,FromSquare,InnerFloorsCount,NeighborSquare,OriginalPlayerPos,Square,ToSquare:Integer;
@@ -3731,16 +4013,16 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
     {check for deadlock-set overflows, i.e., pattern matching}
     FromSquareSetNumbers:=SquareSetNumbers[FromSquare];
     ToSquareSetNumbers:=SquareSetNumbers[ ToSquare ];
-    for i:=1 to SquareSetCount[ToSquare] do begin {for each deadlock-set that 'ToSquare' is a member of}
+    for i:=1 to SquareSetCount[ToSquare] do begin {for each deadlock-set of which 'ToSquare' is a member}
         SquareSetNo:=ToSquareSetNumbers^[i]; {get current set number}
-        if (Capacity[SquareSetNo]<=0) {can a push cause an overflow?}
+        if (Capacity[SquareSetNo]<=0) {'True': can a push cause an overflow?}
            and
            (not (dsfControllerSet in Flags[SquareSetNo])) {for a controller/freeze-set pair, the controller-set is just counting filled squares; a deadlock situation only happens when the freeze-set overflows}
            then begin
            Result:=False;
            for j:=1 to SquareSetCount[FromSquare] do
                if FromSquareSetNumbers^[j]=SquareSetNo then begin
-                  {if 'FromSquare' is in the deadlock-set, the push doesn't cause an overflow}
+                  {if 'FromSquare' is in the deadlock-set too, then the push doesn't cause an overflow}
                   Result:=True; break;
                   end;
            if not Result then begin
@@ -3761,10 +4043,13 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
                  {analysis, i.e., after performing the move}
                  exit; {quick-and-dirty exit; pushing the box to 'ToSquare' would overflow the deadlock-set}
                  end
-              else begin {the set overflows, but maybe the player must be outside the set, or maybe this deadlock set belongs to a controller/freeze-set pair}
+              else begin {the set overflows, but maybe the player must be outside the set, or maybe this deadlock-set belongs to a controller/freeze-set pair}
                  if (DIRECTION_TO_DEADLOCK_SET_FLAG[Direction__] in SetFlags)   {'True': when the box is pushed in this direction, then the player is known to be outside the fence, hence, this is a deadlock}
                     or
-                    (FromSquare=SquareOutsideFence[SquareSetNo]) then begin     {'True': it has been proved earlier that this square is outside the fence, hence, this push leads to a deadlocked position}
+                    ((FromSquare=SquareOutsideFence[SquareSetNo]) {'True': it has been proved earlier that this square is outside the fence, hence, this push leads to a deadlocked position}
+                     and
+                     (not (dsfFreezeSet in SetFlags))  {'True': this is a normal deadlock-set or a controller set}
+                    ) then begin
                     IsALegalPushOverflowingSets[1]:=SquareSetNo;
                     Inc(Statistics[SquareSetNo]);
                     {when the function returns False', the overflowing set is stored}
@@ -3775,15 +4060,15 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
                     end
                  else if (not (dsfFreezeSet in SetFlags)) then begin {'True': this is a normal deadlock-set or a controller set}
                          if not (dsfControllerSet in SetFlags) then begin {'True': it's a normal deadlock-set}
-                            {save the overflowing set numbers for later analysis, e.g., after the push has been performed (or at the end of this function - see below)}
+                            {save the overflowing set numbers for later analysis, e.g., after the push has been performed, or at the end of this function - see below}
                             Inc(IsALegalPushOverflowingSetsCount);
                             IsALegalPushOverflowingSets[IsALegalPushOverflowingSetsCount]:=SquareSetNo;
                             end;
                          end
-                      else {this deadlock-set is the freeze-set in a controller/freeze-set pair; the squares in the controller-set must contain enough boxes before the squares in the freeze-set freeze}
+                      else {this deadlock-set is the freeze-set in a controller/freeze-set pair; the squares in the controller-set must contain a given number of number boxes before the squares in the freeze-set freeze}
                          if ControllerAndFreezeSetPairsEnabled
                             and
-                            (((not (dsfIsAnOverflowSet in SetFlags)) {'True': this in an underflow controller/freeze pair of deadlock sets}
+                            (((not (dsfIsAnOverflowSet in SetFlags)) {'True': this in an underflow controller/freeze pair of deadlock-sets}
                               and
                               (
                                ( Capacity[Pred(SquareSetNo)]>0) {'True': the squares in the controller-set don't contain the required number of boxes, hence, it's a deadlock}
@@ -3795,10 +4080,10 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
                               )
                              )
                              or
-                             ((dsfIsAnOverflowSet in SetFlags) {'True': this in an overflow controller/freeze pair of deadlock sets}
+                             ((dsfIsAnOverflowSet in SetFlags) {'True': this in an overflow controller/freeze pair of deadlock-sets}
                               and
                               (
-                               ( Capacity[Pred(SquareSetNo)]<-1) {'True': the squares in the controller-set contain to many boxes, hence, it's a deadlock}
+                               ( Capacity[Pred(SquareSetNo)]<-1) {'True': the squares in the controller-set contain too many boxes, hence, it's a deadlock}
                                or
                                ((Capacity[Pred(SquareSetNo)]=-1) {}
                                 and {if the box leaves a square belonging to the controller-set and moves to a square belonging to the freeze-set, then the controller-set must still not overflow}
@@ -3811,20 +4096,31 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
                             ((not (dsfTestForFreezingSquare in SetFlags))       {'True': it's known from the precalculation, that when the squares in the freeze set have been filled, then the boxes at these squares have frozen}
                              or
                              IsAFreezingMove(FromSquare,ToSquare,True)          {'True': moving a box to the single square in the freeze set causes the box to freeze}
-                            ) then begin
-                            IsALegalPushOverflowingSets[1]:=SquareSetNo;
-                            Inc(Statistics[SquareSetNo]);
-                            {when the function returns False', the overflowing set is stored}
-                            {in 'IsALegalPushOverflowingSets[1]' but note that 'IsALegalPushOverflowingSetCount' = 0;}
-                            {the count is only used for overflowing sets requiring further}
-                            {analysis, i.e., after performing the move}
+                            )
+                            and
+                            ((not (dsfHasFakedFreezingSquares in SetFlags))
+                             or
+                             (Capacity[PreviousFreezeDeadlockSetWithNoFakedFreezingSquares(SquareSetNo)]<0) {'True': all the non-faked freezing squares contain boxes}
+                            )
+                            then begin
+                            if not (dsfPlayerMustBeOutsideFreezeSet in SetFlags) then begin
+                               IsALegalPushOverflowingSets[1]:=SquareSetNo;
+                               Inc(Statistics[SquareSetNo]);
+                               {when the function returns False', the overflowing set is stored in 'IsALegalPushOverflowingSets[1]'}
 
-                            //if dsfTestForFreezingSquare in SetFlags then begin
-                            //   ShowBoard;
-                            //   Write(Solver.PushCount,SPACE,Positions.Count,' Frozen square deadlock: ',SequenceNo[SquareSetNo]);
-                            //   Readln;
-                            //   end;
-                            exit; {quick-and-dirty exit; pushing the box to 'ToSquare' would overflow the deadlock-set}
+                               //if dsfTestForFreezingSquare in SetFlags then begin
+                               //   ShowBoard;
+                               //   Write(Solver.PushCount,SPACE,Positions.Count,' Frozen square deadlock: ',SequenceNo[SquareSetNo]);
+                               //   Readln;
+                               //   end;
+                               exit; {quick-and-dirty exit; pushing the box to 'ToSquare' would overflow the deadlock-set}
+                               end
+                            else begin
+                               {the freeze-set is only active if the player is outside the fence;}
+                               {save the overflowing set numbers for later analysis, e.g., after the push has been performed, or at the end of this function; see below}
+                               Inc(IsALegalPushOverflowingSetsCount);
+                               IsALegalPushOverflowingSets[IsALegalPushOverflowingSetsCount]:=SquareSetNo;
+                               end;
                             end;
                  end;
               end;
@@ -3876,8 +4172,8 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
        Result:=True;
     end;
 
-  if Result and {'True': the push has not been proved to lead to a deadlock}
-     (Game.DeadlockSets.IsALegalPushOverflowingSetsCount<>0) and {'True': one or more deadlock sets requires further analysis before it is known whether the push is a violation }
+  if Result and {'True': the push has not been proved to create a deadlock}
+     (Game.DeadlockSets.IsALegalPushOverflowingSetsCount<>0) and {'True': one or more deadlock-sets requires further analysis before it is known whether the push is a violation}
      (PlayersReachableSquaresIndex__>=0) then {'True': use this index into the global vector with the player's reachable squares}
      {check if the push violates a fence-type deadlock where the player is outside the fence}
      with Game.DeadlockSets do
@@ -3895,14 +4191,18 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
              SquareSetNo:=IsALegalPushOverflowingSets[i];
              Square     :=CenterSquare[SquareSetNo];
              SetFlags   :=Flags[SquareSetNo];
-             if   (Square<>0) {'True': the deadlock set is a corral, i.e., an area fenced-in by boxes}
-                  and
-                  (Squares[Square]<>TimeStamp) {'True': the player can't reach the center square inside the corral}
-                  and
-                  (([dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet] * SetFlags)
-                   =
-                   [dsfPlayerMustBeOutsideSet]
-                  ) then begin
+             if   ((Square<>0) {'True': the deadlock-set is a corral, i.e., an area fenced-in by boxes}
+                   and
+                   (Squares[Square]<>TimeStamp) {'True': the player can't reach the center square inside the corral}
+                   and
+                   (([dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet] * SetFlags)
+                    =
+                    [dsfPlayerMustBeOutsideSet]
+                   )
+                  )
+                  or
+                  (dsfPlayerMustBeOutsideFreezeSet in SetFlags)
+                  then begin
                   if Squares[SquareOutsideFence[SquareSetNo]]<>TimeStamp then begin {'True': the player can't reach the square which is guaranteed to be outside the fence}
                      if (([dsfHasDisconnectedInnerFloors,dsfHasUnspecifiedInnerFloors,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence]
                           *
@@ -3915,7 +4215,7 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
                         ((Game.Board[Square] and (WALL+BOX))=0) then begin {'True': the center square is an empty floor square}
                         with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do begin
                           if (InnerFloorsCount=0) or                            {'True': the number of floor squares inside the fenced-in area hasn't been calculated yet}
-                             (Squares[Square]<>TimeStamp) then begin            {'True': the center square for this deadlock set is in a different "pocket" than the most recently calculated "pocket"}
+                             (Squares[Square]<>TimeStamp) then begin            {'True': the center square for this deadlock-set is in a different "room" than the most recently calculated "room"}
                              Game.PlayerPos:=Square;                            {'Game.PlayerPos' is a global input parameter for 'CalculatePlayersReachableSquares()'}
                              InnerFloorsCount:=CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_DO_PUSH);
                              end;
@@ -3934,17 +4234,14 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
                              Result:=False;
                              IsALegalPushOverflowingSets[1]:=SquareSetNo;
                              Inc(Statistics[SquareSetNo]);
-                             {when the function returns False', the overflowing set is stored}
-                             {in 'IsALegalPushOverflowingSets[1]' but note that 'IsALegalPushOverflowingSetCount' = 0;}
-                             {the count is only used for overflowing sets requiring further}
-                             {analysis, i.e., after performing the move}
-                             break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock set}
+                             {when the function returns False', the overflowing set is stored in 'IsALegalPushOverflowingSets[1]'}
+                             break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock-set}
                              end;
                           end;
                         end;
 
                      if Result then begin {'True': the game position hasn't been proved to be a deadlock yet}
-                        j:=SquaresOutsideFenceIndex[SquareSetNo]; {get the index of the 'outside-fence' squares, if any, for this deadlock set}
+                        j:=SquaresOutsideFenceIndex[SquareSetNo]; {get the index of the 'outside-fence' squares, if any, for this deadlock-set}
                         if j>0 then  {'True': there is a list of 'outside-fence' squares for this deadlock; if the player can reach one or more of them, then the game position is a deadlock}
                            for k:=1 to SquaresOutsideFence[j] do {the number of 'outside-fence' squares for this deadlock is located at this index; the actual squares follow in items 'index+1' .. 'index+n'}
                                if Squares[SquaresOutsideFence[j+k]]=TimeStamp then begin {'True': the player can reach the square outside the fence}
@@ -3961,25 +4258,24 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
                                   Result:=False;
                                   IsALegalPushOverflowingSets[1]:=SquareSetNo;
                                   Inc(Statistics[SquareSetNo]);
-                                  {when the function returns False', the overflowing set is stored}
-                                  {in 'IsALegalPushOverflowingSets[1]' but note that 'IsALegalPushOverflowingSetCount' = 0;}
-                                  {the count is only used for overflowing sets requiring further}
-                                  {analysis, i.e., after performing the move}
-                                  break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock set}
+                                  {when the function returns False', the overflowing set is stored in 'IsALegalPushOverflowingSets[1]'}
+                                  break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock-set}
                                   end;
                         end;
                      end
                   else begin {the player can reach the square which is guaranteed to be outside the fence}
-                     SquareOutsideFence[SquareSetNo]:=FromSquare; {remember that most recent square which is known to be outside the fence}
+                     //if dsfPlayerMustBeOutsideFreezeSet in SetFlags then begin
+                     //   ShowBoard;
+                     //   Write('Player dependent freeze set ',SquareSetNo, SPACE,SequenceNumbers[SquareSetNo],SPACE,Solver.PushCount); Readln;
+                     //   end;
+                     if not (dsfPlayerMustBeOutsideFreezeSet in SetFlags) then
+                        SquareOutsideFence[SquareSetNo]:=FromSquare; {remember that most recent square which is known to be outside the fence}
 
                      Result:=False;
                      IsALegalPushOverflowingSets[1]:=SquareSetNo;
                      Inc(Statistics[SquareSetNo]);
-                     {when the function returns False', the overflowing set is stored}
-                     {in 'IsALegalPushOverflowingSets[1]' but note that 'IsALegalPushOverflowingSetCount' = 0;}
-                     {the count is only used for overflowing sets requiring further}
-                     {analysis, i.e., after performing the move}
-                     break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock set}
+                     {when the function returns False', the overflowing set is stored in 'IsALegalPushOverflowingSets[1]'}
+                     break; {quick-and-dirty exit the 'for' loop; pushing the box to 'ToSquare' would overflow the deadlock-set}
 {
                      ShowBoard;
                      Write('Illegal push: Deadlock ',SequenceNo[SquareSetNo],SPACE,Solver.PushCount,SPACE,Positions.Count,SPACE,InnerFloorsCount);
@@ -4008,6 +4304,12 @@ procedure PutBoxOnBoard(BoxNo__,SquareNo__:Integer);
 var i:Integer;
 begin {puts a box back on the board after it has been removed by calling 'RemoveBoxFromBoard'}
   if SquareNo__<>0 then begin
+{
+     if (Game.Board[SquareNo__] and (BOX+WALL))<>0 then begin
+        ShowBoard;
+        Msg(TEXT_INTERNAL_ERROR+' Pushes: '+IntToStr(Solver.PushCount),'PutBoxOnBoard '+SquareToColRowAsText(SquareNo__));
+        end;
+}
      Inc(Game.Board[SquareNo__],BOX);
      Game.BoxPos[BoxNo__]:=SquareNo__;
      Game.HashValue:=Game.HashValue xor Positions.SquareHashValues[SquareNo__];
@@ -4036,13 +4338,13 @@ end; {RemoveBoxFromBoard}
 procedure ShowPathForwards(Position__:PPosition);
 // precondition : the game state has been reset to the starting position
 // postcondition: the game state matches 'Position__'
-
 begin
   if Position__<>nil then with Position__^ do begin
      if Parent<>nil then ShowPathForwards(Parent);
      with Move do DoPush(BoxNo,Direction,PushCount);
      ShowBoard;
      Write('Depth: ',PushCount,' Score: ',Score,SPACE,Game.HashValue);
+     {Writeln;}
      Readln;
      end;
 end;
@@ -4614,7 +4916,7 @@ end;
 
 function  OPENCheckBucket(BucketIndex__:Integer):Boolean;
 var p:PPosition;
-begin {for debugging purposes: checks that positions in an open-queue bucket are't on the free-list too}
+begin {for debugging purposes: checks that positions in an open-queue bucket aren't on the free-list too}
   with Positions do with OpenPositions do begin
     Result:=True;
     p:=Buckets[BucketIndex__];
@@ -4634,6 +4936,10 @@ function  OPENAdd(Position__:PPosition):Boolean;
 var Root:PPosition;
 begin {open positions: insert item}
   with Positions.OpenPositions do with Position__^ do begin
+    //if Position__^.HashValue=4055821135369324469 then begin
+    //   Positions.DebugPosition:=Position__;
+    //   Positions.DebugPositionScore:=Position__^.Score;
+    //   end;
     {$WARNINGS OFF}
       {warning: Comparison always evaluates to True}
       Result:=(Score>=Low(Buckets)) and (Score<=High(Buckets));
@@ -4700,7 +5006,7 @@ begin {puts all partially expanded positions on the open-list}
              open-list (see 'TTRemove');
           2. an attempt to add an identical position to the transposition table
              doesn't make 'TTAdd' choose to update the existing position,
-             inviting" the search to put the updated position on the open-list;
+             "inviting" the search to put the updated position on the open-list;
           both of these operations would corrupt the linked list of partially
           expanded positions; they are linked using the same fields in each
           position as the open-list;
@@ -4817,17 +5123,29 @@ end;
 procedure OPENRemove(Position__:PPosition);
 begin {open positions: remove item}
   with Positions.OpenPositions do with Position__^ do with ScoreBucket do begin
+    //if (UInt8(Move.Direction) and POSITION_OPEN_TAG)=0 then
+    //   Writeln( 'Ouch' );
+    //if Position__=Positions.DebugPosition then begin
+    //    if Position__^.Score<>Positions.DebugPositionScore then
+    //      Writeln( Positions.DebugPositionScore, SPACE, Position__^.Score );
+    //   Positions.DebugPosition:=nil;
+    //   end;
     Prev^.ScoreBucket.Next:=Next;
     Next^.ScoreBucket.Prev:=Prev;
     if Position__=Buckets[Score] then {'True': removing the root item in this bucket}
-       if   Next<>Position__ then
-            Buckets[Score]:=Next      {promote next item to root item in this bucket}
-       else Buckets[Score]:=nil;      {removing the last item in this bucket}
+       if Next<>Position__ then
+          Buckets[Score]:=Next {promote next item to root item in this bucket}
+       else begin {removing the last item in this bucket}
+          Buckets[Score]:=nil;
+          if Score=MinValue then {'True': removing the last item with the current minimum value; find the new minimum value, if any}
+             repeat Inc(MinValue);
+             until  (MinValue>MaxValue) or (Buckets[MinValue]<>nil);
+          end;
 //  Prev:=nil; Next:=nil;             {mark that the position isn't on the open-queue anymore}
-
-//  if (Ord(Move.Direction) and POSITION_OPEN_TAG)=0 then
-//     Msg(TEXT_INTERNAL_ERROR,'OPENRemove');
-
+{
+    if (Ord(Move.Direction) and POSITION_OPEN_TAG)=0 then
+       Msg(TEXT_INTERNAL_ERROR,'OPENRemove');
+}
     Dec(UInt8(Move.Direction),POSITION_OPEN_TAG);
     BestForgottenScore:=DEAD_END_SCORE;
     NextPartiallyExpandedPosition:=nil;
@@ -4836,7 +5154,6 @@ begin {open positions: remove item}
 end;
 
 function  OPENRemoveNextPositionSelectedForExpansion(var Position__:PPosition):Boolean;
-const NO_PROGRESS_PERIOD=8; {must be a 2^N non-negative integer where N is a non-negative integer}
 begin {open positions: remove best item, or in case of packing order search,
        occasionally an inferior item as an attempt to escape from a futile line
        of play; the rationale is that if the solver doesn't make any progress,
@@ -4848,8 +5165,14 @@ begin {open positions: remove best item, or in case of packing order search,
     if Result then begin
        Position__:=Buckets[MinValue];
 
+       {$IFDEF CONSOLE_APPLICATION}
+         //if Position__^.Score<>MinValue then
+         //   Msg(TEXT_INTERNAL_ERROR+': "OPENRemoveBest"',TEXT_APPLICATION_TITLE);
+       {$ENDIF}
+
        if (Solver.PackingOrder.SetCount>0) and {with packing order search, the solver isn't searching for an optimal solutions, hence, it's all right to expand positions in any order}
-          ((PInteger(Addr(Solver.PushCount))^ and (NO_PROGRESS_PERIOD-1))=0) then begin {'PInteger': 'Solver.PushCount' is a double integer, but here it's enough to look at its integer part}
+          ((PInteger(Addr(Solver.PushCount))^ and (Solver.ProgressCheckPoint.OpenListEscapeInterval))=0) then begin {'PInteger': 'Solver.PushCount' is a double integer, but here it's enough to look at its integer part}
+          //(not Game.DeadlockSets.NewDynamicDeadlockSets) then begin {focus on the most promising positions when there are new dynamic deadlock-sets; there is probably fewer of them which are deadlocked}
           repeat Inc(NoProgressRover);
           until  (NoProgressRover>MaxValue) or (Buckets[NoProgressRover]<>nil);
           if     NoProgressRover<=MaxValue then
@@ -4857,10 +5180,12 @@ begin {open positions: remove best item, or in case of packing order search,
           else   NoProgressRover:=MinValue;
           end;
 
-       {$IFDEF CONSOLE_APPLICATION}
-         //if Position__^.Score<>MinValue then
-         //   Msg(TEXT_INTERNAL_ERROR+': "OPENRemoveBest"',TEXT_APPLICATION_TITLE);
-       {$ENDIF}
+       // not a good idea: sometimes pick a position from the other end of the
+       // list; the normal order is last-in-first-out, and that seems to work
+       // the best; a plausible explanation is that last-in-first-out order
+       // favors positions with a lower estimated distance to a solution;
+       //if (Count and 15)=0 then
+       //   Position__:=Position__^.ScoreBucket.Prev;
 
        OPENRemove(Position__);
        end
@@ -4968,6 +5293,66 @@ end;
 
 {Transposition Table}
 
+function  TTLoad( const FileName__ : String; var Count__ : Integer; var Vector__ : PHashValueVector ) : Boolean;
+var ByteSize, BytesRead : Integer;
+    F : File;
+begin {$I-}
+  {transposition table: load previously saved hash values from disk}
+  Writeln;
+  Write('Load TT...');
+  AssignFile( F, FileName__  );
+  Reset( F, 1 );
+  Result      := IOResult = 0;
+  if Result then begin
+     ByteSize := System.FileSize( F );
+     Count__  := ByteSize div SizeOf( Vector__^[ Low( Vector__^ ) ] );
+     ByteSize := Count__  *   SizeOf( Vector__^[ Low( Vector__^ ) ] );
+     GetMem( Vector__, ByteSize );
+     BlockRead(F, PByte( Vector__)^, ByteSize, BytesRead );
+     Result   := ( ByteSize = BytesRead );
+     end;
+  CloseFile( F );
+  Writeln('done.');
+
+  Result := ( IOResult = 0 ) and Result;
+  if not Result then
+     Msg(TEXT_FILE_IO_ERROR, FileName__);
+end; {$I+}
+
+function  TTSave( const FileName__ : String ) : Integer;
+const BUFFER_BYTE_SIZE=8*ONE_KIBI;
+      BUFFER_CAPACITY=BUFFER_BYTE_SIZE div SizeOf(THashValue);
+var Index, ItemCount : Integer;
+    F : File;
+    Items:array[0.. BUFFER_CAPACITY - 1] of THashValue;
+begin {$I-}
+  {transposition table: save all position hash values to disk}
+  Writeln;
+  Write('Save TT...');
+  AssignFile( F, FileName__ );
+  Rewrite( F, 1 );
+  ItemCount := 0;
+  for Index := 0 to Pred( Cardinal( Positions.Capacity ) - Cardinal( Positions.UninitializedItemCount ) ) do begin
+      if ItemCount >= BUFFER_CAPACITY then begin
+         BlockWrite(F, PByte(Addr(Items[Low( Items )]))^, SizeOf(Items[ Low( Items )]) * ItemCount );
+         ItemCount := 0;
+         end;
+      Items[ ItemCount ] := Positions.Positions[ Index ].HashValue;
+      Inc( ItemCount );
+      end;
+  if ItemCount <> 0 then
+     BlockWrite(F, PByte(Addr(Items[Low( Items )]))^, SizeOf(Items[ Low( Items )]) * ItemCount );
+  CloseFile( F );
+  Writeln('done.');
+
+  if IOResult = 0 then
+     Result := Positions.Count
+  else begin
+     Msg(TEXT_FILE_IO_ERROR, FileName__);
+     Result:=-1;
+     end;
+end; {$I+}
+
 function  TTCheckBucket(const Caption__:String; HashBucket__:Integer):Boolean;
 var BasePosition,Position:PPosition;
 begin
@@ -4990,7 +5375,6 @@ end;
 
 function  TTReallocateMemoryBlock( var Block__ : Pointer; var ByteSize__ : Integer; NewByteSize__ : Integer ) : Boolean;
 var ItemCount : Integer;
-    NewBlock : Pointer;
 
   procedure FreeMemoryBlock( var Block__ : Pointer; var ByteSize__ : Integer );
   var Index : Integer;
@@ -5007,23 +5391,25 @@ var ItemCount : Integer;
 
 begin // 'TTReallocateMemoryBlock' reallocates, allocates, or releases a memory
       // block from the memory originally allocated for the transposition table;
-  ByteSize__            := Align( ByteSize__   , SizeOf( TPosition ) );
-  NewByteSize__         := Align( NewByteSize__, SizeOf( TPosition ) );
-  ItemCount             := NewByteSize__ div SizeOf( TPosition );
-  Result                := ( NewByteSize__ >= 0 ) and {'True': valid parameter, e.g., alignment didn't cause a numeric overflow}
-                           ( Positions.UninitializedItemCount >= ItemCount );
+      // precondition: not called during the backward search because it modifies
+      // the transposition table capacity in an incompatible manner;
+  ByteSize__                  := Align( ByteSize__   , SizeOf( TPosition ) );
+  NewByteSize__               := Align( NewByteSize__, SizeOf( TPosition ) );
+  ItemCount                   := NewByteSize__ div SizeOf( TPosition );
+  Result                      := ( NewByteSize__ >= 0 ) and {'True': valid parameter, e.g., alignment didn't cause a numeric overflow}
+                                 ( Positions.UninitializedItemCount >= ItemCount );
   if Result then begin {'True': sufficient free memory for the task}
-     Dec( Positions.Capacity, ItemCount ); {allocate memory from the end of the transposition table}
+     Dec( Positions.Capacity,               ItemCount ); {allocate memory from the end of the transposition table}
      Dec( Positions.UninitializedItemCount, ItemCount );
-     NewBlock           := Pointer( Addr( Positions.Positions^[ Positions.Capacity ] ) );
-     Move( Block__^, NewBlock^, Min( ByteSize__, NewByteSize__ ) );
-     if ( Positions.Count     >  0 ) and {'True': there is a search in progress; recycle the released memory block; memory blocks released before the search starts are left unused}
-        ( Cardinal( Block__ ) <  Cardinal( Positions.EndOfPositions ) ) then {'True': the released memory block doesn't belong to the reserved memory at the top of the allocated memory}
-        FreeMemoryBlock( Block__, ByteSize__ );
-     ByteSize__         := NewByteSize__;
-     if   ByteSize__    >  0 then
-          Block__       := NewBlock
-     else Block__       := nil;
+     Positions.HighWaterMark := Pointer( Addr( Positions.Positions^[ Positions.Capacity ] ) );
+     if Block__              <> nil then begin
+        Move( Block__^, Positions.HighWaterMark^, Min( ByteSize__, NewByteSize__ ) );
+        FreeMemoryBlock( Block__, ByteSize__ ); {returns the free memory block to the positions free list}
+        end;
+     ByteSize__              := NewByteSize__;
+     if   ByteSize__         >  0 then
+          Block__            := Positions.HighWaterMark
+     else Block__            := nil;
      end;
 end;
 
@@ -5034,6 +5420,8 @@ function  TTAdd(HashValue__:THashValue;
                 var Position__:PPosition):Boolean;
 var HashBucketIndex:Integer; NextPosition:PPosition;
 begin {transposition table: add new item unless it already is in the table}
+      {precondition:
+       * 'Solver.SearchStates[PushCount__].PlayersReachableSquares.Calculated' is set correctly;}
   Result:=False; Position__:=nil;
   with Positions do
     if (not TTLookup(HashValue__,PlayerPos__,PushCount__,Position__)) then begin{'True': it's a new item}
@@ -5147,12 +5535,24 @@ begin {transposition table: add new item unless it already is in the table}
                           Inc(SearchStatistics.NewBestPositionCount);
                     end;
                end
-          else Inc(SearchStatistics.CorralPositionsCount); {this is a corral position or a "no progress" deadlock stored in the transpostion table together with the normal game state positions}
+          else Inc(SearchStatistics.CorralPositionsCount); {this is a corral position or a "no progress" deadlock stored in the transposition table together with the normal game state positions}
+{
+          if  DebugHashValueIndex < DebugHashValueCount then
+              if HashValue__ = DebugHashValues^[ DebugHashValueIndex ] then
+                 Inc( DebugHashValueIndex )
+              else begin
+                 ShowBoard;
+                 Writeln( 'TTAdd: Hash value mismatch at index ', DebugHashValueIndex, '. Expected: ', DebugHashValues^[ DebugHashValueIndex ] );
+                 Writeln; Readln;
+                 DebugHashValueIndex:= High( DebugHashValueIndex );
+                 end;
+}
           end
        else
           if Parent__<>nil then Dec(Parent__^.SuccessorCount);                  {undo the premature update}
        end
     else with Position__^ do {the position already exists in the transposition-table}
+
        if (PushCount__>=PushCount)
           or
           ((SuccessorCount<>0) {'True': either the position really has immediate successors in the transposition table, or the position is a member of the partially expanded positions list (the count has an artificially high value in that case)}
@@ -5163,21 +5563,21 @@ begin {transposition table: add new item unless it already is in the table}
           (Score>=DEAD_END_SCORE) {'True': the position is a deadlock or a dead-end}
           or
           (PlayerPos>MAX_BOARD_SIZE) {'True': it's a corral box configuration and not a normal game position}
-          then begin
+          then begin {don't change the path to this position}
           Inc(SearchStatistics.DuplicatesCount);
           end
        else begin {cheaper path to this position: change path to it}
-//{
+{
           if (DebugPosition<>nil) and
              TTIsOnPath(Position__,DebugPosition) then begin
              ShowBoard;
              Writeln('New path: Pushes: ',PushCount__,SLASH,PushCount,' Score: ',Score__,SLASH,Score,SPACE,Game.SimpleLowerBound);
              Readln;
              end;
-//}
+}
           if Score<>0 then begin {'True': not a perimeter-node from a search in the opposite direction}
              if (Ord(Move.Direction) and POSITION_OPEN_TAG)<>0 then
-                OPENRemove(Position__); {remove the position from the open-queue; the caller is expected to insert it at its new position}
+                OPENRemove(Position__); {remove the position from the open-queue; the caller is expected to put it back on the open-queue at its new position}
              Score              :=Score__;
              if Parent<>nil then Dec(Parent^.SuccessorCount);
              end
@@ -5187,7 +5587,7 @@ begin {transposition table: add new item unless it already is in the table}
           Move.BoxNo            :=BoxNo__;
           Move.Direction        :=Direction__;
           if Solver.PackingOrder.SetCount<=0 then {'True': it's not a packing-order search, i.e., it's an A*-search (with a depth-first search added as a twist if this is the forward search)}
-             {mark the node for revisiting, in case it hasn't been expanded yet;
+             {mark the node for revisiting if it hasn't been expanded yet;
 
               nodes marked for revisiting are not subject to filters like the
               corral pruning in the forward search;
@@ -5239,7 +5639,7 @@ var i,HashBucketIndex,LastItemIndex,BufferItemCount:Integer; InteriorNodesCount:
     p,q,Last,Root:PPosition;
     GraphFileItems:array[0..(BUFFER_BYTE_SIZE div SizeOf(TGraphFileItem))-1] of TGraphFileItem;
 begin {$I-}
-  {transposition table: save all positions on disk and only keep the perimeter-positions (fringe-positions) in memory;}
+  {transposition table: save all positions to disk and only keep the perimeter-positions (fringe-positions) in memory;}
   {precondition: there are no corral positions in the transposition table (they are identified by having 'Position^.PlayerPos>MAX_BOARD_SIZE')}
   //Write('Calculate perimeter...');
   Result:=0;
@@ -5267,7 +5667,7 @@ begin {$I-}
 
         Seek(GraphFile.GraphFile,Succ(LastItemIndex)*SizeOf(GraphFileItems[0]));{reserve diskspace in one operation instead of extending the file with one buffer block at a time}
         FillChar(GraphFileItems[0],SizeOf(GraphFileItems[0]),0);                {initalize the record so the compiler doesn't complain about an un-initialized variable}
-        BlockWrite(GraphFile.GraphFile,GraphFileItems[0],SizeOf(GraphFileItems[0]));
+        BlockWrite(GraphFile.GraphFile,GraphFileItems[0],SizeOf(GraphFileItems[0])); {create the disk file by writing a record}
         Seek(GraphFile.GraphFile,0);                                            {start writing sequentially from the beginning of the file}
         for i:=0 to LastItemIndex do with Positions^[i] do SuccessorCount:=0;   {later in the calculation, a non-zero value indicates an interior node, as opposed to a perimeter-node}
         for i:=0 to LastItemIndex do with Positions^[i] do
@@ -5329,7 +5729,7 @@ begin {$I-}
                Root:=OpenPositions.Buckets[i]; p:=Root;
                repeat with p^ do begin
                         PathLengthToSolution:=PushCount;                        {save the distance to the goal-position}
-                        PushCount:=High(PushCount);                             {this makes 'TTAdd' "think" that it finds cheaper paths to this position during the search from the opposite direction}
+                        PushCount:=High(PushCount);                             {'High': this makes 'TTAdd' "think" that it finds cheaper paths to this position during the search from the opposite direction}
                         Parent:=nil;
                         Score:=0;                                               {'0' marks the position as a perimeter-node, in effect a solution}
                         SuccessorCount:=0;
@@ -5347,10 +5747,12 @@ begin {$I-}
                PerimeterList:=Root;
                end;
         end
-     else
+     else begin
         {something is wrong, e.g., creating the temporary disk file failed;}
         {drop all existing positions by treating them as interior nodes}
         InteriorNodesCount:=Count;
+        Result:=-1;
+        end;
 
      {$IFDEF CONSOLE_APPLICATION}
        TimeMS:=CalculateElapsedTimeMS(TimeMS,GetTimeMS);
@@ -5361,7 +5763,8 @@ begin {$I-}
           end;
        Writeln;
 
-       Writeln('Perimeter: Positions: ',Result,'/',Count);
+       if Result>=0 then
+          Writeln('Perimeter: Positions: ',Result,'/',Count);
 
        //Writeln('Deadend positions: ',DeadEndCount);
        //Writeln('TT Lookup: ',SearchStatistics.Lookup1Count,'/',SearchStatistics.Lookup2Count);
@@ -5372,17 +5775,18 @@ begin {$I-}
        TimeCheck;
      {$ENDIF}
 
-     if Cardinal(Result)+InteriorNodesCount<>Count then
-        Msg(TEXT_INTERNAL_ERROR+SPACE+LEFT_PAREN+IntToStr(Cardinal(Result)+InteriorNodesCount-Count)+RIGHT_PAREN,'TTCalculatePerimeter');
-
-     Count:=Result; PerimeterListCount:=Result;
      SearchStatistics.DroppedCount:=SearchStatistics.DroppedCount+InteriorNodesCount;
+     if   Result>=0 then begin
+          if Cardinal(Result)+InteriorNodesCount<>Count then
+             Msg(TEXT_INTERNAL_ERROR+SPACE+LEFT_PAREN+IntToStr(Cardinal(Result)+InteriorNodesCount-Count)+RIGHT_PAREN,'TTCalculatePerimeter');
+          Count:=Result; PerimeterListCount:=Result;
+          end
+     else PerimeterListCount:=High(PerimeterListCount); {'High': task failed}
 
      if IOResult<>0 then begin
         Msg(TEXT_FILE_IO_ERROR,GraphFile.FileName);
         Result:=-1;
         end;
-
 {
      for i:=0 to Pred(Capacity) do with Positions[i] do begin
          if (PlayerPos<>0) and (SuccessorCount=0) then
@@ -5415,9 +5819,10 @@ end; {$I+}
 
 procedure TTClear;
 var SquareNo : Integer; //Position:PPosition;
-begin {transposition table: clear table, keeping precalculated deadlock sets, if any}
+begin {transposition table: clear table, keeping precalculated deadlock-sets, if any}
   with Positions do begin
     Count                         :=0;
+    Capacity                      :=0;
     FreeList                      :=nil;
     UninitializedItemCount        :=0;   SearchStatistics.DroppedCount:=0;
     PerimeterList                 :=nil; PerimeterListCount           :=0;
@@ -5426,8 +5831,9 @@ begin {transposition table: clear table, keeping precalculated deadlock sets, if
     StartPosition                 :=nil; SolutionPosition             :=nil;
     PartiallyExpandedPositionsList:=nil; DebugPosition                :=nil;
     BestScore                     := High( BestScore );
-    Capacity                      := ( Cardinal( EndOfPositions ) - Cardinal( Positions ) ) div SizeOf( TPosition );
     if Positions<>nil then begin
+       if HighWaterMark<>nil then
+          Capacity                := ( Cardinal( HighWaterMark ) - Cardinal( Positions ) ) div SizeOf( TPosition );
        UninitializedItemCount     := Integer(Capacity); {add one item at a time to the transposition-table instead of building a free-list with all the items in memory}
 (*
        for i:=Pred(Capacity) downto 0 do begin  {build a free-list with all the items in memory}
@@ -5444,17 +5850,16 @@ begin {transposition table: clear table, keeping precalculated deadlock sets, if
     FillChar(SearchStatistics,SizeOf(SearchStatistics),0);
 
     with Game.DeadlockSets do begin
-      if Count >  PrecalculatedSetsCount then begin {'True': dynamically calculated deadlock sets were found during a previous search; drop all of them before a new search is launched}
+      if Count >  PrecalculatedSetsCount then begin {'True': dynamically calculated deadlock-sets were found during a previous search; drop all of them before a new search is launched}
          Count := PrecalculatedSetsCount;
-         for SquareNo := 0 to Game.BoardSize do {restore the per square deadlock set number counts so only the precalculated deadlock sets are included}
+         for SquareNo := 0 to Game.BoardSize do {restore the per square deadlock-set number counts so only the precalculated deadlock-sets are included}
              if Assigned( SquareSetNumbers[ SquareNo ] ) then
                 while (                            SquareSetCount[ SquareNo ]   > 0     ) and
                       (SquareSetNumbers[SquareNo]^[SquareSetCount[ SquareNo ] ] > Count ) do
                       Dec(                         SquareSetCount[ SquareNo ] );
-         SquareSetNumbers := PrecalculatedSquareSetNumbers; {restore the per square deadlock set numbers to the precalculated deadlock sets, i.e., drop all dynamically created deadlocks found during a previous search}
          end;
 
-      PathDeadlockCount:=0; NewDynamicDeadlockSets:=False; {initalize path information for a depth-first search}
+      PathDeadlockCount:=0; NewDynamicDeadlockSets:=False; {initialize path information for a depth-first search}
       end;
     end;
 end;
@@ -5463,8 +5868,8 @@ procedure TTFinalize;
 begin
   with Positions do begin
     if Positions<>nil then FreeMem(Positions);
-    Positions:=nil; EndOfPositions:=nil;
-    Game.DeadlockSets.Count:=0; {don't restore precalculated deadlock sets from the last processed level}
+    Positions:=nil; HighWaterMark:=nil; HashBuckets:=nil;
+    Game.DeadlockSets.Count:=0; {don't restore precalculated deadlock-sets from the last processed level}
     TTClear;
     end;
 end;
@@ -5475,7 +5880,7 @@ begin {transposition table: returns vector index for the item at 'Position__'}
 end;
 
 function  TTIsOnPath(Position__,Path__:PPosition):Boolean;
-begin //transposition table: returns 'True' if 'Position__' is on the path leading to 'Path__'
+begin {transposition table: returns 'True' if 'Position__' is on the path leading to 'Path__'}
   Result:=False;
   while (Path__<>nil) and (not Result) do
     if   Path__<>Position__ then Path__:=Path__^.Parent
@@ -5483,8 +5888,10 @@ begin //transposition table: returns 'True' if 'Position__' is on the path leadi
 end;
 
 function  TTInitialize(MemoryByteSize__:Cardinal):Boolean;
-var i,j:Integer; PositionSize,HashBucketVectorSize,HashBucketItemSize:Cardinal;
-begin
+var i,j:Integer;
+    PositionSize,HashBucketVectorSize,HashBucketItemSize:Cardinal;
+    RandomState:TRandomState;
+begin {transposition table: allocates memory, initializes data structures for the positions, and initializes constants for Zobrist hash key values}
 //MemoryByteSize__:=256*ONE_MEBI;
   Result                    :=False;
   FillChar(Positions,SizeOf(Positions),0);
@@ -5493,7 +5900,7 @@ begin
   PositionSize              :=SizeOf(Positions.Positions^[Low(Positions.Positions^)]);
   HashBucketItemSize        :=SizeOf(Positions.HashBuckets^[Low(Positions.HashBuckets^)]);
 
-  if MemoryByteSize__>=PositionSize+HashBucketItemSize then with Positions do begin
+  if MemoryByteSize__>=PositionSize+(2*HashBucketItemSize) then with Positions do begin
      {$IFDEF PLUGIN_MODULE}
        {$IFDEF WINDOWS}
          GetAsMuchMemoryAsPossible(Pointer(Positions),MemoryByteSize__,ONE_MEBI);
@@ -5530,23 +5937,23 @@ begin
 
         HashBucketMask:=Pred(HashBucketCount); {masking a hash-value with 'HashBucketMask' produces a proper hash-bucket index}
         HashBuckets   :=PPositionPointersVector(UInt(Positions)+UInt(Capacity*PositionSize)); {reserve the upper part of the allocated memory for the hash-buckets}
-        EndOfPositions:=HashBuckets; {start of the reserved area; later, during processing of a level, its precalculated deadlock sets are added to the reserved area}
+        HighWaterMark :=HashBuckets; {start of the reserved area; memory below the high-water mark is used for transposition table items; above the high-water mark, there are hash table buckets and dynamically allocated data for the deadlock sets}
         Result        :=Capacity<>0;
         end;
      end;
 
-  InitializeRandomState(0);
-  for i:=0 to 255 do if Random(MaxInt)=0 then;                                  {warm up the random number generator}
+  InitializeRandomState(0, RandomState);
+  for i:=0 to 255 do if Random(MaxInt,RandomState)=0 then;                      {warm up the random number generator}
 
   with Positions do
     for i:=Low(SquareHashValues) to High(SquareHashValues) do                   {initialize the hash square values used for calculating Zobrist hash-keys}
         repeat
           SquareHashValues[i]:=
-            Abs(Abs((THashValue(Random(MaxInt)) shl 48))+
-                Abs((THashValue(Random(MaxInt)) shl 32))+
-                Abs((THashValue(Random(MaxInt)) shl 16))+
-                Abs((THashValue(Random(MaxInt)) shl 8 ))+
-                Abs((THashValue(Random(MaxInt)))));
+            Abs(Abs((THashValue(Random(MaxInt,RandomState)) shl 48))+
+                Abs((THashValue(Random(MaxInt,RandomState)) shl 32))+
+                Abs((THashValue(Random(MaxInt,RandomState)) shl 16))+
+                Abs((THashValue(Random(MaxInt,RandomState)) shl 8 ))+
+                Abs((THashValue(Random(MaxInt,RandomState)))));
           for j:=0 to Pred(i) do                                                {avoid duplicates}
               if SquareHashValues[j]=SquareHashValues[i] then
                  SquareHashValues[i]:=0;
@@ -5569,10 +5976,13 @@ end;
 function  TTLookup(HashValue__:THashValue; PlayerPos__,SearchDepth__:Integer;
                    var Position__:PPosition):Boolean;
 var HashBucketIndex:Integer; BasePosition:PPosition;
-begin {transposition table: test if a key already exists;}
-      {precondition: 'PlayerPos__' = 'Game.PlayerPos' for real positions, and 'PlayerPos__' < MAX_BOARD_WIDTH for pseudo positions like deadlock sets}
+begin {transposition table: test if a key already exists in the table;}
+      {preconditions:
+       * 'PlayerPos__' = 'Game.PlayerPos' for real positions;
+       * 'PlayerPos__' < MAX_BOARD_WIDTH or 'PlayerPos__' > MAX_BOARD_SIZE for pseudo positions like deadlock-sets;
+       * 'Solver.SearchStates[SearchDepth__].PlayersReachableSquares.Calculated' is set correctly;}
   Result:=False;
-  //if (PlayerPos__<>Game.PlayerPos) and (PlayerPos__>MAX_BOARD_WIDTH) and (Positions.Count<>0) then
+  //if (PlayerPos__<>Game.PlayerPos) and (PlayerPos__>MAX_BOARD_WIDTH) and (PlayerPos__<=MAX_BOARD_SIZE) and (Positions.Count<>0) and (Positions.OpenPositions.Count<>0) then
   //   Msg(TEXT_INTERNAL_ERROR+': TTLookup: Unexpected player position',TEXT_APPLICATION_TITLE);
   with Positions do begin
     HashBucketIndex:=HashValue__ and HashBucketMask;
@@ -5588,11 +5998,11 @@ begin {transposition table: test if a key already exists;}
                            Result:=True; exit;                                  {found: quick-and-dirty exit}
                            end
                         else
-                           if (PlayerPos__          <=MAX_BOARD_SIZE) and       {'True': the lookup is a search for a normal game position and not a deadlock set}
-                              (Position__^.PlayerPos<=MAX_BOARD_SIZE) then      {'True': the position is a game position and not a deadlock set}
+                           if (PlayerPos__          <=MAX_BOARD_SIZE) and       {'True': the lookup is a search for a normal game position and not a deadlock-set}
+                              (Position__^.PlayerPos<=MAX_BOARD_SIZE) then      {'True': the position is a game position and not a deadlock-set}
                               with Solver.SearchStates[SearchDepth__].PlayersReachableSquares do begin
                                 if not Calculated then
-                                   CalculatePlayersReachableSquares(SearchDepth__); {note that the calculation is for the current game state, i.e., 'Game.PlayerPos' and not the function parameter 'PlayerPos__'}
+                                   CalculatePlayersReachableSquares(SearchDepth__); {note that the calculation uses the current game state, i.e., 'Game.PlayerPos' and not the function parameter 'PlayerPos__'}
                                 if (Squares[Position__^.PlayerPos]=TimeStamp)   {'True': the position's player-position is in the current player access area}
                                    {
                                    // quick-and-dirty:
@@ -5620,7 +6030,7 @@ begin {transposition table: test if a key already exists;}
 //                 if   Game.HashValue>=Position__^.HashValue then begin
                         Position__:=Position__^.HashBucket.Next;                {try next item in this bucket}
                         if Position__=BasePosition then begin                   {'True': all items in the chain has been tested}
-                           Position__:=nil;                                     {'Position__' = nil: either means "key >= all keys in this bucket" or "empty bucket"}
+                           Position__:=nil;                                     {'Position__' = nil: this means "key >= all keys in this bucket" or "empty bucket"}
                            exit;
                            end;
                         end
@@ -5652,7 +6062,7 @@ begin {transposition table: remove item; precondition: 'Position__' is a fringe-
      Position__^.HashBucket.Next:=Positions.FreeList;                           {return the item to the free-list}
      Positions.FreeList:=Position__;
 
-     Dec(Positions.Count); Inc(Positions.SearchStatistics.DroppedCount);          {update counts and statistics}
+     Dec(Positions.Count); Inc(Positions.SearchStatistics.DroppedCount);        {update counts and statistics}
 
      if Parent<>nil then with Parent^ do begin
         Dec(SuccessorCount);
@@ -5673,7 +6083,9 @@ end;
 
 {Pathfinding}
 
-procedure CalculateBoxPullOrPushDistances(BoxSquare__,PlayersReachableSquaresIndex__:Integer; PushBox__,UsePlayerPosition__,ContinueCalculation__:Boolean; var Distances__:TSquareDirectionArrayOfInteger);
+function  CalculateBoxPullOrPushDistances(BoxSquare__,PlayersReachableSquaresIndex__:Integer;
+                                          PushBox__,UsePlayerPosition__,ContinueCalculation__,CountReachableSquares__:Boolean;
+                                          var Distances__:TSquareDirectionArrayOfInteger):Integer;
 type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
 var  BoxPosition,BoxToSquare,Distance,DistanceInitializationValue,
      LastBoxPosition,NeighborSquare,
@@ -5681,7 +6093,8 @@ var  BoxPosition,BoxToSquare,Distance,DistanceInitializationValue,
      Direction:TDirection;
      QueueBottom,QueueTop:^TQueueItem;
      QueueItems:array[0..MAX_BOARD_SIZE*DIRECTION_COUNT] of TQueueItem;
-begin {calculates the distance to all reachable squares by pulling or pushing a box around on the board, starting from 'BoxSquare__'}
+begin {calculates the distance to all reachable squares by pulling or pushing a box around on the board, starting from 'BoxSquare__';}
+      {when 'CountReachableSquares__' is 'True', then the number of reachable squares is returned as the function result, otherwise the function result is undefined;}
   with Game do with Solver.SearchStates[PlayersReachableSquaresIndex__] do begin
     OldPlayerPosition:=PlayerPos; OldBoxSquareValue:=Board[BoxSquare__];
     Board[BoxSquare__]:=Board[BoxSquare__] and (not BOX); {remove the box, if any, from the board}
@@ -5693,7 +6106,7 @@ begin {calculates the distance to all reachable squares by pulling or pushing a 
                 for Direction:=Low(Direction) to High(Direction) do
                     Distances__[Square,Direction]:=-INFINITY  {wall square : '-infinity' : the search cannot find a better path to the square}
            else for Direction:=Low(Direction) to High(Direction) do
-                    Distances__[Square,Direction]:=+INFINITY; {floor square: '+infinity' : the search might  find a better path to the square}
+                    Distances__[Square,Direction]:=+INFINITY; {floor square: '+infinity' : the search may    find a better path to the square}
        end
     else for Direction:=Low(Direction) to High(Direction) do
              if (Abs(Distances__[BoxSquare__,Direction])<>INFINITY) then
@@ -5725,12 +6138,12 @@ begin {calculates the distance to all reachable squares by pulling or pushing a 
                 QueueTop^.PlayerPos:=NeighborSquare;
                 QueueTop^.Distance :=0;
                 if   PushBox__ then                                             {'True': push the box around on the board, as opposed to pulling it around on the board}
-                     Distances__[BoxSquare__,OPPOSITE_DIRECTION[Direction]]:=DistanceInitializationValue  {'OPPOSITE_DIRECTION': e.g., after pushing the box to the left, the player is on the right side of the box}
+                     Distances__[BoxSquare__,OPPOSITE_DIRECTION[Direction]]:=DistanceInitializationValue  {'OPPOSITE_DIRECTION': e.g., after pushing the box to the left, the player is at 'NeighborSquare' on the right side of the box}
                 else Distances__[BoxSquare__,Direction]:=DistanceInitializationValue;
                 end
         else if not UsePlayerPosition__ then
                 if   PushBox__ then
-                     Distances__[BoxSquare__,OPPOSITE_DIRECTION[Direction]]:=DistanceInitializationValue  {'OPPOSITE_DIRECTION': e.g., after pushing the box to the left, the player is on the right side of the box}
+                     Distances__[BoxSquare__,OPPOSITE_DIRECTION[Direction]]:=DistanceInitializationValue  {'OPPOSITE_DIRECTION': e.g., after pushing the box to the left, the player is at 'NeighborSquare' on the right side of the box}
                 else Distances__[BoxSquare__,Direction]:=DistanceInitializationValue;
         end;
 
@@ -5780,7 +6193,7 @@ begin {calculates the distance to all reachable squares by pulling or pushing a 
                           )
                      )
                      or
-                     (PlayerToSquare=StartPlayerPos) {'=': if the player after the pull ends at its starting position in the game, then the square is all right}
+                     (PlayerToSquare=StartPlayerPos) {'=': if the player after the pull ends at its starting position in the game, then the square is OK}
                     ) then begin
                     Distances__[BoxToSquare,Direction]:=Distance;
                     Inc(QueueTop);
@@ -5796,6 +6209,18 @@ begin {calculates the distance to all reachable squares by pulling or pushing a 
 
     Board[BoxSquare__]:=OldBoxSquareValue; {restore box square value}
     PlayerPos:=OldPlayerPosition; {restore player position}
+
+    Result:=0;
+    if CountReachableSquares__ then
+       for Square:=0 to BoardSize do
+           if (Board[Square] and WALL)=0 then
+              for Direction:=Low(Direction) to High(Direction) do begin
+                  Distance:=Distances__[Square,Direction];
+                  if (Distance>=0) and (Distance<INFINITY) then begin
+                     Inc(Result);
+                     break; {quick-and-dirty exit the direction loop when it's known that the square is reachable}
+                     end;
+                  end;
     end;
 end; {CalculateBoxPullOrPushDistances}
 
@@ -5823,7 +6248,7 @@ begin {calculates - for all squares on the (empty) board - the distance to the n
     QueueBottom:=Addr(QueueItems[Low(QueueItems)]); QueueTop:=QueueBottom;
 
     for BoxNo:=FirstBoxNo__ to LastBoxNo__ do begin
-        Square:=StartBoxPos[BoxNo]; {note it's the start positions, not the box positions for the current game state}
+        Square:=StartBoxPos[BoxNo]; {note that it's the start positions, not the box positions for the current game state}
         if (Board[Square] and WALL)=0 then begin {'True': the box square hasn't been temporarily disabled}
            if  UsePlayerStartPosition__ then begin
                Inc(Board[Square],BOX);
@@ -5999,17 +6424,21 @@ begin
     end;
 end; {CalculateDistanceToNearestGoalForAllSquares}
 
-procedure CalculateBoxReachableSquaresForAllBoxes;
+function  CalculateBoxReachableSquaresForAllBoxes:Integer;
 var Square:Integer; Distances:TBoardOfIntegers;
 begin {note that the player's start position does matter, but otherwise each box is calculated individually with all other boxes removed from the board}
   with Game do begin
+    Result:=0;
     CalculateDistanceToNearestBoxStartPositionForAllSquares(1,BoxCount,True,Distances);
     {ShowBoxDistanceToAllSquares(Distances); Readln;}
 
     for Square:=0 to BoardSize do {for each square...}
-        if   Distances[Square]=INFINITY then
-             Board[Square]:=Board[Square] and (not FLAG_BOX_REACHABLE_SQUARE)
-        else Board[Square]:=Board[Square] or       FLAG_BOX_REACHABLE_SQUARE;
+        if Distances[Square]=INFINITY then {'True': square not reachable}
+           Board[Square]:=Board[Square] and (not FLAG_BOX_REACHABLE_SQUARE)
+        else begin {square reachable}
+           Board[Square]:=Board[Square] or       FLAG_BOX_REACHABLE_SQUARE;
+           Inc(Result);
+           end;
 
     {ShowBoxReachableSquaresForAllBoxes;}
     end;
@@ -6143,7 +6572,7 @@ begin {Calculates a moves/lines optimal path from the current player position to
                             else if   NeighborLineCount                  =  LineCounts[NeighborSquare] then begin {'True': this is another moves/lines optimal path to this neighbor square}
                                       Include(ParentDirections[NeighborSquare],Direction); {update the set of directions from parent squares to this neighbor square via a moves optimal path}
                                       if LineLengths    [NeighborSquare] <  NeighborLineLength then {'True': the new path to the neighbor square has a better line length score}
-                                         LineLengths    [NeighborSquare] := NeighborLineLength; {save the best line length score (for the most recent lines); it's used as a tiebreaker between equal moves/lines paths to a square}
+                                         LineLengths    [NeighborSquare] := NeighborLineLength; {save the best line length score (for the most recent lines); it's used as a Tiebreaker between equal moves/lines paths to a square}
                                       end;
                             end;
                    end;
@@ -6226,8 +6655,8 @@ begin {a complete reset of the square timestamps is only necessary on initializa
     TimeStamp:=0; Calculated:=False;
     //FillChar(Squares,SizeOf(Squares[0])*Succ(Game.BoardSize),0);
     for i:=0 to Game.BoardSize do
-        if   (Game.Board[i] and WALL)=0 then Squares[i]:=0 {'True': the square is a floor, not a wall}
-        else Squares[i]:=High(TimeStamp) and (not 1);      {marking walls with high-value makes the time-critical 'CalculatePlayersReachableSquares' more efficient because a single '<TimeStamp' test suffices for finding unvisited floor squares}
+        if   (Game.Board[i] and FLOOR)<>0 then Squares[i]:=0                    {'True': the square is a player reachable floor, not a wall, and not a square which the player cannot reach}
+        else Squares[i]:=High(TimeStamp) and (not 1); {marking non-floors with high-value makes the time-critical 'CalculatePlayersReachableSquares' more efficient; testing for unvisited floor squares can be made with a single '< TimeStamp' test}
     end;
 end;
 
@@ -6484,31 +6913,103 @@ begin {Returns result in the global value 'Solver.SearchStates[Index__].PlayersR
     end;
 end; {CalculatePlayersReachableSquares}
 
-function  CalculateReachableGoalsForAllSquares(var SquaresGoalSet__:TBoardOfGoalSets):Boolean;
-var Count,GoalNo,Square:Integer; Direction:TDirection;
+function  CalculateReachableGoalsForAllSquares(PushBox__:Boolean; var SquaresGoalsCount__:TBoardOfIntegers; var SquaresGoalSet__:TBoardOfGoalSets):Boolean;
+var Count,GoalNo,GoalSquare,Square:Integer; Direction:TDirection;
     Distances:TSquareDirectionArrayOfInteger;
 begin {returns 'True' if the calculation runs to its completion; a time limit or the user may terminate the task during the calculation}
   with Game do begin
-    FillChar(SquaresGoalSet__,SizeOf(SquaresGoalSet__),0);
+    FillChar(SquaresGoalsCount__,SizeOf(SquaresGoalsCount__),0);
+    FillChar(SquaresGoalSet__   ,SizeOf(SquaresGoalSet__   ),0);
     Count:=0;
-    for GoalNo:=1 to GoalCount do
-        if (Solver.SearchLimits.DepthLimit>=0) then begin {'True': the solver hasn't been terminated}
-           Inc(Count);
-           Square:=GoalPos[GoalNo];
-           if (Board[Square] and (WALL+GOAL))=GOAL then begin {'True': the goal square hasn't been temporarily disabled}
-              CalculateBoxPullOrPushDistances(Square,SEARCH_STATE_INDEX_DO_PUSH,False,False,False,Distances);
-              for Square:=0 to BoardSize do
-                  if (Board[Square] and WALL)=0 then
+    if PushBox__ then begin {calculate by pushing boxes from each square on the board}
+       for Square:=1 to BoardSize do
+           if Solver.SearchLimits.DepthLimit>=0 then begin {'True': the solver hasn't been terminated}
+              Inc(Count);
+              if (Board[Square] and (WALL+FLAG_ILLEGAL_BOX_SQUARE+FLAG_BOX_REACHABLE_SQUARE+FLOOR)) = (FLAG_BOX_REACHABLE_SQUARE+FLOOR) then begin {'True': a floor square}
+                 CalculateBoxPullOrPushDistances(Square,SEARCH_STATE_INDEX_DO_PUSH,True,False,False,False,Distances);
+                 for GoalNo:=1 to GoalCount do begin
+                     GoalSquare:=GoalPos[GoalNo];
                      for Direction:=Low(Direction) to High(Direction) do
-                         if Abs(Distances[Square,Direction])<>INFINITY then begin
+                         if Abs(Distances[GoalSquare,Direction])<>INFINITY then begin
                             Include(SquaresGoalSet__[Square],GoalNo);
+                            Inc(SquaresGoalsCount__ [Square]);
                             break; {quick-and-dirty exit the 'for' loop when a path has been found from the square to the currently investigated goal}
                             end;
-              TimeCheck; {the calculation of the reachable goals for each square can be a time consuming task if it's a large and open board; the task may be terminated by a time limit or by the user}
+                     end;
+                 TimeCheck; {the calculation of the reachable goals for each square can be a time consuming task if it's a large and open board; the task may be terminated by a time limit or by the user}
+                 end;
               end;
-           end;
-    Result:=Count=GoalCount; {'True': the calculation has run to its completion}
+       Result:=Count=BoardSize; {'True': the calculation has run to its completion}
+       end
+    else begin {calculate by pulling boxes away from goal squares}
+       for GoalNo:=1 to GoalCount do
+           if (Solver.SearchLimits.DepthLimit>=0) then begin {'True': the solver hasn't been terminated}
+              Inc(Count);
+              Square:=GoalPos[GoalNo];
+              if (Board[Square] and (WALL+GOAL))=GOAL then begin {'True': the goal square hasn't been temporarily disabled}
+                 CalculateBoxPullOrPushDistances(Square,SEARCH_STATE_INDEX_DO_PUSH,False,False,False,False,Distances);
+                 for Square:=0 to BoardSize do
+                     if (Board[Square] and WALL)=0 then
+                        for Direction:=Low(Direction) to High(Direction) do
+                            if Abs(Distances[Square,Direction])<>INFINITY then begin
+                               Include(SquaresGoalSet__[Square],GoalNo);
+                               Inc(SquaresGoalsCount__ [Square]);
+                               break; {quick-and-dirty exit the 'for' loop when a path has been found from the square to the currently investigated goal}
+                               end;
+                 TimeCheck; {the calculation of the reachable goals for each square can be a time consuming task if it's a large and open board; the task may be terminated by a time limit or by the user}
+                 end;
+              end;
+       Result:=Count=GoalCount; {'True': the calculation has run to its completion}
+       end;
     end;
+end;
+
+function  TestCalculateReachableGoalsForAllSquares:Boolean;
+var BoxNo,GoalNo,Square:Integer;
+    Time1MS,Time2MS:TTimeMS;
+    SquaresGoalsCount1,SquaresGoalsCount2:TBoardOfIntegers;
+    SquaresGoalSet1,SquaresGoalSet2:TBoardOfGoalSets;
+begin
+  with Game do begin
+    Result:=True;
+    for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+
+    Time1MS:=GetTimeMS;
+    CalculateReachableGoalsForAllSquares(False,SquaresGoalsCount1,SquaresGoalSet1); {'False' parameter: calculating squares->goals by pulling boxes away from goal squares may be a little faster than pushing boxes from squares to goals}
+    Time1MS:=CalculateElapsedTimeMS(Time1MS,GetTimeMS);
+
+    Time2MS:=GetTimeMS;
+    CalculateReachableGoalsForAllSquares(True,SquaresGoalsCount2,SquaresGoalSet2);
+    Time2MS:=CalculateElapsedTimeMS(Time2MS,GetTimeMS);
+
+    for BoxNo:=1 to BoxCount do
+        if BoxPos[BoxNo]>0 then
+           Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] or BOX; {put all boxes back on the board}
+
+    Writeln('Time: Pull: ',Time1MS,' Push: ',Time2MS);
+
+    for Square:=0 to BoardSize do
+        if IsALegalAndBoxReachableSquare(Square) and
+           (SquaresGoalSet1[Square]<>SquaresGoalSet2[Square]) then begin
+           if Result then begin
+              Result:=False;
+              ShowBoardWithColumnsAndRows;
+              end;
+           Write(SAT(Square),' Pull: ');
+           for GoalNo:=1 to GoalCount do
+               if GoalNo in SquaresGoalSet1[Square] then
+                  Write(SAT(GoalPos[GoalNo]),SPACE);
+           Writeln;
+           Write(SAT(Square),' Push: ');
+           for GoalNo:=1 to GoalCount do
+               if GoalNo in SquaresGoalSet2[Square] then
+                  Write(SAT(GoalPos[GoalNo]),SPACE);
+           Writeln;
+           end;
+    if not Result then
+       Readln;
+  end;
+
 end;
 
 procedure CalculateSquareGoalDistances(FirstGoalNo__,LastGoalNo__,DestinationOffset__:Integer;
@@ -6557,7 +7058,7 @@ begin {CalculateSquareGoalDistances}
                      Board[GoalPos[Index]]:=Board[GoalPos[Index]] and (not BOX);
               end;
 
-           CalculateBoxPullOrPushDistances(GoalPos[GoalNo],SEARCH_STATE_INDEX_DO_PUSH,False,False,False,Distances);
+           CalculateBoxPullOrPushDistances(GoalPos[GoalNo],SEARCH_STATE_INDEX_DO_PUSH,False,False,False,False,Distances);
 
            if UsePackingOrder__ then with Solver.PackingOrder do
               for Index:=1 to GoalAndParkingSquareCount do
@@ -6566,7 +7067,7 @@ begin {CalculateSquareGoalDistances}
            for Square:=0 to BoardSize do begin
                SquareGoalDistance__[Square,DestinationOffset__+GoalNo]:=
                  High(SquareGoalDistance__[Square,DestinationOffset__+GoalNo]); {'High': means no path from the square to the goal; note the difference between the defined integer constant 'INFINITY' and the byte-sized high value}
-               if not IsAWallSquare(Square) then
+               if IsALegalAndBoxReachableSquare(Square) then
                   for Direction:=Low(Direction) to High(Direction) do
                       if Abs(Distances[Square,Direction])<>INFINITY then
                          SquareGoalDistance__[Square,DestinationOffset__+GoalNo]:=
@@ -6619,7 +7120,7 @@ end;
 
 {=============================================================================}
 
-{Deadlock Sets}
+{Deadlock-sets}
 
 function  ShowDeadlockSetNumbers : Integer;
 var Index, SquareNo : Integer;
@@ -6637,13 +7138,13 @@ begin
 end;
 
 function  CalculateDeadlockSets(Position__:PPosition; var DeadlockSetCandidate__:TDeadlockSetCandidate):Boolean;
-  {'Position__' =  nil : precalculate deadlock sets (called once during level initialization);}
-  {'Position__' <> nil : check if 'DeadlockSetCandidate__' is a valid deadlock set; 'Position__' is the current position in the search, in particular, it's 'PushCount' must contain the highest used index for 'CalculatePlayersReachableSquares'}
+  {'Position__' =  nil : precalculate deadlock-sets (called once during level initialization)}
+  {'Position__' <> nil : check if 'DeadlockSetCandidate__' is a valid deadlock-set; 'Position__' is the current position in the search, in particular, it's 'PushCount' must contain the highest used index for 'CalculatePlayersReachableSquares'}
 
-  {this somewhat awkward interface to the deadlock sets calculation}
-  {is the result of the way the program has grown; first it handled}
-  {precalculated deadlock sets only, and the support for dynamically}
-  {adding more deadlock sets during the search was added later}
+  {this somewhat awkward interface to the deadlock-sets calculation}
+  {is the result of the way the program has evolved; first it handled}
+  {precalculated deadlock-sets only, and the support for dynamically}
+  {adding more deadlock-sets during the search was added later}
 
   {doing it this way makes it possible to keep many of the shared supporting}
   {functions local instead of promoting them to toplevel functions where they}
@@ -6653,7 +7154,7 @@ function  CalculateDeadlockSets(Position__:PPosition; var DeadlockSetCandidate__
   {the function returns 'False' if the starting position is a deadlock}
 
 {
-Deadlock Sets
+Deadlock-sets
 
 --------
 Legend:
@@ -6670,7 +7171,7 @@ $ :     A box
 X :	A non-empty square
 --------
 
-Deadlock sets come in two flavors:
+Deadlock-sets come in two flavors:
 
 * the deadlock is independent of the player position
 
@@ -6687,7 +7188,7 @@ whether the player is inside or outside the fence:
   called for, calculating the player's reachable squares to check if the player
   can reach the stored inner square representative for the fenced-in area; this
   check is only possible for deadlocks where the fenced-in area consists of a
-  single "pocket" only
+  single "room" only
 
 
 --------
@@ -6721,7 +7222,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
                 squares - 1 - number of boxes on the squares.
 
-                This applies to all deadlock sets, except for
+                This applies to all deadlock-sets, except for
                 type 08 and 09.
 
                 4-block/B's are actually slightly more general
@@ -6755,8 +7256,8 @@ XX              of them is a box on a non-goal square. The non-wall
 08              Closed edge with goals
                 ======================
  # ##~~# #      The capacity of the set is the number of boxes
-#%%%%~~%%%#     that can be added before the line overflows,
-  #	#         hence, capacity = goals - boxes.
+#%%%%~~%%%#     that can be added before the line overflows.
+  #	#       Capacity = goals - boxes.
 
 ---------
 09              Closed edges sharing a goal corner
@@ -6870,7 +7371,7 @@ XX              of them is a box on a non-goal square. The non-wall
 (Example)
 #############   Boxes at the squares depicted by "%" and "*"
 #######     #   cannot reach the goals depicted by ".". These
-# %%%%%%%%%%#   squares form a deadlock set with capacity =
+# %%%%%%%%%%#   squares form a deadlock-set with capacity =
 #     #%%%%*#   total number of goals - number of unreachable
 #  .. # %%**#   goals (7 - 4 = 3 in this example).
 #  .. #######
@@ -6904,7 +7405,9 @@ XX              of them is a box on a non-goal square. The non-wall
        TCorner       =record EdgeLengths:TDirectionArrayOfIntegers; SquareNo:Integer; Types:TCornerTypeSet;
                       end;
   var  i,j,CornerCount:Integer; TimeMS:TTimeMS;
+       OriginalControllerAndFreezeSetPairsEnabled:Boolean;
        Corners:array[0..MAX_BOARD_SIZE] of TCorner;
+       {S:String;}
 
     function  AddSquareToDeadlockSet(SquareNo__:Integer):Boolean; forward;
     function  CommitDeadlockSet(Search__,ExpandSet__,AcceptPseudoLegalSets__:Boolean; var StartPositionIsOK__:Boolean):Boolean; forward;
@@ -6957,7 +7460,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     procedure AddFloor(SquareNo__:Integer);
-    begin {precondition: the square is not already a member of the deadlock set}
+    begin {precondition: the square is not already a member of the deadlock-set}
       DeadlockSetCandidate__.SquareColors[SquareNo__]:=scLightGray;
       Inc(DeadlockSetCandidate__.PaintedFloorCount);
       Inc(DeadlockSetCandidate__.Floors.Count);
@@ -6968,7 +7471,7 @@ XX              of them is a box on a non-goal square. The non-wall
     function  TryFloor(SquareNo__:Integer):Boolean;
     var i,OldBoxCount,OldFloorCount,OldPaintedFloorCount,OldGoalCount,OldCapacity,OldSquareOutsideFence:Integer;
         OldDeadlockSetCandidateFlags:TDeadlockSetFlagsSet; Dir:TDirection;
-    begin {tries to add a floor to the deadlock set}
+    begin {tries to add a floor to the deadlock-set}
       Result:=(DeadlockSetCandidate__.SquareColors[SquareNo__]=scWhite) and
               ((Game.Board[SquareNo__] and (PLAYER{+BOX+GOAL}))=0) and
               (DeadlockSetCandidate__.GoalCount<=Game.BoxCount);
@@ -7065,7 +7568,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  InitializeDeadlockSetCandidate(Capacity__,CenterSquare__,MaxBoxCount__{,EscapedBoxesCountDown__}:Integer):Boolean;
-    begin
+    begin {postcondition: leaves ''DeadlockSetCandidate__.Boxes.Squares', 'DeadlockSetCandidate__.Floors.Squares', and 'DeadlockSetCandidate__.SquaresOutsideFence.Squares' untouched}
       Result:=Game.DeadlockSets.Count<MAX_DEADLOCK_SETS;
       if Result then begin
          DeadlockSetCandidate__.Capacity                 :=Capacity__;
@@ -7082,7 +7585,7 @@ XX              of them is a box on a non-goal square. The non-wall
          end
       else begin
          {$IFDEF CONSOLE_APPLICATION}
-           if Position__=nil then Writeln('Note: Table full (deadlock sets); not all detected sets are in use.');
+           if Position__=nil then Writeln('Note: Table full (deadlock-sets); not all detected sets are in use.');
          {$ENDIF}
          DeadlockSetCandidate__.GoalCount:=Succ(Game.BoxCount); {mark current set as invalid}
          end;
@@ -7099,7 +7602,7 @@ XX              of them is a box on a non-goal square. The non-wall
              Dec(SessionPlayerMustBeOutsideSetCount);
 
         k:=SquaresOutsideFenceIndex[SetNo__];
-        if k=0 then {'True': there are no squares outside the fence for this deadlock set}
+        if k=0 then {'True': there are no squares outside the fence for this deadlock-set}
            SquaresOutsideFenceItemCount:=0
         else begin {compress the 'squares outside fence' vector}
            SquaresOutsideFenceItemCount:=Succ(SquaresOutsideFence[k]); {'Succ': the number (n) of outside squares for the set in stored in the vector, and the squares (1..n) follow}
@@ -7108,7 +7611,7 @@ XX              of them is a box on a non-goal square. The non-wall
                SquaresOutsideFence   [i]:=SquaresOutsideFence[i+SquaresOutsideFenceItemCount];
            end;
 
-        for  i:=SetNo__ to Count do begin {compress the deadlock sets table}
+        for  i:=SetNo__ to Count do begin {compress the deadlock-sets table}
              Capacity                [i]:=Capacity                [Succ(i)];
              CenterSquare            [i]:=CenterSquare            [Succ(i)];
              Flags                   [i]:=Flags                   [Succ(i)];
@@ -7119,7 +7622,8 @@ XX              of them is a box on a non-goal square. The non-wall
              SquareOutsideFence      [i]:=SquareOutsideFence      [Succ(i)]; {for corral-type deadlocks, the most recent player position which has been proved to be outside the fence}
              SquaresOutsideFenceIndex[i]:=SquaresOutsideFenceIndex[Succ(i)];
              if SquaresOutsideFenceIndex[i]>0 then {'True': there are listed squares outside the fence for this deadlock}
-                Dec(SquaresOutsideFenceIndex[i],SquaresOutsideFenceItemCount); {adjust the index into the vector after the squares belonging to the deleted deadlock set have been removed}
+                Dec(SquaresOutsideFenceIndex[i],SquaresOutsideFenceItemCount); {adjust the index into the vector after the squares belonging to the deleted deadlock-set have been removed}
+             Statistics              [i]:=Statistics              [Succ(i)];
              end;
 
         for  SquareNo:=0 to Game.BoardSize do {for each square, remove the reference to the set, if any}
@@ -7175,7 +7679,7 @@ XX              of them is a box on a non-goal square. The non-wall
          else begin
             {$IFDEF CONSOLE_APPLICATION}
               if Position__=nil then
-                 Writeln('Note: Table full (squares in a deadlock set); not all detected sets are in use.');
+                 Writeln('Note: Table full (squares in a deadlock-set); not all detected sets are in use.');
             {$ENDIF}
             DeadlockSetCandidate__.GoalCount:=Succ(Game.BoxCount); {mark current set as invalid}
             end;
@@ -7212,6 +7716,7 @@ XX              of them is a box on a non-goal square. The non-wall
            Inc(DeadlockSetCandidate__.PaintedFloorCount);
            if  (Game.Board[SquareNo__] and GOAL  )<>0 then Inc(DeadlockSetCandidate__.GoalCount);
            if  (Game.Board[SquareNo__] and PLAYER)<>0 then Include(DeadlockSetCandidate__.Flags,dsfPlayerIsInsideSet);
+           if  (SquareNo__=Game.StartPlayerPos) and (Position__<>nil) then Include(DeadlockSetCandidate__.Flags,dsfPlayerIsInsideSet);
            if  FloodFill__ then
                for Direction:=Low(Direction) to High(Direction) do
                    VisitFloor(SquareNo__+Game.SquareOffsetForward[Direction],True);
@@ -7220,7 +7725,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
     begin {CalculateDeadlockSetCandidateInfo}
       {initialize square-colours, (re)calculate capacity and number of goals,}
-      {and check if player in the start position is inside the deadlock set}
+      {and check if the player in the start position is inside the deadlock-set}
       InitializeSquareColors;
       DeadlockSetCandidate__.GoalCount:=0;
 
@@ -7239,8 +7744,9 @@ XX              of them is a box on a non-goal square. The non-wall
            DeadlockSetCandidate__.SquareColors[SquareNo]:=scDarkGray; {dark-grey: mark box-squares}
            if (DeadlockSetCandidate__.CenterSquare<>0) and IsABoxSquare(SquareNo) then
               Dec(DeadlockSetCandidate__.Capacity);
-           if IsAGoalSquare  (SquareNo) then Inc(DeadlockSetCandidate__.GoalCount);
-           if IsAPlayerSquare(SquareNo) then Include(DeadlockSetCandidate__.Flags,dsfPlayerIsInsideSet); {it's necessary to assume the player starts inside the set in this situation}
+           if IsAGoalSquare  (SquareNo)    then Inc(DeadlockSetCandidate__.GoalCount);
+           if IsAPlayerSquare(SquareNo)    then Include(DeadlockSetCandidate__.Flags,dsfPlayerIsInsideSet); {it's necessary to assume that the player starts inside the set in this situation}
+           if (SquareNo=Game.StartPlayerPos) and (Position__<>nil) then Include(DeadlockSetCandidate__.Flags,dsfPlayerIsInsideSet); {it's necessary to assume that the player starts inside the set in this situation}
            end;
 
       BoxesAtGoalsCount:=DeadlockSetCandidate__.GoalCount;
@@ -7277,20 +7783,32 @@ XX              of them is a box on a non-goal square. The non-wall
                    Include(DeadlockSetCandidate__.Flags,dsfHasDisconnectedInnerFloors);
                 end
       else if   dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags then
-                for SquareNo := 0 to Game.BoardSize do
-                    if DeadlockSetCandidate__.SquareColors[ SquareNo ] =  scWhite then
-                       DeadlockSetCandidate__.SquareColors[ SquareNo ] := scLightGray; {a "no progress" deadlock encompasses the entire board when the deadlock candidate hasn't a center square, i.e., when its isn't a corral-type deadlock candidate}
+                if dsfPeelOffNonCorralBoxes in DeadlockSetCandidate__.Flags then {treat the deadlock candidate as a corral-type deadlock; try to make the boxes escape into the player's access area}
+                   with Solver.SearchStates[SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH].PlayersReachableSquares do begin
+                     CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH);
+                     for SquareNo := 0 to Game.BoardSize do
+                         if (DeadlockSetCandidate__.SquareColors[ SquareNo ] = scWhite) and {a floor}
+                            (Squares[SquareNo]<TimeStamp) then {a floor square which the player cannot reach}
+                            VisitFloor(SquareNo, False);
 
-      if        (DeadlockSetCandidate__.Flags*[dsfControllerSet,dsfIsADeadlock,dsfFreezeSet,dsfIsANoProgressDeadlockCandidate])<>[] then {'True': the calculated deadlock set information is valid; this doesn't imply that the candidate really is a deadlock}
+                   Include(DeadlockSetCandidate__.Flags,dsfHasDisconnectedInnerFloors);
+                   Include(DeadlockSetCandidate__.Flags,dsfHasUnspecifiedInnerFloors);
+                   end
+                else
+                   for SquareNo := 0 to Game.BoardSize do
+                       if DeadlockSetCandidate__.SquareColors[ SquareNo ] =  scWhite then
+                          DeadlockSetCandidate__.SquareColors[ SquareNo ] := scLightGray; {a "no progress" deadlock encompasses the entire board when the deadlock candidate hasn't a center square, i.e., when its isn't a corral-type deadlock candidate}
+
+      if        (DeadlockSetCandidate__.Flags*[dsfControllerSet,dsfFreezeSet,dsfIsADeadlock,dsfIsANoProgressDeadlockCandidate])<>[] then {'True': the calculated deadlock-set information is valid; this doesn't imply that the candidate really is a deadlock}
                 Result:=True
       else if   DeadlockSetCandidate__.PaintedFloorCount+DeadlockSetCandidate__.Boxes.Count<Game.FloorCount then {'True': the candidate doesn't encompass the entire board}
                 if   BoxesAtGoalsCount<DeadlockSetCandidate__.Boxes.Count then {'True': some boxes are not located at goal squares}
                      if   RejectIfGoalsAtBoxSquaresAndInnerFloorSquaresCanAccommodateTheBoxes__ then
                           {there is not necessarily any further validation of the deadlock candidate; in order to guarantee correctness, reject it if its box squares and inner floor squares contain enough goals to accommodate all the boxes}
-                          Result:=DeadlockSetCandidate__.GoalCount<DeadlockSetCandidate__.Boxes.Count {'True': the box squares + inner floor squares contains fewer goal squares than than the number of boxes in the candidate set}
-                     else Result:=True // return 'True' and leave it to 'Search()' to check whether the candidate is legal
+                          Result:=DeadlockSetCandidate__.GoalCount<DeadlockSetCandidate__.Boxes.Count {'True': the box squares + inner floor squares contains fewer goal squares than than the number of boxes in the candidate-set}
+                     else Result:=True // return 'True' and leave it to 'Search()' to check whether the candidate is a deadlock
                 else      Result:=False {all boxes are located at goal squares}
-           else Result:=False; {the deadlock set candidate encompass the entire board; this is normally caused by a fence-type deadlock candidate where the fence is broken from the beginning}
+           else Result:=False; {the deadlock-set candidate encompasses the entire board; this is normally caused by a fence-type deadlock candidate where the fence is broken from the beginning}
     end; {CalculateDeadlockSetCandidateInfo}
 
     procedure LoadCandidateFromSet(SetNo__:Integer);
@@ -7335,7 +7853,11 @@ XX              of them is a box on a non-goal square. The non-wall
 
     function  IsARedundantDeadlockSet(SetNo__:Integer):Boolean;
     var i,j,SetNo,SquareNo,CommonSquaresCount:Integer;
-    begin
+    begin {returns 'True' if the specified deadlock set or deadlock candidate
+           is redundant;
+           comparisons are only approximate and may return false positives, so
+           some candidates will falsely be classified as redundant, and
+           consequently not be added to the collection of deadlock sets}
       Result:=False;
       if ((SetNo__<>0) and (Game.DeadlockSets     .CenterSquare[SetNo__]<>0))
          or
@@ -7352,6 +7874,8 @@ XX              of them is a box on a non-goal square. The non-wall
                     end;
                 if (CommonSquaresCount=SquaresCount[SetNo])
                    and
+                   (DeadlockSetCandidate__.CenterSquare=CenterSquare[SetNo])
+                   and
                    (
                     ((SetNo__<>0)
                      and
@@ -7364,6 +7888,7 @@ XX              of them is a box on a non-goal square. The non-wall
                     )
                    )
                    then begin
+                   //Writeln(SetNo);
                    Result:=True; break;
                    end;
                 end;
@@ -7391,14 +7916,14 @@ XX              of them is a box on a non-goal square. The non-wall
 
         if   BoxOnIllegalSquareIndex=0 then begin
              Result:=CommitDeadlockSet(True,ExpandSet__,AcceptPseudoLegalSets__,StartPositionIsOK__); {commit new set}
-             if Result and (WhiteNeighborCount=0) and {'0': the deadlock set is the result of deleting a box inside a fenced-in area}
+             if Result and (WhiteNeighborCount=0) and {'0': the deadlock-set is the result of deleting a box inside a fenced-in area}
                 (ParentDeadlockSetNo__>0) and
                 (Game.DeadlockSets.Flags[ParentDeadlockSetNo__]=Game.DeadlockSets.Flags[Game.DeadlockSets.Count]) then begin
-                {the box at 'SquareNo' could be deleted and still produce a deadlock situation, hence, the parent deadlock set is redundant}
+                {the box at 'SquareNo' could be deleted and still produce a deadlock situation, hence, the parent deadlock-set is redundant}
                 //ShowDeadlockSet(ParentDeadlockSetNo__,Game.DeadlockSets.CenterSquare[ParentDeadlockSetNo__]);
                 if LogFile.Enabled then begin
                    WritelnToLogFile('');
-                   WritelnToLogFile('Deadlock set '+IntToStr(Game.DeadlockSets.SequenceNumbers[ParentDeadlockSetNo__])+' is redundant. Active deadlock sets: '+IntToStr(Game.DeadlockSets.Count));
+                   WritelnToLogFile('Deadlock set '+IntToStr(Game.DeadlockSets.SequenceNumbers[ParentDeadlockSetNo__])+' is redundant. Active deadlock-sets: '+IntToStr(Game.DeadlockSets.Count));
                    end;
                 if True {'True': delete all redundant deadlocks, including deadlocks created dynamically during the search}
                    or
@@ -7407,7 +7932,7 @@ XX              of them is a box on a non-goal square. The non-wall
                    (not (dsfPlayerMustBeOutSideSet in Game.DeadlockSets.Flags[Game.DeadlockSets.Count]))
                    then begin
                    DeleteDeadlockSet(ParentDeadlockSetNo__); Inc(Game.DeadlockSets.RedundantSetsCount);
-                   ParentDeadlockSetNo__:=-ParentDeadlockSetNo__; {mark that the parent deadlock set has disappeared}
+                   ParentDeadlockSetNo__:=-ParentDeadlockSetNo__; {mark that the parent deadlock-set has disappeared}
                    end
                 else begin
                    {redundant deadlocks created dynamically during the search are
@@ -7442,9 +7967,9 @@ XX              of them is a box on a non-goal square. The non-wall
         DeadlockSetCandidate__.SquareColors[ExtraBoxSquareNo__]:=scWhite;
       end; {ExpandDeadlockSet.TryToAddExtraBox}
 
-    begin {'ExpandDeadlockSet'}
-          {in : 'ParentDeadlockSetNo__<>0': the current candidate set gave rise to a deadlock set; if the number if positive it still exists;}
-          {out: 'ParentDeadlockSetNo__< 0': the original parent deadlock set has been deleted because it has been superseded by a new one where a redundant box has been removed}
+    begin {ExpandDeadlockSet}
+          {in : 'ParentDeadlockSetNo__<>0': the current candidate-set gave rise to a deadlock-set; if the number if positive it still exists;}
+          {out: 'ParentDeadlockSetNo__< 0': the original parent deadlock-set has been deleted because it has been superseded by a new one where a redundant box has been removed}
 {
       if (ParentDeadlockSetNo__>0) and (Game.DeadlockSets.SequenceNo[ParentDeadlockSetNo__]=248) then begin
          ShowBoard;
@@ -7466,8 +7991,8 @@ XX              of them is a box on a non-goal square. The non-wall
                 and
                 (WhiteNeighborCount<=Game.DeadlockSets.AdjacentOpenSquaresLimit) {'True': the box is a part of the fence around the corral, the number of outer neighbors doesn't exceed the limit, and it's a precalculated deadlock}
                 {'AdjacentOpenSquaresLimit': should preferably be '1';}
-                {allowing 2 or 3 outside neighbors finds more deadlock sets, but it}
-                {can easily take too much time}
+                {allowing 2 or 3 outside neighbors finds more deadlock-sets, but it}
+                {can easily take too long time to be practical}
                 and
                 (Solver.SearchLimits.DepthLimit>=0)) {'>=0': the search hasn't been terminated}
                or
@@ -7476,14 +8001,14 @@ XX              of them is a box on a non-goal square. The non-wall
                 (Position__<>nil)
                 and
                 (ParentDeadlockSetNo__<>0)
-                and
-                ((CalculateNeighborsWithColor(SquareNo,scDarkGray,False)=0)        {'True': an isolated box inside the corral}
-                 or
-                 (CalculateNeighborsWithColor(SquareNo,scLightGray,False)=DIRECTION_COUNT-1) {'True': a box inside the corral with a single neighbor box, and where all the other neighbor squares are empty}
-                ) {'True': the box is isolated inside the corral; test if the box can be omitted}
+                //and
+                //((CalculateNeighborsWithColor(SquareNo,scDarkGray,False)=0)   {'True': an isolated box inside the corral}
+                // or
+                // (CalculateNeighborsWithColor(SquareNo,scLightGray,False)=DIRECTION_COUNT-1) {'True': a box inside the corral with a single neighbor box, and where all the other neighbor squares are empty}
+                //) {'True': the box is inside the corral; check if the box can be omitted}
                ) then begin
                if BoxIndex__>0 then begin
-                  Dec(DeadlockSetCandidate__.Boxes.Count); {remove the box from the candidate set}
+                  Dec(DeadlockSetCandidate__.Boxes.Count); {remove the box from the candidate-set}
                   for i:=BoxIndex__ to DeadlockSetCandidate__.Boxes.Count do
                       DeadlockSetCandidate__.Boxes.Squares[i]:=DeadlockSetCandidate__.Boxes.Squares[Succ(i)];
                   end;
@@ -7513,14 +8038,14 @@ XX              of them is a box on a non-goal square. The non-wall
                      (Game.DeadlockSets.AdjacentOpenSquaresLimit=1) and
                      (DeadlockSetCandidate__.CenterSquare<>0) and
                      (DeadlockSetCandidate__.Boxes.Count<DeadlockSetCandidate__.MaxBoxCount) then
-                     {try to find additional deadlocks by adding an extra box to close a gap;
+                     {try to find additional deadlocks by adding an extra box to close a gap after removal of the box;
                       example:
                       ####
                       %  % <- the rightmost "%" is the box square, having 1 white (outside) floor neighbor
                       ####
 
                       ####
-                      %   % <- moving the rightmost box one square to the right has failed creating a new deadlock; (the 'Result:=TryFloor()' statement above
+                      %   % <- moving the rightmost box one square to the right has failed creating a new deadlock; (the 'Result:=TryFloor()' statement above)
                       ####
 
                       ####% <- put an extra box here;
@@ -7577,12 +8102,12 @@ XX              of them is a box on a non-goal square. The non-wall
                end;
             end;
          end
-      else begin {a no-progress deadlock set candidate; check if the box is redundant, i.e., if the deadlock candidate set still is a deadlock if the box is omitted}
+      else begin {a no-progress deadlock-set candidate; check if the box is redundant, i.e., if the deadlock candidate-set still is a deadlock if the box is omitted}
          Result:=DeadlockSetCandidate__.Boxes.Count>=MIN_NO_PROGRESS_DEADLOCK_SET_CANDIDATE_BOX_COUNT;
          if Result then begin
             SquareNo:=DeadlockSetCandidate__.Boxes.Squares[BoxIndex__];
 
-            Dec(DeadlockSetCandidate__.Boxes.Count); {remove the box from the candidate set}
+            Dec(DeadlockSetCandidate__.Boxes.Count); {remove the box from the candidate-set}
             for i:=BoxIndex__ to DeadlockSetCandidate__.Boxes.Count do
                 DeadlockSetCandidate__.Boxes.Squares[i]:=DeadlockSetCandidate__.Boxes.Squares[Succ(i)];
             DeadlockSetCandidate__.SquareColors[SquareNo]:=scWhite;
@@ -7646,50 +8171,65 @@ XX              of them is a box on a non-goal square. The non-wall
                                                 var ABoxIsBlockedOnANonGoalSquare__ : Boolean):Boolean;
           var Neighbor1, Neighbor2, Neighbor1Position , Neighbor2Position : Integer;
           begin
-            if   Direction__       = Low(Direction__) then           {flip horizontal/vertical direction}
-                 Direction__      := Succ ( Low ( Direction__ ) )    {caution: 'Succ(Low...'): assumes 4 directions only}
-            else Direction__      := Low ( Direction__ );
+            if   Direction__         =  Low(Direction__) then                   {flip horizontal/vertical direction}
+                 Direction__         := Succ ( Low ( Direction__ ) )            {caution: 'Succ(Low...'): assumes 4 directions only}
+            else Direction__         := Low ( Direction__ );
 
-            Neighbor1Position     := SquareNo__ - Game.SquareOffsetForward[ Direction__ ];
-            Neighbor1             := Game.Board [ Neighbor1Position ];
-
-            Neighbor2Position     := SquareNo__ + Game.SquareOffsetForward[ Direction__ ];
-            Neighbor2             := Game.Board [ Neighbor2Position ];
-
-            Inc ( Game.Board [ SquareNo__ ] , WALL);                 {temporarily change this square to a wall}
-
-            Result := ((  Neighbor1 and WALL           ) <> 0 )      {is there a wall on any of the neighbor squares?}
-                      or
-                      ((  Neighbor2 and WALL           ) <> 0 )
-                      or
-                      ((( Neighbor1 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )        {are both neighbors illegal squares?}
-                       and
-                       (( Neighbor2 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )
-                      );
-
-            if (not ( Result and ABoxIsBlockedOnANonGoalSquare__ ))  {it's not enough to know whether a box is blocked; it's also necessary to know whether a box is blocked on a non-goal square}
+            if ( Direction__         =  Low ( Direction__ ) )
                and
-               (( Neighbor1 and ( WALL + BOX ) ) = BOX )             {test is neighbor1 is a blocked box}
-               and
-               BoxIsBlockedAlongOneAxis( Neighbor1Position , Direction__ , ABoxIsBlockedOnANonGoalSquare__ )
-               then Result := True;
+               (Game.FreezeTestTimeStamps.Squares [ SquareNo__ ] >= Game.FreezeTestTimeStamps.TimeStamp) then {'True': use the already calculated value}
+               Result                := Game.FreezeTestTimeStamps.Squares [ SquareNo__ ] > Game.FreezeTestTimeStamps.TimeStamp     {relies on Ord ( False , True ) = (0 , 1)}
+            else begin
+               Neighbor1Position     := SquareNo__ - Game.SquareOffsetForward[ Direction__ ];
+               Neighbor1             := Game.Board [ Neighbor1Position ];
 
-            if (not ( Result and ABoxIsBlockedOnANonGoalSquare__ ))  {it's not enough to know whether a box is blocked; it's also necessary to know whether a box is blocked on a non-goal square}
-               and
-               (( Neighbor2 and ( WALL + BOX ) ) = BOX )             {test is neighbor2 is a blocked box}
-               and
-               BoxIsBlockedAlongOneAxis( Neighbor2Position , Direction__ , ABoxIsBlockedOnANonGoalSquare__ )
-               then Result:=True;
+               Neighbor2Position     := SquareNo__ + Game.SquareOffsetForward[ Direction__ ];
+               Neighbor2             := Game.Board [ Neighbor2Position ];
 
-            Dec ( Game.Board [ SquareNo__ ] , WALL );                {remove the wall again}
+               Inc ( Game.Board [ SquareNo__ ] , WALL);                         {temporarily change this square to a wall}
 
-            if  Result and                                           {if this box is blocked}
-                ( ( Game.Board [ SquareNo__ ] and GOAL ) = 0 ) then  {and it's not a goal-square}
-                ABoxIsBlockedOnANonGoalSquare__ := True;             {then set the flag}
+               Result := ((  Neighbor1 and WALL           ) <> 0 )              {is there a wall on any of the neighbor squares?}
+                         or
+                         ((  Neighbor2 and WALL           ) <> 0 )
+                         or
+                         ((( Neighbor1 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )     {are both neighbors illegal squares?}
+                          and
+                          (( Neighbor2 and FLAG_ILLEGAL_BOX_SQUARE ) <> 0 )
+                         );
 
-            end; {BoxIsBlockedAlongOneAxis}
+               if (not ( Result and ABoxIsBlockedOnANonGoalSquare__ ))          {it's not enough to know whether a box is blocked; it's also necessary to know whether a box is blocked on a non-goal square}
+                  and
+                  (( Neighbor1 and ( WALL + BOX ) ) = BOX )                     {test is neighbor1 is a blocked box}
+                  and
+                  BoxIsBlockedAlongOneAxis( Neighbor1Position , Direction__ , ABoxIsBlockedOnANonGoalSquare__ )
+                  then Result := True;
+
+               if (not ( Result and ABoxIsBlockedOnANonGoalSquare__ ))          {it's not enough to know whether a box is blocked; it's also necessary to know whether a box is blocked on a non-goal square}
+                  and
+                  (( Neighbor2 and ( WALL + BOX ) ) = BOX )                     {test is neighbor2 is a blocked box}
+                  and
+                  BoxIsBlockedAlongOneAxis( Neighbor2Position , Direction__ , ABoxIsBlockedOnANonGoalSquare__ )
+                  then Result:=True;
+
+               Dec ( Game.Board [ SquareNo__ ] , WALL );                        {remove the wall again}
+               end;
+
+            if Result and                                                       {if this box is blocked}
+               ( ( Game.Board [ SquareNo__ ] and GOAL ) = 0 ) then              {and it's not a goal-square}
+               ABoxIsBlockedOnANonGoalSquare__ := True;                         {then set the flag}
+
+            if Direction__ = Low ( Direction__ ) then with Game.FreezeTestTimeStamps do {reduce the exponential growth by storing the results for one axis}
+               Squares [ SquareNo__ ] := TimeStamp + TTimeStamp ( Ord ( Result ) );     {relies on Ord ( False , True ) = (0 , 1)}
+          end; {BoxIsBlockedAlongOneAxis}
 
         begin {IsAFrozenSquare}
+          with Game.FreezeTestTimeStamps do
+            if TimeStamp < High ( TimeStamp ) - 5 then
+               Inc ( TimeStamp , 2 )
+            else begin
+               FillChar ( Squares , SizeOf ( Squares ) , 0 ); TimeStamp := 2;
+               end;
+
           ABoxIsBlockedOnANonGoalSquare := False;
 
           Result := (( Game.Board [ SquareNo__ ] and ( WALL + FLAG_ILLEGAL_BOX_SQUARE ) ) <> 0 )   {a wall is considered a deadlocked square}
@@ -7708,7 +8248,7 @@ XX              of them is a box on a non-goal square. The non-wall
       begin {CheckSimpleDeadlocks}
         Result:=True;
 
-        for i:=1 to Game.DeadlockSets.Count do with Game.DeadlockSets do        {check if the candidate set violates existing deadlock-sets}
+        for i:=1 to Game.DeadlockSets.Count do with Game.DeadlockSets do        {check if the candidate-set violates existing deadlock-sets}
             if   Result then
                  Result:=(Capacity[i]>=0)
                          or
@@ -7718,13 +8258,13 @@ XX              of them is a box on a non-goal square. The non-wall
         if  ((DeadlockSetCandidate__.CenterSquare<>0) or (DeadlockSetCandidate__.Floors.Count<>0)) then
             for i:=1 to DeadlockSetCandidate__.Boxes.Count do
                 if   Result then
-                     Result:=(not IsAFrozenSquare(DeadlockSetCandidate__.Boxes.Squares[i])) {simple freeze-type deadlocks are handled here by code instead of sets}
+                     Result:=(not IsAFrozenSquare(DeadlockSetCandidate__.Boxes.Squares[i])) {simple freeze-type deadlocks are handled here by code instead of deadlock-sets}
                 else break;
       end; {CheckSimpleDeadlocks}
 
       function  CheckDeadlockSetCandidate(var IsALegalSetButViolatesCapacityConstraints__:Boolean):Boolean;
       const
-        MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS = 5; {reserve the transposition table for positions with few boxes; there are more likely to be subsets of other box constellations}
+        MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS = 5; {reserve the transposition table for positions with few boxes; they are more likely to be subsets of other box constellations}
         NORMAL_DEADLOCK_SEARCH_DEPTH = 20; {search depth used by all deadlock candidates except "no-progress" candidates, which uses the maximum search depth}
       type
         TCheckType             = (ctCheckPushes,ctCheckPulls,ctCheckPullsPaintThePlayerIntoACorner);
@@ -7738,48 +8278,83 @@ XX              of them is a box on a non-goal square. The non-wall
         TranspositionTableTimeStamp  : TTranspositionTableItemTimeStamp;
         TranspositionTableTimeStamps : array[ Low( TDeadlockSearchTranspositionTable ) .. High( TDeadlockSearchTranspositionTable ) ] of TTranspositionTableItemTimeStamp; {timestamp for each item in the transposition table}
 
-        function  CalculateOutsideOnlyPushDirections(var PushesFromTheOutsideOnlyDirectionSet__:TDirectionSet; var SquaresOutsideFence__:TBoardSquareSet):Boolean;
-        var BoxNo,NeighborSquareNo,{SquareIndex,}SquareNo:Integer; Direction{,d}:TDirection;
-            PushesFromTheOutsideDirectionSet:TDirectionSet;
-            SquaresOutsideFenceForEachDirection:TDirectionArrayOfIntegers;
-            {SquareSet:TBoardSquareSet;}
-        begin
-          PushesFromTheOutsideOnlyDirectionSet__:=ALL_DIRECTIONS_SET;
-          PushesFromTheOutsideDirectionSet:=[];
-          FillChar(SquaresOutsideFenceForEachDirection,SizeOf(SquaresOutsideFenceForEachDirection),0);
+        procedure CalculateSquaresOutsideFence(SquareOutsideFence__:Integer; var SquaresOutsideFence__:TBoardSquareSet);
+        var BoxNo,Index,NeighborSquareNo,OriginalPlayerPos,SquareNo:Integer;
+            Direction:TDirection;
+        begin {returns the squares outside the fence which are in the specified access area }
+          SquaresOutsideFence__.Count:=0;
+          OriginalPlayerPos:=Game.PlayerPos;
+          MovePlayer(SquareOutsideFence__);
+          CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH);
           for BoxNo:=1 to Game.BoxCount do begin
               SquareNo:=Game.BoxPos[BoxNo];
-              for Direction:=Low(Direction) to High(Direction) do begin
-                  NeighborSquareNo:=SquareNo+Game.SquareOffsetForward[Direction];
-                  if ((Game.Board[NeighborSquareNo]                                     and (WALL+BOX+FLOOR))=FLOOR)
-                     and
-                     ((Game.Board[NeighborSquareNo+Game.SquareOffsetForward[Direction]] and (WALL+BOX+FLOOR))=FLOOR) then begin
-                     {the box can be pulled away, i.e., the position can occur}
-                     {after pushing the box in the opposite direction}
-                     if (DeadlockSetCandidate__.SquareColors[NeighborSquareNo]=scLightGray) then {with SquareSet do} begin
-                        {the neighbor square is an empty floor inside the set}
-
-                        if (OPPOSITE_DIRECTION[Direction] in PushesFromTheOutsideOnlyDirectionSet__) {'True': the opposite direction still has a chance to be a member of the set}
-                           and
-                           (
-                            (CalculateNeighborsWithColor(NeighborSquareNo+Game.SquareOffsetForward[Direction],scLightGray,False)>1)
-                            {'>1': pulling the box doesn't fence in the player}
-                            or
-                            (NeighborSquareNo+Game.SquareOffsetForward[Direction]=GamePlayerPos)
-                            {'=' after pulling the box, the player is located at its starting position}
-                           ) then
-                           {pushing the box in the opposite direction cannot be guaranteed}
-                           {to have the player outside the set}
-                           Exclude(PushesFromTheOutsideOnlyDirectionSet__,OPPOSITE_DIRECTION[Direction]);
-                        end
-                     else begin
-                        {the neighbor square is an empty floor outside the set;}
-                        {remember the legal push-directions from the outside}
-                        Include(PushesFromTheOutsideDirectionSet,OPPOSITE_DIRECTION[Direction]);
-                        SquaresOutsideFenceForEachDirection[Direction]:=NeighborSquareNo; {remember there is a square outside the fence in this direction}
+              if SquareNo>0 then with Solver.SearchStates[SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH].PlayersReachableSquares do
+                 for Direction:=Low(Direction) to High(Direction) do begin
+                     NeighborSquareNo:=SquareNo+Game.SquareOffsetForward[Direction];
+                     if (Squares[NeighborSquareNo]=TimeStamp) and {'True': a box neighbor square inside the specified player access area}
+                        (SquaresOutsideFence__.Count<High(SquaresOutsideFence__.Squares)) then begin
+                        SquaresOutsideFence__.Squares[Succ(SquaresOutSideFence__.Count)]:=NeighborSquareNo; {tentatively add the outer square to the end of the list (as a sentinel)}
+                        Index:=0; {locate the square in the list; it may already be a member}
+                        repeat Inc(Index);
+                        until  SquaresOutsideFence__.Squares[Index]=NeighborSquareNo;
+                        if     Index>SquaresOutsideFence__.Count then
+                               SquaresOutsideFence__.Count:=Index; {'True': the square wasn't already a member of the list; make it a member now by increasing the list member count}
                         end;
                      end;
-                  end;
+              end;
+          MovePlayer(OriginalPlayerPos);
+        end; {CalculateSquaresOutsideFence}
+
+        function  CalculateOutsideOnlyPushDirections(var PushesFromTheOutsideOnlyDirectionSet__:TDirectionSet; var SquaresOutsideFence__:TBoardSquareSet):Boolean;
+        var BoxNo,Index,NeighborSquareNo,{SquareIndex,}SquareNo:Integer;
+            Direction{,d}:TDirection;
+            PushesFromTheOutsideDirectionSet:TDirectionSet;
+            {SquareSet:TBoardSquareSet;}
+        begin
+         {if 'SquareOutsideFence__' is non-zero, then:
+                  only squares in that access area are returned in 'SquaresOutsideFence__',
+                  and
+                  an empty 'PushesFromTheOutsideOnlyDirectionSet__' is returned
+              }
+          PushesFromTheOutsideOnlyDirectionSet__:=ALL_DIRECTIONS_SET;
+          PushesFromTheOutsideDirectionSet:=[];
+          for BoxNo:=1 to Game.BoxCount do begin
+              SquareNo:=Game.BoxPos[BoxNo];
+              if SquareNo>0 then
+                 for Direction:=Low(Direction) to High(Direction) do begin
+                     NeighborSquareNo:=SquareNo+Game.SquareOffsetForward[Direction];
+                     if ((Game.Board[NeighborSquareNo]                                     and (WALL+BOX+FLOOR))=FLOOR)
+                        and
+                        ((Game.Board[NeighborSquareNo+Game.SquareOffsetForward[Direction]] and (WALL+BOX+FLOOR))=FLOOR) then begin
+                        {the box can be pulled away, i.e., the position can occur}
+                        {after pushing the box in the opposite direction}
+                        if (DeadlockSetCandidate__.SquareColors[NeighborSquareNo]=scLightGray) then {with SquareSet do} begin
+                           {the neighbor square is an empty floor inside the set}
+
+                           if (OPPOSITE_DIRECTION[Direction] in PushesFromTheOutsideOnlyDirectionSet__) {'True': the opposite direction still has a chance to be a member of the set}
+                              and
+                              (
+                               (CalculateNeighborsWithColor(NeighborSquareNo+Game.SquareOffsetForward[Direction],scLightGray,False)>1)
+                               {'>1': pulling the box doesn't fence in the player}
+                               or
+                               (NeighborSquareNo+Game.SquareOffsetForward[Direction]=GamePlayerPos)
+                               {'=' after pulling the box, the player is located at its starting position}
+                               or
+                               (NeighborSquareNo+Game.SquareOffsetForward[Direction]=Game.StartPlayerPos)
+                               {'=' after pulling the box, the player is located at its starting position in the game}
+                              ) then begin
+                              {pushing the box in the opposite direction cannot be guaranteed}
+                              {to have the player outside the set}
+                              Exclude(PushesFromTheOutsideOnlyDirectionSet__,OPPOSITE_DIRECTION[Direction]);
+                              end;
+                           end
+                        else begin
+                           {the neighbor square is an empty floor outside the set;}
+                           {remember the legal push-directions from the outside}
+                           Include(PushesFromTheOutsideDirectionSet,OPPOSITE_DIRECTION[Direction]);
+                           end;
+                        end;
+                     end;
               end;
 
           PushesFromTheOutsideOnlyDirectionSet__ := PushesFromTheOutsideOnlyDirectionSet__ * PushesFromTheOutsideDirectionSet; { '*': intersects the guaranteed outside-directions and the possible outside-directions}
@@ -7792,17 +8367,25 @@ XX              of them is a box on a non-goal square. The non-wall
           }
 
           SquaresOutsideFence__.Count:=0;
-          for Direction:=Low(Direction) to High(Direction) do begin
-              SquareNo:=SquaresOutsideFenceForEachDirection[Direction];
-              if (SquareNo<>0) and
-                 (not (OPPOSITE_DIRECTION[Direction] in PushesFromTheOutsideOnlyDirectionSet__)) and
-                 (SquaresOutsideFence__.Count<High(SquaresOutsideFence__.Squares)) then begin
-                 SquaresOutsideFence__.Squares[Succ(SquaresOutSideFence__.Count)]:=SquareNo; {tentatively add the outer square to the end of the list (as a sentinel)}
-                 i:=0; {locate the square in the list; it may already be a member}
-                 repeat Inc(i);
-                 until  SquaresOutsideFence__.Squares[i]=SquareNo;
-                 if     i>SquaresOutsideFence__.Count then SquaresOutsideFence__.Count:=i; {'True': the square wasn't a member of the list; make it a member be increasing the list member count}
-                 end;
+          for BoxNo:=1 to Game.BoxCount do begin
+              SquareNo:=Game.BoxPos[BoxNo];
+              if SquareNo>0 then
+                 for Direction:=Low(Direction) to High(Direction) do
+                     if not (OPPOSITE_DIRECTION[Direction] in PushesFromTheOutsideOnlyDirectionSet__) then begin
+                        NeighborSquareNo:=SquareNo+Game.SquareOffsetForward[Direction];
+                        if ((Game.Board[NeighborSquareNo] and (WALL+BOX+FLOOR))=FLOOR)
+                           and
+                           (DeadlockSetCandidate__.SquareColors[NeighborSquareNo]=scWhite) {'True': a floor square outside the fence}
+                           and
+                           (SquaresOutsideFence__.Count<High(SquaresOutsideFence__.Squares)) then begin
+                           SquaresOutsideFence__.Squares[Succ(SquaresOutSideFence__.Count)]:=NeighborSquareNo; {tentatively add the outer square to the end of the list (as a sentinel)}
+                           Index:=0; {locate the square in the list; it may already be a member}
+                           repeat Inc(Index);
+                           until  SquaresOutsideFence__.Squares[Index]=NeighborSquareNo;
+                           if     Index>SquaresOutsideFence__.Count then
+                                  SquaresOutsideFence__.Count:=Index; {'True': the square wasn't a member of the list; make it a member be increasing the list member count}
+                           end;
+                        end;
               end;
         end; {CalculateOutsideOnlyPushDirections}
 
@@ -7811,9 +8394,9 @@ XX              of them is a box on a non-goal square. The non-wall
         begin
           for i:=1 to Game.BoxCount do with Game.DeadlockSets do begin
               SquareNo:=Game.BoxPos[i];
-              if SquareNo<>0 then begin {'True': the box hasn't been removed from the board by the caller}
+              if SquareNo>0 then begin {'True': the box hasn't been removed from the board by the caller}
                  Dec(Game.Board[SquareNo],BOX); {remove the box from the board}
-                 for j:=1 to SquareSetCount[SquareNo] do Inc(Capacity[SquareSetNumbers[SquareNo]^[j]]); {update deadlock set capacities}
+                 for j:=1 to SquareSetCount[SquareNo] do Inc(Capacity[SquareSetNumbers[SquareNo]^[j]]); {update deadlock-set capacities}
                  end;
               end;
           Game.BoxCount:=0; MovePlayer(0); Game.HashValue:=0; Game.SimpleLowerBound:=0;
@@ -7826,9 +8409,9 @@ XX              of them is a box on a non-goal square. The non-wall
           BoxesOnBoardCount := 0;
           for i:=1 to Game.BoxCount do with Game.DeadlockSets do begin
               SquareNo:=Game.BoxPos[i];
-              if SquareNo<>0 then begin {'True': the box hasn't been removed from the board by the caller}
+              if SquareNo>0 then begin {'True': the box hasn't been removed from the board by the caller}
                  Inc(Game.Board[SquareNo],BOX); {put the box on the board}
-                 for j:=1 to SquareSetCount[SquareNo] do Dec(Capacity[SquareSetNumbers[SquareNo]^[j]]); {update deadlock set capacities}
+                 for j:=1 to SquareSetCount[SquareNo] do Dec(Capacity[SquareSetNumbers[SquareNo]^[j]]); {update deadlock-set capacities}
                  Inc( BoxesOnBoardCount );
                  end;
               end;
@@ -7838,6 +8421,7 @@ XX              of them is a box on a non-goal square. The non-wall
         end;
 
         function  Check(CheckType__:TCheckType; var SquareOutsideFence__:Integer):Boolean;
+        {returns 'True' on deadlock}
         {the deadlock candidate is invalid in 4 cases:}
         {1: if the player starting from the outside can push a box to a square outside the set;   }
         {2: if the player starting from the inside can escape the fenced-in area by pulling boxes;}
@@ -7852,6 +8436,9 @@ XX              of them is a box on a non-goal square. The non-wall
         var   i,j,BackJumpDepth,DepthOffset,MaximumSearchDepth,
               PlayerReachableSquaresCount,PlayerOutsideFenceReachableSquaresCount:Integer;
               Frontier:TBoardSquareSet;
+              PeeledOffBoxes:TBoxNumberSet;
+              // tests indicate that it's not worth it using a Bloom filter for the current path during the search;
+              //PathPositionsBloomFilter:array[Byte] of Byte; {preconditions: 1) must be small because it's zero-filled for each search; 2) maximum path length (the search depth for 'Search()') doesn't exceed the vector element value}
 
           procedure InitializeTranspositionTable;
           begin
@@ -7860,6 +8447,7 @@ XX              of them is a box on a non-goal square. The non-wall
                TranspositionTableTimeStamp := 0;
                end;
             Inc( TranspositionTableTimeStamp ); {advance to next timestamp}
+            //FillChar( PathPositionsBloomFilter, SizeOf( PathPositionsBloomFilter ), 0 );
           end;
 
           procedure CalculateFrontierSquares;
@@ -7880,8 +8468,8 @@ XX              of them is a box on a non-goal square. The non-wall
 
           function  PlayerHasAccessToAnOuterSquare(Depth__:Integer):Boolean;
           {this function belongs inside the following 'Search()' function,
-           but that exceeds the maximum nesting level for (some versions of)
-           the FPC Pascal compiler;
+           but that exceeds the maximum nesting level for some versions of the
+           FPC Pascal compiler;
           }
           var i:Integer;
           begin {precondition: player's reachable squares have been calculated}
@@ -7894,8 +8482,8 @@ XX              of them is a box on a non-goal square. The non-wall
 
           function  PlayerHasAccessToAnInnerSquare(Depth__:Integer):Boolean;
           {this function belongs inside the following 'Search()' function,
-           but that exceeds the maximum nesting level for the FPC Pascal
-           compiler;
+           but that exceeds the maximum nesting level for some versions of the
+           FPC Pascal compiler;
           }
           var i:Integer;
           begin {precondition: player's reachable squares have been calculated}
@@ -7906,133 +8494,407 @@ XX              of them is a box on a non-goal square. The non-wall
                 else break;
           end;
 
-          function  Search(Depth__:Integer; var BackJumpDepth__:Integer):Boolean;
-          var i,j,BoxNo,BoxToSquareNo,LastPushedBoxNo,SquareNo,StartCandidatePushCount,SuccessorDepth:Integer;
-              Direction:TDirection;
-
-            function  IsADuplicatePosition(Depth__,PlayerPos__:Integer):Boolean;
-            var i,j,k:Integer;
-            begin {protects against loops in the depth-first search by comparing the current position with all positions along the current path;
-                   additionally, a little forward checking is performed by consulting the transposition table with known deadlocks;}
-              Result:=False;
-              for i:=1 to Pred(Depth__) do {search through the positions on the path leading to the current position}
-                  if not Result then begin
-                     Result:=(PlayerPos__      =Game.DeadlockSets.History[i].PlayerPos) and
-                             (Game.HashValue   =Game.DeadlockSets.History[i].HashValue);
-                     {a hash-value is not 100% safe, hence, the exact game state must match}
-                     for j:=1 to Game.BoxCount do begin {try to match each box}
-                         if   Result then
-                              if Game.BoxPos[j]<>Game.DeadlockSets.History[i].BoxPos[j] then begin {'<>': no simple match; try harder}
-                                 Result:=False;
-                                 for k:=1 to Game.BoxCount do {search for another box at the same position as Box[j]}
-                                     if   not Result then
-                                          Result:=Game.BoxPos[j]=Game.DeadlockSets.History[i].BoxPos[k]
-                                     else break; {done, i.e., there is another box at the same position as Box[j]}
-                                 end
-                              else {Box[j] found at the same index in the table, or it has been removed from the board}
-                         else break; {fail, i.e., not a duplicate position}
-                         end;
+          function  BoardHasEmptyGoalSquaresUnreachableForThePlayer(Depth__:Integer):Boolean;
+          {this function belongs inside the following 'Search()' function,
+           but that exceeds the maximum nesting level for some versions of the
+           FPC Pascal compiler;
+          }
+          var i:Integer;
+          begin {precondition: player's reachable squares have been calculated}
+            Result:=False;
+            for i:=1 to Game.GoalCount do
+                if   not Result then with Solver.SearchStates[Depth__].PlayersReachableSquares do begin
+                     if (Squares[Game.GoalPos[i]]<>TimeStamp) and ((Game.Board[Game.GoalPos[i]] and BOX)=0) then {'True': the player cannot reach the goal square, and there is no box at the goal square}
+                        Result:=True; {'True': found an empty goal square which the player can reach}
                      end
-                  else break; {done, i.e., found a duplicate position}
+                else break;
+          end;
 
-               {check if the position is one of the deadlock positions registered in the transposition table}
-               if ( not Result ) then begin
-                  i := Game.HashValue and High( Game.DeadlockSets.TranspositionTable );
-                  with Game.DeadlockSets.TranspositionTable[ i ] do begin
-                       Result:=(PlayerPos__      =PlayerPos) and
-                               (Game.HashValue   =HashValue) and
-                               ( TranspositionTableTimeStamp = TranspositionTableTimeStamps[ i ] );
-                       {a hash-value is not 100% safe, hence, the exact game state must match}
-                       for j:=1 to Game.BoxCount do begin {try to match each box}
-                           if   Result then
-                                if Game.BoxPos[j]<>BoxPos[j] then begin {'<>': no simple match; try harder}
-                                   Result:=False;
-                                   for k:=1 to Game.BoxCount do {search for another box at the same position as Box[j]}
-                                       if   not Result then
-                                            Result:=Game.BoxPos[j]=BoxPos[k]
-                                       else break; {done, i.e., there is another box at the same position as Box[j]}
-                                   end
-                                else {Box[j] found at the same index in the table, or it has been removed from the board}
-                           else break; {fail, i.e., not a duplicate position}
-                           end;
-                       end;
-
-                  {check if the current box constellation is a superset of one
-                   of the deadlocks registered in the transposition table; in
-                   that case, and if the current position also has the same
-                   normalized player position as the deadlock, then the current
-                   game state is also a deadlock, and further analysis is
-                   unnecessary}
-                  if BoxesOnBoardCount >= MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS then
-                     for i := Low( Game.DeadlockSets.TranspositionTable ) to High( Game.DeadlockSets.TranspositionTable ) do
-                         if   not Result then with Game.DeadlockSets.TranspositionTable[ i ] do begin
-                              Result:=( PlayerPos__ = PlayerPos ) and
-                                      ( TranspositionTableTimeStamp = TranspositionTableTimeStamps[ i ] );
-                              for j:=1 to Game.BoxCount do begin {try to match each box in the registered deadlock with boxes on the board in the current game state}
-                                  if   Result then begin
-                                       if (BoxPos[j]<>0) and {'<>': the box is on the board in the deadlocked position}
-                                          (Game.BoxPos[j]<>BoxPos[j]) then begin {'<>': no simple match; try harder}
-                                          Result:=False;
-                                          for k:=1 to Game.BoxCount do {search for another box at the same position as Deadlock.BoxPos[j]}
-                                              if   not Result then
-                                                   Result:=Game.BoxPos[k]=BoxPos[j]
-                                              else break; {done, i.e., there is another box at the same position as Deadlock.BoxPos[j]}
-                                          end
-                                       else; {Box[j] found at the same index in the table, or it has been removed from the board}
-                                       end
-                                  else break; {fail, i.e., not a duplicate position}
-                                  end;
-                              end
-                         else break; {done, i.e., found a duplicate position}
-                  end;
-            end;
-
-          begin {Search; precondition: player's reachable squares have been calculated for this depth}
+          function  CalculateFreezeDeadlocks(Depth__:Integer): Boolean;
+          {this function belongs inside the following 'Search()' function,
+           but that exceeds the maximum nesting level for some versions of the
+           FPC Pascal compiler;
+          }
+          var   BoxNo, GoalNo, Index, NeighborSquare, OldCount, Square : Integer;
+                Direction : TDirection;
+                FreezePosition:PPosition;
+                CurrentBoxPositions:TBoxSquares;
+                DeadlockSetCandidate : TDeadlockSetCandidate;
+                APosition : TPosition;
+          begin {creates freeze deadlocks based on the frozen boxes at the board
+                 preconditions:
+                 * all boxes are located at goal squares, and all boxes are frozen;
+                 * the player's reachable squares have been calculated, using index = 'Depth__' (not 'Depth__+DepthOffset');
+                }
+            with Game do begin
+              Result := False;
+              if TTAdd( Game.HashValue, MAX_BOARD_SIZE + 2, 0, 0, 0, dUp, nil, FreezePosition ) then begin {'True': it's a new frozen boxes pattern}
 {
+                 Writeln;
+                 ShowBoard;
+                 Write('Dead-end position with all boxes at goal squares. Pushes: ',Solver.PushCount,' Deadlock Sets: ',Game.DeadlockSets.SequenceNo,SLASH,Game.DeadlockSets.Count);
+                 Writeln;
+                 Readln;
+}
+                 DeadlockSetCandidate.Boxes.Count := 0;                         {frozen boxes, given the current player position}
+                 DeadlockSetCandidate.SquaresOutsideFence.Count := 0;           {all squares in the player's access area next to the frozen boxes}
+                 DeadlockSetCandidate.SquareOutsideFence := MAX_BOARD_SIZE + 1;
+                 for GoalNo := 1 to GoalCount do with Solver.SearchStates[ Depth__ ].PlayersReachableSquares do begin
+                     Square := GoalPos[ GoalNo ];
+                     if      ( Board[ Square ] and BOX ) <> 0 then begin {collect the frozen boxes, given the current player position}
+                             with DeadlockSetCandidate.Boxes do begin
+                               Inc( Count ); Squares[ Count ] := GoalNo;        {caution: despite the field name 'Squares', the squares really contain goal numbers and not square numbers here}
+                               end;
+                             for Direction := Low( Direction ) to High( Direction ) do begin
+                                 NeighborSquare := Square + SquareOffsetForward[ Direction ];
+                                 if Squares[ NeighborSquare ] = TimeStamp then with DeadlockSetCandidate.SquaresOutsideFence do begin
+                                    Inc( Count ); Squares[ Count ] := NeighborSquare;
+                                    if NeighborSquare < DeadlockSetCandidate.SquareOutsideFence then
+                                       DeadlockSetCandidate.SquareOutsideFence := NeighborSquare;
+                                    Solver.SearchStates[ Depth__ ].PlayersReachableSquares.Squares[ NeighborSquare ] := 0; {mark the square as registered, so it isn't added to the floor vector more than once}
+                                    end;
+                                 end;
+                             end;
+                     end;
+                 with Solver.SearchStates[ Depth__ ].PlayersReachableSquares do {restore the correct timestamps for the floors in the player's access area, in case the caller expects them to be valid when the function returns}
+                   for Index := 1 to DeadlockSetCandidate.SquaresOutsideFence.Count do
+                       Squares[ DeadlockSetCandidate.SquaresOutsideFence.Squares[ Index ] ] := TimeStamp;
+
+                 if ( DeadlockSetCandidate.Boxes.Count = BoxesOnBoardCount ) and {'True': sanity check: all boxes on the board are located at goal squares}
+                    ( DeadlockSetCandidate.SquaresOutsideFence.Count > 0 ) then begin {'True': sanity check: the player has access to the boxes frozen at goal squares}
+                    for Index := 1 to PeeledOffBoxes.Count do begin             {peeled off boxes have negated square positions in the global 'Game.BoxPos' vector; change these square positions to zero}
+                        BoxNo := PeeledOffBoxes.Numbers[ Index ];
+                        CurrentBoxPositions[ BoxNo ] := BoxPos[ BoxNo ];
+                        BoxPos[ BoxNo ] := 0;
+                        end;
+
+                    DeadlockSetCandidate.Flags := [ dsfTestFrozenGoalsSet, dsfPlayerMustBeOutsideFreezeSet, dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence ];
+                    OldCount      := DeadlockSets.Count;
+                    CalculateDeadlockSets( PPosition( Addr( APosition ) ), DeadlockSetCandidate );
+                    Result        := OldCount <> DeadlockSets.Count;            {'True': new deadlock-sets have been created by this function}
+
+                    for Index := 1 to PeeledOffBoxes.Count do begin             {restore the negated square positions for peeled off boxes in the global 'Game.BoxPos' vector}
+                        BoxNo := PeeledOffBoxes.Numbers[ Index ];
+                        BoxPos[ BoxNo ] := CurrentBoxPositions[ BoxNo ];
+                        end;
+{
+                    if ( OldCount <> DeadlockSets.Count ) then begin
+                       Game.ShowDeadlockSetsEnabled := True;
+                       while OldCount < DeadlockSets.Count do begin
+                         Inc( OldCount );
+                         ShowDeadlockSet( OldCount, 0 );
+                         end;
+                       Game.ShowDeadlockSetsEnabled := False;
+                       Writeln( 'Press [Enter]' );
+                       Readln;
+                       end;
+}
+                    end;
+                 end;
+              end;
+          end;
+
+          function  PeelOffBoxes(Depth__:Integer; var EscapedBoxesCountDown__,BoxesOnBoardCount__:Integer; var PeeledOffBoxes__:TBoxNumberSet):Boolean;
+          var BoxNo,BoxToSquareNo,SquareNo,SuccessorDepth:Integer;
+              Direction:TDirection;
+          begin {precondition: the player's reachable squares have been calculated, using index = 'Depth__' + 'DepthOffset'}
+            Result:=True;
+            Inc(Depth__,DepthOffset);
+            SuccessorDepth:=Succ(Depth__);
+            BoxNo:=1;
+            while BoxNo<=Game.BoxCount do begin
+                  SquareNo:=Game.BoxPos[BoxNo];
+                  for Direction:=Low(Direction) to High(Direction) do
+                      if SquareNo>0 then begin
+                         with Solver.SearchStates[Depth__].PlayersReachableSquares do begin
+                              BoxToSquareNo:=SquareNo+Game.SquareOffsetForward[Direction];
+                              if (Squares[SquareNo-Game.SquareOffsetForward[Direction]]=TimeStamp)
+                                 and
+                                 ((Game.Board[BoxToSquareNo] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE+FLOOR))=FLOOR)
+                                 and
+                                 ((Game.Board[BoxToSquareNo+Game.SquareOffsetForward[Direction]] and (BOX+WALL))=0) then begin
+                                 Solver.SearchStates[SuccessorDepth].PlayersReachableSquares.Calculated:=False;
+                                 Result:=DoPush(BoxNo,Direction,-1); {do the move, i.e., update the board}
+                                 if Result then with Solver.SearchStates[SuccessorDepth].PlayersReachableSquares do begin {'True': it's a legal push}
+                                    if not Calculated then
+                                       CalculatePlayersReachableSquares(SuccessorDepth);
+                                    if Squares[BoxToSquareNo+Game.SquareOffsetForward[Direction]]<>TimeStamp then {'True': the player cannot push the box back and forth}
+                                       UndoPush(BoxNo,Direction)                {take back the move, i.e., update the board}
+                                     else begin {the player can push the box back and forth}
+                                        //if Game.Board[MAX_BOARD_SIZE]=FLOOR then begin
+                                        //   UndoPush(BoxNo,Direction);             {take back the move, i.e., update the board}
+                                        //   ShowBoard;
+                                        //   Write( Depth__,': A box is about to be peeled of the board: ', SquareToColRowAsText(SquareNo));
+                                        //   Readln;
+                                        //   end;
+                                        RemoveBoxFromBoard(BoxNo);              {remove the box from the board}
+                                        Dec(EscapedBoxesCountDown__);           {update the number of escaped boxes}
+                                        Dec(BoxesOnBoardCount__);               {update the number of boxes on the board}
+                                        Inc(PeeledOffBoxes__.Count);
+                                        PeeledOffBoxes__.Numbers[PeeledOffBoxes__.Count]:=BoxNo; {update the list of peeled off boxes}
+                                        Game.BoxPos[BoxNo]:=-SquareNo;          {mark the box as removed from the board}
+                                        SquareNo:=0;                            {clean exit 'Direction' loop}
+                                        BoxNo:=0;                               {retry all boxes}
+                                        CalculatePlayersReachableSquares(Depth__); {recalculate the player's reachable squares now that a box has been removed}
+                                        end;
+                                     end
+                                 else                                           {it's an illegal push}
+                                    UndoPush(BoxNo,Direction)                   {take back the move, i.e., update the board}
+                                 end;
+                              end;
+                         end
+                      else break; {quick-and-dirty exit 'Direction' loop when the box has been removed from the board}
+                  Inc(BoxNo);                                                   {advance to next box}
+              end;
+          end;
+
+          function  IsADuplicatePosition(Depth__,PlayerPos__:Integer):Boolean;
+          {this function belongs inside the following 'Search()' function,
+           but that exceeds the maximum nesting level for some versions of the
+           FPC Pascal compiler;
+          }
+          var i,j,k,BoxPosition,UnmatchedRemovedBoxIndex:Integer;
+          begin {protects against loops in the depth-first search by comparing the current position with all positions along the current path;
+                 additionally, the current position is compared to the positions stored in the small local transposition table with known deadlocks}
+            Result:=False;
+            //if PathPositionsBloomFilter[ Byte( Game.HashValue ) ] <> 0 then {'True': the current game position may be on the current path; a Bloom filter may return false positives but never false negatives;}
+               for i:=1 to Pred(Depth__) do {search through the positions on the path leading to the current position}
+                   if not Result then begin
+                      Result:=(PlayerPos__      =Game.DeadlockSets.History[i].PlayerPos) and
+                              (Game.HashValue   =Game.DeadlockSets.History[i].HashValue);
+                      if Result then begin
+                         {a hash-value is not 100% safe, hence, the exact game state must match}
+                         UnmatchedRemovedBoxIndex:=0;
+                         for j:=1 to Game.BoxCount do begin {try to match each box}
+                             if   Result then begin
+                                  BoxPosition:=Game.BoxPos[j];
+                                  if BoxPosition>0 then begin {'True': the box is still on the board}
+                                     if BoxPosition<>Game.DeadlockSets.History[i].BoxPos[j] then begin {'<>': no simple match; try harder}
+                                        Result:=False;
+                                        for k:=1 to Game.BoxCount do {search for another box at the same position as Box[j]}
+                                            if   not Result then
+                                                 Result:=BoxPosition=Game.DeadlockSets.History[i].BoxPos[k]
+                                            else break; {done, i.e., there is another box at the same position as Box[j]}
+                                        end
+                                     else; {Box[j] found at the same index in the table}
+                                     end
+                                  else begin {Box[j] removed from the board}
+                                     repeat Inc(UnmatchedRemovedBoxIndex);
+                                     until  (UnmatchedRemovedBoxIndex>Game.BoxCount) or
+                                            (Game.DeadlockSets.History[i].BoxPos[UnmatchedRemovedBoxIndex]<=0);
+                                     Result :=UnmatchedRemovedBoxIndex<=Game.BoxCount; {'True': found a not previously matched removed box in the history item}
+                                     end;
+                                  end
+                             else break; {fail, i.e., not a duplicate position on the path}
+                             end;
+                         end
+                      end
+                   else break; {done, i.e., found a duplicate position on the path}
+
+             {check if the position is one of the deadlock positions registered in the transposition table}
+             if ( not Result ) then begin
+                i := Game.HashValue and High( Game.DeadlockSets.TranspositionTable );
+
+                with Game.DeadlockSets.TranspositionTable[ i ] do begin
+                     Result:=(PlayerPos__                  =  PlayerPos) and
+                             (Game.HashValue               =  HashValue) and
+                             ( TranspositionTableTimeStamp =  TranspositionTableTimeStamps[ i ] );
+                             //and ( SearchDepth                 <= Depth__);
+                     if Result then begin
+                        {a hash-value is not 100% safe, hence, the exact game state must match}
+                        UnmatchedRemovedBoxIndex:=0;
+                        for j:=1 to Game.BoxCount do begin {try to match each box}
+                            if   Result then begin
+                                 BoxPosition:=Game.BoxPos[j];
+                                 if BoxPosition>0 then begin {'True': the box is still on the board}
+                                    if BoxPosition<>BoxPos[j] then begin {'<>': no simple match; try harder}
+                                       Result:=False;
+                                       for k:=1 to Game.BoxCount do {search for another box at the same position as Box[j]}
+                                           if   not Result then
+                                                Result:=BoxPosition=BoxPos[k]
+                                           else break; {done, i.e., there is another box at the same position as Box[j]}
+                                       end
+                                    else; {Box[j] found at the same index in the table}
+                                    end
+                                 else begin {Box[j] removed from the board}
+                                    repeat Inc(UnmatchedRemovedBoxIndex);
+                                    until  (UnmatchedRemovedBoxIndex>Game.BoxCount) or
+                                           (BoxPos[UnmatchedRemovedBoxIndex]<=0);
+                                    Result :=UnmatchedRemovedBoxIndex<=Game.BoxCount; {'True': found a not previously matched removed box in the table item}
+                                    end;
+                                 end
+                            else break; {fail, i.e., not a duplicate position}
+                            end;
+                        //if Result and ( Game.Board[ MAX_BOARD_SIZE ] = FLOOR ) then begin
+                        //   ShowBoard;
+                        //   Write( 'TT (Match): ', i );
+                        //   Readln;
+                        //   end;
+                        end;
+                     end;
+
+                {check if the current box constellation is a superset of one
+                 of the deadlocks registered in the transposition table; in
+                 that case, and if the current position also has the same
+                 normalized player position as the deadlock, then the current
+                 game state is also a deadlock, and further analysis is
+                 unnecessary}
+                if ( BoxesOnBoardCount >= MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS ) then
+                   for i := Low( Game.DeadlockSets.TranspositionTable ) to High( Game.DeadlockSets.TranspositionTable ) do
+                       if   not Result then with Game.DeadlockSets.TranspositionTable[ i ] do begin
+                            Result := ( PlayerPos__                 =  PlayerPos ) and
+                                      ( TranspositionTableTimeStamp =  TranspositionTableTimeStamps[ i ] ) and
+                                      ( BoxesOnBoardCount           >= TableItemBoxesOnBoardCount );
+                            if Result then
+                               for j:=1 to Game.BoxCount do begin {try to match each box in the registered deadlock with a box on the board in the current game state}
+                                   if   Result then begin
+                                        BoxPosition := BoxPos[ j ]; {box square number from the deadlocked position}
+                                        if ( BoxPosition >  0 ) and {'<>': the box is on the board in the deadlocked position}
+                                           ( BoxPosition <> Game.BoxPos[ j ] ) then begin {'<>': no simple match; try harder}
+                                           Result := False;
+                                           for k := 1 to Game.BoxCount do {search for another box on the game board with the same position as Deadlock.BoxPos[j]}
+                                               if   not Result then
+                                                    Result := Game.BoxPos[ k ] = BoxPosition
+                                               else break; {done, i.e., there is another box at the same position as Deadlock.BoxPos[j]}
+                                           end
+                                        else begin end; {Box[j] found at the same index, or it's not on the board in the deadlocked position registered in the transposition table}
+                                        end
+                                   else break; {fail, i.e., not a duplicate position}
+                                   end;
+                            //if Result and ( Game.Board[ MAX_BOARD_SIZE ] = FLOOR ) then begin
+                            //   ShowBoard;
+                            //   Write( 'TT (Superset): ', i );
+                            //   Readln;
+                            //   end;
+                            end
+                       else break; {done, i.e., found a duplicate position}
+                end;
+          end;
+
+          function  AddGamePositionToLocalTranspositionTable( Depth__, PlayerPos__ : Integer ) :Integer;
+          var i{, OriginalPlayerPos} : Integer;
+          begin { stores the current game position in the local transposition table;
+                  precondition: the current game position is a deadlock;}
+            Result := Game.HashValue and High( Game.DeadlockSets.TranspositionTable );
+            with Game.DeadlockSets.TranspositionTable[ Result ] do begin
+              PlayerPos                  := PlayerPos__; {normalized player position}
+              HashValue                  := Game.HashValue;
+              for i                      := 0 to Game.BoxCount do
+                  BoxPos[ i ]            := Game.BoxPos[ i ];
+              TableItemBoxesOnBoardCount := BoxesOnBoardCount;
+              end;
+           TranspositionTableTimeStamps[ Result ] := TranspositionTableTimeStamp;
+{
+           if Game.Board[MAX_BOARD_SIZE]=FLOOR then begin
+              OriginalPlayerPos := Game.PlayerPos;
+              MovePlayer( PlayerPos__ );
+              ShowBoard;
+              MovePlayer( OriginalPlayerPos );
+              Write(Depth__,SLASH,MaximumSearchDepth,
+                    SPACE,SPACE,TEXT_PUSH_PULL[CheckType__=ctCheckPulls],
+                    SPACE,SPACE,Game.DeadlockSets.CandidatePushCount,
+                    SPACE,SPACE,Game.PlayerPos,
+                    SPACE,SPACE,Game.HashValue,
+                    SPACE,SPACE,Game.DeadlockSets.LevelTotalPushCount,
+                    SPACE,SPACE,Solver.PushCount,
+                    ' Deadlock position ',Result
+                   );
+              Readln;
+              end;
+}
+          end;
+
+          function  Search(Depth__:Integer; var BackJumpDepth__:Integer):Boolean; {returns 'True' on deadlock}
+          var i,BoxNo,BoxToSquareNo,LastPushedBoxNo,OriginalPeeledOffBoxesCount,OriginalPlayerPos,SquareNo,SuccessorDepth:Integer;
+              HasLegalSuccessorMoves:Boolean;
+              Direction:TDirection;
+              //s:String;
+          begin {Search: returns 'True' on deadlock;
+                 precondition: player's reachable squares have been calculated for this depth}
+{
+            //if   Game.DeadlockSets.SequenceNo=417 then
+            //if   Solver.PushCount>=219139 then
+            //     Game.Board[MAX_BOARD_SIZE]:=FLOOR
+            //else Game.Board[MAX_BOARD_SIZE]:=WALL;
             if Game.Board[MAX_BOARD_SIZE]=FLOOR then begin
                ShowBoard;
-               Write(Depth__,SLASH,MAX_SEARCH_DEPTH,SPACE,SPACE,TEXT_PUSH_PULL[CheckType__=ctCheckPulls],SPACE,SPACE,Game.PlayerPos,SPACE,SPACE,Game.DeadlockSets.CandidatePushCount);
-               Readln;
+               Write(Depth__,SLASH,MaximumSearchDepth,
+                     SPACE,SPACE,TEXT_PUSH_PULL[CheckType__=ctCheckPulls],
+                     SPACE,SPACE,Game.DeadlockSets.CandidatePushCount,
+                     SPACE,SPACE,Game.PlayerPos,
+                     SPACE,SPACE,Game.HashValue,
+                     SPACE,SPACE,Game.DeadlockSets.LevelTotalPushCount,
+                     SPACE,SPACE,Solver.PushCount
+                    );
+               Readln(s);
+               if s<>'' then
+                  if   (Game.Board[MAX_BOARD_SIZE] and FLOOR)=0 then
+                       Game.Board[MAX_BOARD_SIZE]:=FLOOR
+                  else Game.Board[MAX_BOARD_SIZE]:=WALL;
                end;
 }
             Inc(Game.DeadlockSets.CandidatePushCount);
-            Result:=(Game.SimpleLowerBound<>0) and {'0': all boxes are located at goals}
-                    (Depth__<MaximumSearchDepth) and {if the search goes to deep, then be conservative and reject the deadlock-set}
-                    (Depth__+DepthOffset<MAX_HISTORY_BOX_MOVES) and {range check for calculating the player's reachable squares}
-                    (Game.DeadlockSets.CandidatePushCount<=MAX_DEADLOCK_SET_CANDIDATE_PUSH_COUNT) and {fallback stop criteria}
-                    (not Solver.Terminated);
+
+            OriginalPlayerPos           := Game.PlayerPos;
+            OriginalPeeledOffBoxesCount := PeeledOffBoxes.Count;
+            if (dsfPeelOffNonCorralBoxes in DeadlockSetCandidate__.Flags) and (CheckType__=ctCheckPushes) then begin
+               PeelOffBoxes(Depth__,DeadlockSetCandidate__.EscapedBoxesCountDown,BoxesOnBoardCount,PeeledOffBoxes);
+               end;
+
+            Result:=((Game.SimpleLowerBound<>0) {'True': some boxes on the board are not located at goal squares}
+                     or
+                     (//False                                                   {'False': don't test for deadlocks with with all boxes at goal squares and unreachable unfilled goal squares}
+                      //and
+                      (BoxesOnBoardCount>0)
+                      and
+                      (dsIsAGameStateDeadlockCandidate in DeadlockSetCandidate__.Flags)
+                      and
+                      (CheckType__=ctCheckPushes)
+                      {try all legal pushes even when all boxes currently are located at goal squares; if there are no legal pushes, then the unreachable goal squares, if any, must be filled at this point; otherwise, it's a deadlock}
+                     )
+                    )
+                    and
+                    (Depth__<MaximumSearchDepth) {if the search goes to deep, then be conservative and reject the deadlock-set}
+                    and
+                    (Depth__+DepthOffset<MAX_HISTORY_BOX_MOVES) {range check for calculating the player's reachable squares; '<': ensure that the successor depth is valid;}
+                    and
+                    (Game.DeadlockSets.CandidatePushCount<=MAX_DEADLOCK_SET_CANDIDATE_PUSH_COUNT) {fallback stop criterion}
+                    and
+                    (Solver.SearchLimits.DepthLimit>=0); {'True': the solver hasn't been terminated}
 {
-//                  if Solver.PushCount=755 then if (Game.DeadlockSets.CandidatePushCount mod 10000) = 0 then begin
-//                  if (Game.DeadlockSets.SequenceNo>=318) then begin
-//                  if True then begin
-                    if Game.Board[MAX_BOARD_SIZE]=FLOOR //then
+//                  if Solver.PushCount=755 then if (Game.DeadlockSets.CandidatePushCount mod 10000) = 0
+                    if (Game.DeadlockSets.SequenceNo>=759)
+//                  if True
+//                  if (dsfPeelOffNonCorralBoxes in DeadlockSetCandidate__.Flags) and (Solver.PushCount>=0)
+//                  if Game.Board[MAX_BOARD_SIZE]=FLOOR //then
                        //if ((Game.DeadlockSets.CandidatePushCount mod 1000000) = 0) or (Depth__ >= MaximumSearchDepth) or (Game.DeadlockSets.CandidatePushCount > MAX_DEADLOCK_SET_CANDIDATE_PUSH_COUNT)
                           then begin
                           ShowBoard;
                           if   CheckType__=ctCheckPushes then
-                               Write('Forwards ')
-                          else Write('Backwards ');
-                          Write(Depth__,SPACE,BackJumpDepth__,SPACE,Game.DeadlockSets.CandidatePushCount,SPACE,Solver.PushCount);
-                          Readln;
+                               Write('Forward ')
+                          else Write('Backward ');
+                          Write(Depth__,SPACE,BackJumpDepth__,SPACE,Game.DeadlockSets.CandidatePushCount,SPACE,Solver.PushCount,SPACE,Game.HashValue);
+                          Readln(s);
+                          if s<>'' then
+                             Game.Board[MAX_BOARD_SIZE]:=WALL;
                           end;
 }
             if Result then begin
-               SuccessorDepth          := Succ( Depth__ );
-               BackJumpDepth__         := MAX_DEADLOCK_SEARCH_DEPTH + 1;        {initialize to chronological backtracking}
-               StartCandidatePushCount := Game.DeadlockSets.CandidatePushCount; {remember the number of pushed before expanding this position}
-               LastPushedBoxNo         := Game.DeadlockSets.History[ Depth__ ].BoxNo;
-               if   LastPushedBoxNo    <> 0 then {'True': first expand the last pushed box to increase the chances of finding an early escape for it}
-                    BoxNo              := LastPushedBoxNo
-               else BoxNo              := 1;
+               SuccessorDepth              := Succ( Depth__ );
+               BackJumpDepth__             := MAX_DEADLOCK_SEARCH_DEPTH + 1;    {initialize to chronological backtracking}
+               HasLegalSuccessorMoves      := False;                            {no legal successor moves have been found yet}
+               LastPushedBoxNo             := Game.DeadlockSets.History[ Depth__ ].BoxNo;
+               if   LastPushedBoxNo        <> 0 then                            {'True': first expand the last pushed box to increase the chances of finding an early escape from a fenced-in area for that box}
+                    BoxNo                  := LastPushedBoxNo
+               else BoxNo                  := 1;
                while BoxNo<=Game.BoxCount do
                    if Result then begin
                       SquareNo:=Game.BoxPos[BoxNo];
-
                       for Direction:=Low(Direction) to High(Direction) do
                           if Result and (BackJumpDepth__>Depth__) then begin
-                             with Solver.SearchStates[Depth__+DepthOffset].PlayersReachableSquares do
-                               if CheckType__=ctCheckPushes then begin {pushes: try proving the set invalid by pushing a box outside the area}
-                                  if SquareNo<>0 then begin                     {'True': the box hasn't been removed from the board}
+                             with Solver.SearchStates[Depth__+DepthOffset].PlayersReachableSquares do begin
+                               if CheckType__=ctCheckPushes then begin          {pushes: try proving the set invalid by pushing a box outside the area}
+                                  if SquareNo>0 then begin                      {'True': the box hasn't been removed from the board}
                                      BoxToSquareNo:=SquareNo+Game.SquareOffsetForward[Direction];
                                      {inline simple checks for legal moves}
                                      if (Squares[SquareNo-Game.SquareOffsetForward[Direction]]=TimeStamp)
@@ -8041,37 +8903,64 @@ XX              of them is a box on a non-goal square. The non-wall
                                         and
                                         {extended checks for legal moves}
                                         IsALegalPush(BoxNo,Direction,SuccessorDepth+DepthOffset) then begin
+                                        HasLegalSuccessorMoves:=True;
 
                                         if ( DeadlockSetCandidate__.SquareColors[ BoxToSquareNo ] = scWhite ) or  {'True': the box escapes from the fenced-in area}
                                            ( SuccessorDepth = MaximumSearchDepth ) then begin {'True': the maximum search depth has been reached; remove the box and check if the remaining boxes are deadlocked}
                                            Result:=DeadlockSetCandidate__.EscapedBoxesCountDown>1; {'True': continue the search, i.e., the candidate is considered a deadlock until it has been proved that enough boxes can escape}
-                                           {jump back to the point where the box began its current
-                                            sequence of moves toward the escape square; remove the
-                                            box at that point and then continue the search with the
-                                            remaining boxes on the board;
+                                           {
+                                            if the most recent pushes were made by this box,
+                                            then jump back to the position where the box
+                                            made its first push in the sequence; then
+                                            remove the box from the board at that point and
+                                            continue the search with the remaining boxes;
+
+                                            this saves search depths, a limited resource both
+                                            for imposing a reasonable upper bound on the running
+                                            time, and because the recursion requires one of the
+                                            preallocated 'PlayersReachableSquares' vectors for
+                                            each search depth;
+
                                             the alternative would be to continue the search normally,
                                             using a recursive call with the next higher depth, but
                                             that would waste search depths if the search in reality
                                             just peels off loosely attached boxes from a core of
                                             deadlocked boxes;
+
+                                            identifying the correct backjump depth is complicated by
+                                            the fact that a search depth denotes a parent position;
+                                            a successor push, in particular a push of the escaping box,
+                                            is stored at the next higher depth in the path history;
+                                            the backjump targets the parent position from which the
+                                            escaped box is pushed;
                                            }
                                            BackJumpDepth__:=Depth__;
                                            if    (BackJumpDepth__>0) and
                                                  (Game.DeadlockSets.History[Pred(BackJumpDepth__)].BoxNo=BoxNo) then
                                                  {the next to last push was a push of the escaping box E;
                                                   discard the last push of box X even if X<>E; for instance,
-                                                  with topmost pushes EEEX and X<>E, X can always make at least
-                                                  the same pushes again when E has been removed from the board, so
-                                                  the search is still exhaustive after discarding the topmost push
-                                                  of the X box here;}
+                                                  with topmost pushes EEEX and X<>E, the box X can always make at
+                                                  least the same pushes again when E has been removed from the board,
+                                                  so the search is still exhaustive after discarding the topmost push
+                                                  of the box X here;}
                                                   Dec(BackJumpDepth__);
                                            while Game.DeadlockSets.History[BackJumpDepth__].BoxNo=BoxNo do
                                                  Dec(BackJumpDepth__);
+
+                                           if  Succ(BackJumpDepth__)=MaximumSearchDepth then begin
+                                               {the search depth is about to overflow;
+                                                find the deepest level of the search where the box was pushed,
+                                                and then continue the search from there, with the box removed from the board;
+                                               }
+                                               for i:=1 to Depth__ do
+                                                   if (Game.DeadlockSets.History[     i ].BoxNo= BoxNo) and
+                                                      (Game.DeadlockSets.History[Pred(i)].BoxNo<>BoxNo) then {'<>' if the box is pushed multiple times in a row, then remove the box when it's pushed for the first time}
+                                                      BackJumpDepth__:=Pred(i); {'Pred': the parent position from which the box is pushed}
+                                               end;
                                            end;
 
                                         if Result and (BackJumpDepth__>Depth__) then begin {'True': try the push}
                                            DoPush(BoxNo,Direction,SuccessorDepth+DepthOffset); {do the move, i.e., update the board}
-
                                            CalculatePlayersReachableSquares(SuccessorDepth+DepthOffset); {note that the results from this calculation are passed on to the recursive call}
 
                                            if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos) then begin
@@ -8081,53 +8970,71 @@ XX              of them is a box on a non-goal square. The non-wall
                                               Game.DeadlockSets.History[SuccessorDepth].HashValue:=Game.HashValue;
                                               Game.DeadlockSets.History[SuccessorDepth].PlayerPos:=Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos;
 
+                                              //Inc( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
                                               Result:=Search(SuccessorDepth,BackJumpDepth__); {recursive step: explore the new position}
+                                              //Dec( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
                                               end;
 
-                                           UndoPush(BoxNo,Direction);           {take back the move, i.e., update the board}
+                                           UndoPush(BoxNo,Direction)            {take back the move, i.e., update the board}
                                            end;
 
                                         if Result and (BackJumpDepth__=Depth__) then begin {'True': the box can escape the fenced-in area after zero or more pushes starting from its current position}
-                                           {remove the box from the board and try a search with the remaining boxes}
+                                           BackJumpDepth__ := MAX_DEADLOCK_SEARCH_DEPTH + 1; {re-initialize the backjump depth to exhaustive search}
 
+                                           {remove the box from the board and try a search with the remaining boxes}
                                            RemoveBoxFromBoard(BoxNo);           {remove the box from the board}
                                            Dec(DeadlockSetCandidate__.EscapedBoxesCountDown); {update the number of escaped boxes}
-                                           Dec( BoxesOnBoardCount );            {update the number of boxes on the board}
+                                           Dec(BoxesOnBoardCount);              {update the number of boxes on the board}
+
+                                           //if DeadlockSetCandidate__.Boxes.Squares[BoxNo]<0 then begin
+                                           //   ShowBoard;
+                                           //   Writeln('Remove box: ', SquareToColRowAsText(SquareNo));
+                                           //   Readln;
+                                           //   end;
 
                                            CalculatePlayersReachableSquares(SuccessorDepth+DepthOffset); {note that the results from this calculation are passed on to the recursive call}
 
-                                           Game.DeadlockSets.History[SuccessorDepth].BoxNo:=0;    {removing the box from the board is a "null-move"}
-                                           Game.DeadlockSets.History[SuccessorDepth].BoxPos[BoxNo]:=0;
-                                           Game.DeadlockSets.History[SuccessorDepth].HashValue:=Game.HashValue;
-                                           Game.DeadlockSets.History[SuccessorDepth].PlayerPos:=
-                                             Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos; {update the normalized player position now that the box has been removed from the board}
-{
-                                           if Game.Board[MAX_BOARD_SIZE]=FLOOR then begin
-                                              ShowBoard;
-                                              Writeln( 'Box removed from the board' );
+                                           if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos) then begin
+                                              Game.DeadlockSets.History[SuccessorDepth].BoxNo:=0; {removing the box from the board is a "null-move"}
+                                              Game.DeadlockSets.History[SuccessorDepth].BoxPos[BoxNo]:=0;
+                                              Game.DeadlockSets.History[SuccessorDepth].HashValue:=Game.HashValue;
+                                              Game.DeadlockSets.History[SuccessorDepth].PlayerPos:=
+                                                Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos; {update the normalized player position now that the box has been removed from the board}
+
+                                              //Inc( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
+                                              Result:=Search(SuccessorDepth,BackJumpDepth__); {recursive step: explore the new position; note that if 'Result' is 'True' then 'BackJumpDepth__' has been properly initialized so the search continues}
+                                              //Dec( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
                                               end;
-}
-                                           Result:=Search(SuccessorDepth,BackJumpDepth__); {recursive step: explore the new position; note that if 'Result' is 'True' then 'BackJumpDepth__' is guaranteed to have a proper value upon return}
 
                                            PutBoxOnBoard(BoxNo,SquareNo);       {put the box back on the board}
                                            Inc(DeadlockSetCandidate__.EscapedBoxesCountDown); {restore the number of escaped boxes}
                                            Inc( BoxesOnBoardCount );            {restore the number of boxes on the board}
-                                           if BackJumpDepth__ = -Depth__  then  {'True': at a higher search depth, it turned out that this push deadlocked a set of boxes; continue the search from here}
+
+                                           if BackJumpDepth__ = -Depth__  then  {'True': at a higher search depth, it turned out that the current position with the box removed from the board is a deadlock; continue the search from here}
                                               BackJumpDepth__ := MAX_DEADLOCK_SEARCH_DEPTH + 1;
+{
+                                           if Game.Board[MAX_BOARD_SIZE]=FLOOR then begin
+                                              ShowBoard;
+                                              Writeln( 'Box back on the board' );
+                                              Readln;
+                                              end;
+}                                          {SquareNo:=0;}                       {clean exit the 'for each direction' loop for the current box}
                                            break;                               {quick-and-dirty: exit the 'for each direction' loop for the current box; there is no need to enumerate all directions after a search with the box removed from the board}
                                            end
-                                        else if BackJumpDepth__ = -Depth__  then {'True': at a higher search depth, it turned out that this push deadlocked a set of boxes; continue the search from here}
+                                        else if BackJumpDepth__ = -Depth__  then {'True': at a higher search depth, it turned out that this push created a deadlock; continue the search from here}
                                                 BackJumpDepth__ := MAX_DEADLOCK_SEARCH_DEPTH + 1;
                                         end
                                      else; {no push in this direction}
-                                     end;
+                                     end
+                                  else break;                                   {SquareNo <= 0; quick-and-dirty exit the 'Direction' loop when the box has been removed from the board}
                                   end
-                               else {pulls: try proving the set invalid by pulling boxes so the player can escape the fenced-in area}
+                               else {pulls: try proving the set invalid by pulling boxes from the inside so the player can escape the fenced-in area}
                                   if (Squares[SquareNo+  Game.SquareOffsetForward[Direction]]=TimeStamp)
                                      and
                                      (Squares[SquareNo+2*Game.SquareOffsetForward[Direction]]=TimeStamp)
                                      and
                                      ((Game.Board[SquareNo+Game.SquareOffsetForward[Direction]] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE))=0) then begin
+                                     HasLegalSuccessorMoves:=True;
 
                                      DoPull(BoxNo,Direction);                   {do the move, i.e., update the board}
 
@@ -8147,12 +9054,17 @@ XX              of them is a box on a non-goal square. The non-wall
                                            for i:=1 to Game.BoxCount do Game.DeadlockSets.History[SuccessorDepth].BoxPos[i]:=Game.BoxPos[i];
                                            Game.DeadlockSets.History[SuccessorDepth].HashValue:=Game.HashValue;
                                            Game.DeadlockSets.History[SuccessorDepth].PlayerPos:=Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos;
+                                           //Inc( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
+
                                            Result:=Search(SuccessorDepth,BackJumpDepth__); {recursive step: explore the new position}
+
+                                           //Dec( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
                                            end;
                                         end;
 
                                      UndoPull(BoxNo,Direction);                 {take back the move, i.e., update the board}
                                      end;
+                               end;
                              end
                           else break;                                           {(Result = False) or (BackJumpDepth__<=Depth__)}
 
@@ -8160,51 +9072,219 @@ XX              of them is a box on a non-goal square. The non-wall
                       else BoxNo:=1;                                            {first time through the loop}
                       if   BoxNo= LastPushedBoxNo then Inc(BoxNo);              {skip last pushed box when seeing it for the second time}
                       end
-                   else break;
+                   else break;                                                  {quick-and-dirty exit the boxes loop when it has been proved that the position isn't a deadlock}
 
-               if  ( StartCandidatePushCount    =  Game.DeadlockSets.CandidatePushCount ) and
-                   ( CheckType__                =  ctCheckPushes ) and
+               if  Result and                                                   {'True': it's a deadlock position unless there is a backjump to this or a lower search depth}
                    ( BackJumpDepth__            >  Depth__ ) and
-                   ( Game.DeadlockSets.History[ Depth__ ].BoxNo
-                                                =  0 ) and
-                   Result then begin {the current position is a deadlock; backtrack to the point where the last of the remaining boxes on the board was pushed}
-                   while ( Depth__              >  0 ) and
-                         ( Game.BoxPos[ Game.DeadlockSets.History[ Depth__ ].BoxNo ] = 0 ) do {'=0': the box has been removed from the board}
-                         Dec( Depth__ );
-                   if Depth__                   >  0 then
-                      BackJumpDepth__           := -Depth__;
-                   end;
-
-               if  Result and
-                   ( Abs( BackJumpDepth__ )     >= Depth__ ) and
-                   ( ( BoxesOnBoardCount        <= MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS ) {'1..MAX': reserve the transposition table for positions with few boxes; they are more likely to be subsets of other box constellations}
+                   ( True
                      or
-                     ( StartCandidatePushCount  =  Game.DeadlockSets.CandidatePushCount ) ) then begin {'=': add dead-end positions to the transposition table no matter how many boxes the position has}
-                   i := Game.HashValue and High( Game.DeadlockSets.TranspositionTable );
-                   with Game.DeadlockSets.TranspositionTable[ i ] do begin
-                     PlayerPos                  := Game.DeadlockSets.History[ Depth__ ].PlayerPos;
-                     HashValue                  := Game.HashValue;
-                     for j                      := 0 to Game.BoxCount do
-                         BoxPos[ j ]            := Game.BoxPos[ j ];
-                     end;
-                   TranspositionTableTimeStamps[ i ] := TranspositionTableTimeStamp;
+                     ( BoxesOnBoardCount        <= MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS ) {'1..MAX': reserve the transposition table for positions with few boxes; they are more likely to be subsets of other box constellations}
+                     or
+                     ( not HasLegalSuccessorMoves ) ) then                      {'True': a dead-end position with no successor moves; add it to the transposition table no matter how many boxes there are left on the board}
+                   AddGamePositionToLocalTranspositionTable(Depth__,Game.DeadlockSets.History[ Depth__ ].PlayerPos);
+
+               if  Result and                                                   {'True': it's a deadlock position unless there is a backjump to this or a lower search depth}
+                   (not HasLegalSuccessorMoves) and                             {'True': a dead-end position, i.e., there are no legal successor moves}
+                   ( CheckType__                =  ctCheckPushes ) and
+                   ( BackJumpDepth__            >  Depth__ ) then begin
+                   if ( Game.SimpleLowerBound   <> 0 ) or ( BoxesOnBoardCount = 0 ) then begin {'True': it's not a position with one or more boxes on the board, with all boxes at goal squares}
+                      if ( Game.DeadlockSets.History[ Depth__ ].BoxNo = 0 ) then begin {the current position is a deadlock; backtrack to the point where the last of the remaining boxes on the board was pushed}
+                         while ( Depth__        >  0 ) and
+                               ( Game.BoxPos[ Game.DeadlockSets.History[ Depth__ ].BoxNo ] = 0 ) do {'0': a box was removed from the board at the preceding search depth}
+                               Dec( Depth__ );
+                         if Depth__             >  0 then
+                            BackJumpDepth__     := -Depth__;                    {'-Depth': the position at '-Depth' is a deadlock; the higher search depths has just peeled boxes off the board}
+                         end;
+                      end
+                   else begin
+                      {a position with one or more boxes on the board, and with
+                       all boxes located at goal squares; there are no legal
+                       successor moves;}
+                      if   (dsIsAGameStateDeadlockCandidate in DeadlockSetCandidate__.Flags)
+                           and
+                           (BoxesOnBoardCount >= FROZEN_GOALS_PATTERN_THRESHOLD)
+                           //and
+                           //BoardHasEmptyGoalSquaresUnreachableForThePlayer(Depth__+DepthOffset) {'True': there are empty goal squares on the board which the player cannot reach}
+                           {when there are empty goal squares which the player
+                            cannot reach, then these goals can only be filled by
+                            pushing some of the boxes further, even though all
+                            boxes currently are located at goal squares}
+                           then begin
+                           CalculateFreezeDeadlocks(Depth__+DepthOffset);
+                           DeadlockSetCandidate__.SquareOutsideFence := 0;      {'0': otherwise, the calling function 'CheckDeadlockSetCandidate' considers the deadlock candidate a deadlock if the player is located at this square}
+                           end;
+                      Result := False;                                          {'False': all boxes are located at goal squares, hence, the position isn't a deadlock}
+                      end;
                    end;
+               end;
+            if OriginalPeeledOffBoxesCount<PeeledOffBoxes.Count then begin
+               repeat                                                           {put boxes back on board which has been peeled off because the player can push them back and forth}
+                  BoxNo:=PeeledOffBoxes.Numbers[PeeledOffBoxes.Count];
+                  PutBoxOnBoard(BoxNo,-Game.BoxPos[BoxNo]);                     {put the box back on the board}
+                  Inc(DeadlockSetCandidate__.EscapedBoxesCountDown);            {restore the number of escaped boxes}
+                  Inc( BoxesOnBoardCount );                                     {restore the number of boxes on the board}
+                  Dec(PeeledOffBoxes.Count);
+               until OriginalPeeledOffBoxesCount=PeeledOffBoxes.Count;
+               MovePlayer(OriginalPlayerPos);
+               CalculatePlayersReachableSquares(Depth__+DepthOffset);           {postcondition: the caller expects the player's reachable squares to be intact}
                end;
           end; {Search}
 
+        function  PeelOffUnnecessaryBoxes:Boolean;
+        var BoxNo,BackJumpDepth,Count,FloorCount,SquareNo:Integer;
+            DeadlockPosition:PPosition;
+            //s:String;
+        begin {PeelOffUnnecessaryBoxes: removes boxes which don't contribute to the forward search deadlock for the position}
+              {preconditions: the position matches the current game state and it's a forward search deadlock}
+{
+          Writeln;
+          Writeln('Deadlock candidate: ', SquareToColRowAsText(GamePlayerPos), ' Ready to peel off unnecessary boxes. Pushes: ',Solver.PushCount);
+          MovePlayer(GamePlayerPos);
+          ShowBoard;
+          Write(Solver.PushCount);
+          Writeln;
+          if Solver.PushCount>=0 then
+             Readln;
+}
+          Include(DeadlockSetCandidate__.Flags,dsfPeelOffNonCorralBoxes); {initialize the peeling operation}
+          Exclude(DeadlockSetCandidate__.Flags,dsIsAGameStateDeadlockCandidate); {when boxes tentatively are removed from the candidate, then the board isn't a complete game state anymore}
+
+          {try to find and discard boxes which don't contribute to the deadlock situation}
+          for BoxNo:=1 to Game.BoxCount do begin
+              //InitializeBoard; {put boxes on the board which contribute to the forward search deadlock, or which haven't been tested yet}
+
+              SquareNo:=Game.BoxPos[BoxNo];
+              if SquareNo>0 then begin
+                 RemoveBoxFromBoard(BoxNo);
+                 Dec(DeadlockSetCandidate__.EscapedBoxesCountDown); {update the number of escaped boxes}
+                 Dec( BoxesOnBoardCount ); {update the number of boxes on the board}
+{
+                 if Solver.PushCount>=0 then begin
+                    Writeln;
+                    ShowBoard;
+                    Write(BoxNo,SLASH,Game.BoxCount,': Try deadlock with box removed from: ',SquareToColRowAsText(SquareNo),SPACE,BoxesOnBoardCount,SPACE,DeadlockSetCandidate__.EscapedBoxesCountDown);
+                    Readln(s);
+                    if s<>'' then
+                       if   (Game.Board[MAX_BOARD_SIZE] and FLOOR)=0 then
+                            Game.Board[MAX_BOARD_SIZE]:=FLOOR
+                       else Game.Board[MAX_BOARD_SIZE]:=WALL;
+                    end;
+}
+                 Inc(Game.DeadlockSets.LevelTotalPushCount,Game.DeadlockSets.CandidatePushCount);
+                 Game.DeadlockSets.CandidatePushCount:=0;
+                 MovePlayer(GamePlayerPos);
+                 CalculatePlayersReachableSquares(DepthOffset); {calculate the player's access area for the current game state, taking into account that this function may have removed boxes}
+                 InitializeTranspositionTable;
+                 TimeCheck; {check the time limit, if any}
+                 Result:=Search(0,BackJumpDepth); {use the recursive search procedure to explore the possible moves}
+                 if not Result then begin {the box is necessary for the deadlock}
+                    PutBoxOnBoard(BoxNo,SquareNo); {put the box back on the board}
+                    Inc(DeadlockSetCandidate__.EscapedBoxesCountDown); {restore the number of escaped boxes}
+                    Inc( BoxesOnBoardCount ); {restore the number of boxes on the board}
+                    end;
+                 end;
+              end;
+
+          ClearPlayersReachableSquares(DepthOffset); {reset player's reachable squares, so unvisited floor squares contain '0' also after several access areas have been visited}
+          MovePlayer(GamePlayerPos);
+          CalculatePlayersReachableSquares(DepthOffset); {calculate the player's access area for the current game state, taking into account that this function may have removed boxes}
+
+          Result:=TTAdd(Game.HashValue,
+                        Solver.SearchStates[DepthOffset].PlayersReachableSquares.MinPlayerPos+MAX_BOARD_SIZE, {'MAX_BOARD_SIZE': differentiates deadlock-set candidates from normal game positions in the transposition table}
+                        0,0,0,dUp,nil,DeadlockPosition);
+          if Result then begin {'True': the deadlock-set candidate is a new pattern, and now it has been added to the transposition table}
+             {if this is a corral deadlock then the normalized (top-left) player position is known to be outside the fence; tentatively save the normalized player position as a square outside the fence;}
+             DeadlockSetCandidate__.SquareOutsideFence:=Solver.SearchStates[DepthOffset].PlayersReachableSquares.MinPlayerPos;
+             Exclude(DeadlockSetCandidate__.Flags,dsfPeelOffNonCorralBoxes); {finished the peeling operation}
+             Exclude(DeadlockSetCandidate__.Flags,dsfIsANoProgressDeadlockCandidate); {finished treating the deadlock-set candidate as a 'no-progress' candidate; this is important for the treatment of the candidate by the normal deadlock analysis}
+             {check if the forward search deadlock is a corral deadlock; in that case, find a square inside the corral and use it as the corral center square}
+             DeadlockSetCandidate__.CenterSquare:=0;
+             DeadlockSetCandidate__.Floors.Count:=0;
+             FloorCount:=0;
+             with Solver.SearchStates[DepthOffset].PlayersReachableSquares do {mark all squares in the player's access area as visited}
+               for SquareNo:=0 to Game.BoardSize do
+                   if (Squares[SquareNo]=0) and {'True': an unvisited floor square}
+                      ((Game.Board[SquareNo] and (WALL+BOX+FLOOR))=FLOOR) then begin {'True': an empty floor square}
+                      MovePlayer(SquareNo);
+                      Count:=CalculatePlayersReachableSquares(DepthOffset);
+                      if Count>FloorCount then begin {'True': new best/first access area which the player cannot reach}
+                         DeadlockSetCandidate__.CenterSquare:=MinPlayerPos; {use the top-left square in the area as center square for the corral}
+                         FloorCount:=Count;
+                         end;
+                      Inc(DeadlockSetCandidate__.Floors.Count);
+                      DeadlockSetCandidate__.Floors.Squares[DeadlockSetCandidate__.Floors.Count]:=SquareNo; {register the access area as a part of the combined corral}
+                      end;
+             if DeadlockSetCandidate__.CenterSquare=0 then {'True': it's not a corral deadlock}
+                DeadlockSetCandidate__.SquareOutsideFence:=0; {it's not a corral deadlock, so there is no square outside a fence}
+
+             DeadlockSetCandidate__.Boxes.Count:=0;
+
+             {remove the unnecessary boxes from the deadlock-set candidate}
+             DeadlockSetCandidate__.Boxes.Count:=0;
+             for BoxNo :=1 to Game.BoxCount do begin
+                 SquareNo := Game.BoxPos[BoxNo];
+                 if SquareNo > 0 then with DeadlockSetCandidate__ do begin
+                    Inc( Boxes.Count );
+                    Boxes.Squares[ Boxes.Count ] := SquareNo;
+                    end;
+                 end;
+
+             {recalculate the deadlock-set information before the deadlock-set candidate is analysed normally for being a deadlock}
+             if DeadlockSetCandidate__.CenterSquare>0 then
+                DeadlockSetCandidate__.SquareOutsideFence:=-DeadlockSetCandidate__.SquareOutsideFence; {'-': tell 'CalculateDeadlockSetCandidateInfo' to keep the existing square outside the fence}
+             DeadlockSetCandidate__.SquaresOutsideFence.Count:=0; {reset the count}
+             MovePlayer(GamePlayerPos);
+             Result:=CalculateDeadlockSetCandidateInfo(False);
+
+             MovePlayer(GamePlayerPos);
+             CalculatePlayersReachableSquares(DepthOffset); {recalculate the player's access area for the current game state}
+{
+             if Result then begin
+                Writeln;
+                Writeln('Deadlock candidate: Center square: ', SquareToColRowAsText(DeadlockSetCandidate__.CenterSquare));
+                ShowBoard;
+                Write(Solver.PushCount);
+                Writeln;
+                if Solver.PushCount>=0 then begin
+                   Readln(s);
+                   if s<>'' then
+                      if   (Game.Board[MAX_BOARD_SIZE] and FLOOR)=0 then
+                           Game.Board[MAX_BOARD_SIZE]:=FLOOR
+                      else Game.Board[MAX_BOARD_SIZE]:=WALL;
+                   end;
+                end;
+}
+             end;
+        end; {PeelOffUnnecessaryBoxes}
+
         begin {Check}
+{
+          if Game.DeadlockSets.SequenceNo = 792 then begin //148 then
+             if Game.DeadlockSets.Count >= 753 then
+             //if CheckType__= ctCheckPushes then
+                //if Game.HashValue = 3767143639058340985 then //6936261288664917473 then
+                   Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+             end;
+          //else Game.Board[MAX_BOARD_SIZE]:=WALL;
+          if   (Game.HashValue=3767143639058340985) and (Game.DeadlockSets.Count>=753) then
+               Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+          //else Game.Board[MAX_BOARD_SIZE]:=WALL;
+
+}
           Result:=Game.SimpleLowerBound<>0;
-          with Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_CHECKING_DEADLOCK_CANDIDATE_SEARCH ].PlayersReachableSquares do begin {initialize visited access areas}
+          with Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH ].PlayersReachableSquares do begin {initialize visited access areas}
             if TimeStamp>=PLAYERS_REACHABLE_SQUARES_TIMESTAMP_UPPER_BOUND then
-               ClearPlayersReachableSquares( SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_CHECKING_DEADLOCK_CANDIDATE_SEARCH );
+               ClearPlayersReachableSquares( SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH );
             Inc(TimeStamp,2);
             end;
           SquareOutsideFence__:=0; PlayerOutsideFenceReachableSquaresCount:=0;
           Game.DeadlockSets.CandidatePushCount:=0;
-          Game.DeadlockSets.History[0].BoxNo:=0; {backjumping sentinel for the search}
-          if   not ( dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags ) then
-               MaximumSearchDepth := NORMAL_DEADLOCK_SEARCH_DEPTH
-          else MaximumSearchDepth := MAX_DEADLOCK_SEARCH_DEPTH;
+          Game.DeadlockSets.History[0].BoxNo:=0; {backjump sentinel for the search}
+          PeeledOffBoxes.Count:=0;
+          if   ( dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags ) or
+               ( (Solver.ProgressCheckPoint.NoProgressCount and 15 ) = 0 ) then {'True': it's a long time since the search made progress}
+               MaximumSearchDepth := MAX_DEADLOCK_SEARCH_DEPTH
+          else MaximumSearchDepth := NORMAL_DEADLOCK_SEARCH_DEPTH;
           if Position__=nil then
              DepthOffset:=0
           else begin
@@ -8212,38 +9292,40 @@ XX              of them is a box on a non-goal square. The non-wall
              Result:=Result and (DepthOffset<=MAX_HISTORY_BOX_MOVES); {range check for calculating the player's reachable squares}
              end;
 
-          if   CheckType__=ctCheckPulls then
-               CalculateFrontierSquares {'frontier squares' are used to speed up detection of the player's access to the outside area}
-          else if Result and
-                  (dsfPlayerIsInsideSet in DeadlockSetCandidate__.Flags) and
-                  ((Game.Board[GamePlayerPos] and (WALL+BOX+FLOOR))=FLOOR) then begin
-                  {note: 'GamePlayerPos', not 'Game.PlayerPos', i.e., the real}
-                  {player position is an empty floor inside the set}
-                  MovePlayer(GamePlayerPos); CalculatePlayersReachableSquares(DepthOffset);
-                  with Solver.SearchStates[DepthOffset].PlayersReachableSquares do
-                    if Squares[DeadlockSetCandidate__.CenterSquare]<>TimeStamp then begin
-                       {if the player is inside the set, but not in the same access area}
-                       {as the center square, then check that the player cannot push the boxes outside the area;}
-                       {maybe this check isn't necessary, but it won't hurt to throw away a few deadlock-sets}
-                       InitializeTranspositionTable;
-                       Result:=Search(0,BackJumpDepth);
-                       end;
+          if CheckType__=ctCheckPulls then
+             CalculateFrontierSquares {'frontier squares' are used to speed up the tests of the player's access to the outside area}
+          else if Result then begin
+                  if (dsfPeelOffNonCorralBoxes in DeadlockSetCandidate__.Flags) and
+                     (CheckType__=ctCheckPushes) then begin
+                     MovePlayer(GamePlayerPos);
+                     CalculatePlayersReachableSquares(DepthOffset);
+                     InitializeTranspositionTable;
+                     Result:=Search(0,BackJumpDepth) and                        {use the recursive search procedure to explore the possible moves}
+                             PeelOffUnnecessaryBoxes;                           {remove boxes which don't contribute to the deadlock}
+
+                     if Result then                                             {'True': the boxes currently on the board constitute a forward pushing deadlock; don't validate is again;}
+                        with Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH ].PlayersReachableSquares do
+                          for i:=0 to Game.BoardSize do
+                              if Squares[i]< TimeStamp then                     {'True': a floor square}
+                                 Squares[i]:=TimeStamp;                         {skip this floor square in the upcoming 'repeat ... until' loop, so the loop doesn't check the box constellation with the player in that access area}
+                     MovePlayer(Positions.StartPosition^.PlayerPos);            {the player position must be reset to the start position before the normal deadlock calculation}
+                     end;
                   end;
 
           if Result then begin
-             i:=GamePlayerPos;
-             repeat   {for each player access area, starting with the player's current position}
+             i:=GamePlayerPos; {'GamePlayerPos': the player's position in the current game state (the caller's game state)}
+             repeat   {for each player access area, starting with the player's position in the current game state}
                       if ((Game.Board[i] and (WALL+BOX+FLOOR))=FLOOR) and
-                         (Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_CHECKING_DEADLOCK_CANDIDATE_SEARCH ].PlayersReachableSquares.TimeStamp <>
-                          Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_CHECKING_DEADLOCK_CANDIDATE_SEARCH ].PlayersReachableSquares.Squares[ i ]) then
+                         (Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH ].PlayersReachableSquares.TimeStamp <>
+                          Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH ].PlayersReachableSquares.Squares[ i ]) then
                          with Solver.SearchStates[DepthOffset].PlayersReachableSquares do begin
                            MovePlayer(i);
                            PlayerReachableSquaresCount:=CalculatePlayersReachableSquares(DepthOffset);
 
                            for j:=0 to Game.BoardSize do
                                if  Squares[j]=TimeStamp then
-                                   Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_CHECKING_DEADLOCK_CANDIDATE_SEARCH ].PlayersReachableSquares.Squares[ j ] :=
-                                   Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_CHECKING_DEADLOCK_CANDIDATE_SEARCH ].PlayersReachableSquares.TimeStamp; {mark floor squares in access area as visited}
+                                   Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH ].PlayersReachableSquares.Squares[ j ] :=
+                                   Solver.SearchStates[ SEARCH_STATE_INDEX_VISITED_ACCESS_AREA_FOR_DEADLOCK_SEARCH ].PlayersReachableSquares.TimeStamp; {mark floor squares in access area as visited}
 
                            if ( ( PlayerReachableSquaresCount + DeadlockSetCandidate__.Boxes.Count ) >= Pred( Game.FloorCount ) ) and
                               ( DeadlockSetCandidate__.CenterSquare <> 0 ) and
@@ -8253,7 +9335,7 @@ XX              of them is a box on a non-goal square. The non-wall
                            else
                               if (DeadlockSetCandidate__.SquareColors[i]=PLAYER_START_SQUARE_COLORS[CheckType__])
                                  or
-                                 ( {a "no progress" deadlock candidate encompasses the entire board, unless it has a center square;
+                                 ( {a "no progress" deadlock candidate encompasses the entire board unless it has a center square;
                                    only corral-type deadlock candidates have a center square;}
                                    ( dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags )
                                    and
@@ -8274,7 +9356,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                  if (Position__<>nil) and
                                     (CheckType__=ctCheckPushes) then
                                     if   Result then begin
-                                         if (Squares[GamePlayerPos]=TimeStamp)  {note it's 'GamePlayerPos' and not 'Game.PlayerPos'; the former contains the player's position in the game, the latter the player position during the deadlock-set analysis}
+                                         if (Squares[GamePlayerPos]=TimeStamp)  {note it's 'GamePlayerPos' and not 'Game.PlayerPos'; the former contains the player's position in the game, the latter the player position during the deadlock analysis}
                                             and
                                             (DeadlockSetCandidate__.CenterSquare<>0)
                                             and
@@ -8297,8 +9379,8 @@ XX              of them is a box on a non-goal square. The non-wall
                                             end;
                                          end
                                     else if (Squares[GamePlayerPos]<>TimeStamp) and {'True': in the current game state, the player is in a different access area}
-                                            (Squares[Game.StartPlayerPos]<>TimeStamp) and {'True': in the game starting position, the player isn't inside the currently investigated player access area}
-                                            (PlayerReachableSquaresCount<=SMALL_PLAYER_ACCESS_AREA_LIMIT) and {'True': the currently investigated access area is small; maybe the player never can get into this "pocket"}
+                                            (Squares[Game.StartPlayerPos]<TimeStamp) and {'True': in the game starting position, the player isn't inside the currently investigated player access area (neither at a floor nor at a box square)}
+                                            (PlayerReachableSquaresCount<=SMALL_PLAYER_ACCESS_AREA_LIMIT) and {'True': the currently investigated access area is small; maybe the player can never get into this area}
                                             (DeadlockSetCandidate__.GoalCount<DeadlockSetCandidate__.Boxes.Count)
                                             then begin
                                             {starting from the current access area,
@@ -8334,6 +9416,45 @@ XX              of them is a box on a non-goal square. The non-wall
                       else i:=0;  {wrap around}
 
              until (not Result) or (i=GamePlayerPos); {until proving the candidate to be a deadlock failed, or until all board squares have been examined}
+
+             if Result and
+                (CheckType__=ctCheckPushes) and
+                (dsfPlayerIsInsideSet in DeadlockSetCandidate__.Flags) and
+                (DeadlockSetCandidate__.CenterSquare<>0) then begin
+                {'Game.StartPlayerPos':
+                 note the difference between the 3 different player positions:
+                 * Game.StartPlayerPos: the player start position in the game
+                 * Game.PlayerPos     : the player currently on the board
+                 * GamePlayerPos      : the player position on the board for the caller's game state}
+                MovePlayer(Game.StartPlayerPos);
+                CalculatePlayersReachableSquares(DepthOffset);
+                with Solver.SearchStates[DepthOffset].PlayersReachableSquares do
+                  if Squares[DeadlockSetCandidate__.CenterSquare]<>TimeStamp then begin
+                     {if the player is inside the set, but not in the same access area as the center square,}
+                     {then check that the player cannot push the boxes outside the area}
+                     with Solver.SearchStates[ DepthOffset ].PlayersReachableSquares do begin
+                       ClearPlayersReachableSquares( DepthOffset ); {initialize visited access areas}
+                       for i:=0 to Game.BoardSize do begin
+                           if Result and
+                              (Squares[i]=0) and {'True': a not visited floor square}
+                              (DeadlockSetCandidate__.SquareColors[ i ] = scLightGray) then begin {'True': a floor square inside the set}
+                              MovePlayer(i);
+                              CalculatePlayersReachableSquares(DepthOffset);
+                              if Squares[DeadlockSetCandidate__.CenterSquare]<>TimeStamp then begin {'True': a floor square inside the set, but not in the same access area as the center square}
+                                 InitializeTranspositionTable;
+                                 Result:=Search(0,BackJumpDepth);
+                                 if not Result then
+                                    break; {quick-and-dirty exit the loop when it's known that there is a chance, the player can push a box from the inside to the outside}
+                                 end;
+                              end;
+                           end;
+                       end;
+                     if (not Result) and (SquareOutsideFence__>0) then begin {the candidate is a deadlock if the player is outside the fence in the specified access area}
+                        Include(DeadlockSetCandidate__.Flags,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence);
+                        end;
+                     end;
+                end;
+
              end;
 
           Inc(Game.DeadlockSets.LevelTotalPushCount,Game.DeadlockSets.CandidatePushCount);
@@ -8345,7 +9466,7 @@ XX              of them is a box on a non-goal square. The non-wall
 {
         if Game.Board[MAX_BOARD_SIZE]=FLOOR then begin
            ShowBoard;
-           Write('Check deadlock set candidate ',Solver.PushCount,SPACE,Positions.Count);
+           Write('Check deadlock-set candidate ',Solver.PushCount,SPACE,Positions.Count);
            Readln;
            end;
 }
@@ -8358,18 +9479,25 @@ XX              of them is a box on a non-goal square. The non-wall
         InitializeBoard; {update board and existing deadlock-set capacities}
         TranspositionTableTimeStamp := High( TranspositionTableTimeStamp ); {'High': clear the transposition table the first time 'Check()' is called}
 
+        Inc(Game.DeadlockSets.TestedCandidatesCount);
+        //ShowBoard;
+        //Writeln('Check deadlock candidate: ',Game.DeadlockSets.TestedCandidatesCount,' Positions: ',Positions.Count,' Pushes: ',Solver.PushCount);
+
         //WriteBoardToLogFile('Deadlock candidate (Boxes only, goal squares are not part of the set)')
 
         {checking}
 {
+//      if   (Game.HashValue=3767143639058340985) and (Game.DeadlockSets.Count>=753) then
+//           Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+        //else Game.Board[MAX_BOARD_SIZE]:=WALL;
 //      if Solver.PushCount>=173555 then begin
-        if Game.HashValue=7423206488411940475 then begin
+//      if Game.HashValue=7423206488411940475 then begin
 //      if ( DeadlockSetCandidate__.Boxes.Count = 11 ) and ( Solver.PushCount > 0 ) then begin
 //      if Game.DeadlockSets.SequenceNo>=1580 then if DeadlockSetCandidate__.Boxes.Count = 2 then begin
 //      if Game.DeadlockSets.SequenceNo>=185 then if DeadlockSetCandidate__.PaintedFloorCount=17 then begin
 //      if Position__<>nil then begin
 //      if Game.BoxCount=10 then if Solver.PushCount >= 482 then begin
-//      if dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags then begin
+        if dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags then begin
            ShowBoard;
            Writeln('Center: ',DeadlockSetCandidate__.CenterSquare,'=',SquareToColRowAsText(DeadlockSetCandidate__.CenterSquare),
                    SPACE,SPACE,DeadlockSetCandidate__.PaintedFloorCount,
@@ -8390,7 +9518,7 @@ XX              of them is a box on a non-goal square. The non-wall
            or
            (DeadlockSetCandidate__.SquareOutsideFence<>0) then                  {'True': the candidate is a deadlock if the player starts from its current access area (from the 'SquareOutsideFence' square)}
            if   Check(ctCheckPulls,i) then begin                                {'True': the player cannot break the fence by pulling boxes from the inside}
-                if not Result then begin                                        {'True': the candidate has only been proven to be a deadlock when the player is in the current player access area}
+                if not Result then begin                                        {'True': the candidate has only been proven to be a deadlock when the player when the player is in the access area represented by 'SquareOutsideFence'}
                    Include(DeadlockSetCandidate__.Flags,dsfPlayerMustBeOutsideSet);
                    Include(DeadlockSetCandidate__.Flags,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence); {it's only a deadlock when the player is in the access area represented by 'SquareOutsideFence'}
 
@@ -8430,14 +9558,25 @@ XX              of them is a box on a non-goal square. The non-wall
                 Result:=True;
                 end
            else {the player can break the fence by pulling boxes from the inside}
-                if   Result {'True': the player cannot break the fence from the outside, no matter which player access area the player starts from}
+                if   ( Result {'True': the player cannot break the fence from the outside, no matter which player access area the player starts from}
+                       or
+                       ((dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence in DeadlockSetCandidate__.Flags)
+                        and {the candidate is a deadlock is the player is outside the fence in the specified access area}
+                        (DeadlockSetCandidate__.SquareOutsideFence>0)
+                       )
+                     )
                      and
                      (DeadlockSetCandidate__.CenterSquare<>0)
                      and
                      (Game.SimpleLowerBound<>0)
                      and
                      (not (dsfHasUnspecifiedInnerFloors in DeadlockSetCandidate__.Flags)) then begin {'True': the program has information about all inner floor squares at this time}
-                     CalculateOutsideOnlyPushDirections(PushesFromTheOutsideOnlyDirectionSet,DeadlockSetCandidate__.SquaresOutsideFence);
+                     if   (dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence in DeadlockSetCandidate__.Flags) and
+                          (DeadlockSetCandidate__.SquareOutsideFence>0) then begin
+                          PushesFromTheOutsideOnlyDirectionSet:=[];
+                          CalculateSquaresOutsideFence(DeadlockSetCandidate__.SquareOutsideFence,DeadlockSetCandidate__.SquaresOutsideFence);
+                          end
+                     else CalculateOutsideOnlyPushDirections(PushesFromTheOutsideOnlyDirectionSet,DeadlockSetCandidate__.SquaresOutsideFence);
                      if   DeadlockSetCandidate__.SquaresOutsideFence.Count>0 then {'True': the candidate is a a deadlock when the player can reach one of these squares}
                           DeadlockSetCandidate__.SquareOutsideFence:=DeadlockSetCandidate__.SquaresOutsideFence.Squares[1] {elevate one of the squares outside the fence to be the representative}
                      else DeadlockSetCandidate__.SquareOutsideFence:=0;
@@ -8454,26 +9593,28 @@ XX              of them is a box on a non-goal square. The non-wall
                             Include(DeadlockSetCandidate__.Flags,DIRECTION_TO_DEADLOCK_SET_FLAG[Direction]);
                             Result:=True; {'True': there is at least one direction which guarantees that that the player is outside the fence}
                             end;
-                     if   Result then begin {'True': the deadlock set is usable}
+                     if   Result then begin {'True': the deadlock-set is usable}
                           Include(DeadlockSetCandidate__.Flags,dsfPlayerMustBeOutsideSet);
                           if DeadlockSetCandidate__.SquaresOutsideFence.Count>0 then begin
                              Include(DeadlockSetCandidate__.Flags,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence);
                              end;
                           end
-                     else begin end; {the deadlock set is unusable; it has disconnected inner floors, and no push directions or squares guarantee that the player is outside the fence}
+                     else begin end; {the deadlock-set is unusable; it has disconnected inner floors, and no push directions or squares to guarantee that the player is outside the fence}
                      end
                 else if   Result and
                           (dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags) and
                           (DeadlockSetCandidate__.CenterSquare=0) and
-                          (Game.SimpleLowerBound<>0) then begin {a "no progress" deadlocks encompass the entire board, hence this deadlock candidate is a deadlock because its boxes cannot be pushed to goal squares}
+                          (Game.SimpleLowerBound<>0) then begin {a "no progress" deadlock encompasses the entire board, hence this deadlock candidate is a deadlock because its boxes cannot be pushed to goal squares}
                           end
                      else Result:=False;
 
         IsALegalSetButViolatesCapacityConstraints__:=Result and (not CheckSimpleDeadlocks);
 {
-        if ( ( Game.Board[MAX_BOARD_SIZE]=FLOOR ) and ( not Result ) )
-           or
-           ( ( dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags ) and Result ) then begin
+        //if ( Game.Board[MAX_BOARD_SIZE]=FLOOR ) then begin
+//      if ( ( Game.Board[MAX_BOARD_SIZE]=FLOOR ) and ( not Result ) )
+//         or
+//         ( ( dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags ) and Result ) then begin
+        if Game.DeadlockSets.SequenceNo>=759 then begin
            MovePlayer( 0 );
            ShowBoard;
            Write('Deadlock: ',TEXT_NO_YES[ Result ], SPACE, Succ( Game.DeadlockSets.SequenceNo ), SPACE, Game.HashValue );
@@ -8485,26 +9626,25 @@ XX              of them is a box on a non-goal square. The non-wall
         Game.BoxCount:=GameBoxCount; Game.PlayerPos:=GamePlayerPos; {restore game state}
         for i:=1 to Game.BoxCount do Game.BoxPos[i]:=GameBoxPos[i];
         InitializeBoard;
-
       end; {CheckDeadlockSetCandidate}
 
       procedure PruneDeadlockSets;
       var i,j,SetNo,SquareNo:Integer; CommonSquaresCount:array[0..MAX_DEADLOCK_SETS] of integer;
-      begin {precondition: the candidate set is legal and has been stored as the newest deadlock set}
+      begin {precondition: the candidate-set is legal and has been stored as the newest deadlock-set}
         FillChar(CommonSquaresCount,SizeOf(CommonSquaresCount),0);
 
         for i:=1 to DeadlockSetCandidate__.Boxes.Count do begin {for each square in the new set}
             SquareNo:=DeadlockSetCandidate__.Boxes.Squares[i];
-            for j:=1 to Game.DeadlockSets.SquareSetCount[SquareNo] do {for each set having this this square as a member}
-                Inc(CommonSquaresCount[Game.DeadlockSets.SquareSetNumbers[SquareNo]^[j]]); {count number of squares in common with the candidate set}
+            for j:=1 to Game.DeadlockSets.SquareSetCount[SquareNo] do {for each set having this square as a member}
+                Inc(CommonSquaresCount[Game.DeadlockSets.SquareSetNumbers[SquareNo]^[j]]); {count number of squares in common with the candidate-set}
             end;
 
-        for SetNo:=Pred(Game.DeadlockSets.Count) downto 1 do with Game.DeadlockSets do {'Pred': the candidate was stored as the newest deadlock set}
+        for SetNo:=Pred(Game.DeadlockSets.Count) downto 1 do with Game.DeadlockSets do {'Pred': the candidate was stored as the newest deadlock-set}
             if (CommonSquaresCount[SetNo]=DeadlockSetCandidate__.Boxes.Count) and
                ((Flags[SetNo]-[dsfPlayerIsInsideSet])=(DeadlockSetCandidate__.Flags-[dsfPlayerIsInsideSet])) and
                (not (dsfControllerSet in Flags[SetNo])) and
                (not (dsfFreezeSet     in Flags[SetNo])) then begin
-               DeleteDeadlockSet(SetNo); Inc(RedundantSetsCount); {the new candidate makes the set numbered 'SetNo' superflous, hence, remove it}
+               DeleteDeadlockSet(SetNo); Inc(RedundantSetsCount); {the new candidate makes the set numbered 'SetNo' superflous; remove it;}
                end;
       end; {PruneDeadlockSets}
 
@@ -8531,14 +9671,14 @@ XX              of them is a box on a non-goal square. The non-wall
            //                          not EnsureSetNumbersCapacityForSquare( Succ(Game.DeadlockSets.SquareSetCount[SquareNo]),SquareNo);
            //          {$IFDEF CONSOLE_APPLICATION}
            //             if TableOverflow and (Position__=nil) then {nil': precalculating deadlocks when the level has been loaded}
-           //                Writeln('Note: Table full (squares in a deadlock set); not all detected sets are in use.');
+           //                Writeln('Note: Table full (squares in a deadlock-set); not all detected sets are in use.');
            //          {$ENDIF}
            //          end
            //     else break; {quick-and-dirty exit the 'for' loop when a table overflow has been found}
 
            if   TableOverflow
                 and
-                (True {'True': drop all deadlock set candidates which cause table overflows}
+                (True {'True': drop all deadlock-set candidates which cause table overflows}
                  or
                  (Position__=nil) {nil': precalculating deadlocks when the level has been loaded}
                  or
@@ -8546,12 +9686,12 @@ XX              of them is a box on a non-goal square. The non-wall
                  or
                  (Solver.PackingOrder.SetCount<=0) {if it isn't a packing order search then it's not OK to ignore the risk of hash-key collisions in the transposition table, so corrals in the transposition table cannot be assumed to be deadlocks}
                 ) then
-                Result:=False; {drop the deadlock set candidate when a table overflow has been found}
+                Result:=False; {drop the deadlock-set candidate when a table overflow has been found}
            end;
 
-      if   Result and (Position__=nil) then begin                               {check that the candidate set isn't a duplicate}
+      if   Result and (Position__=nil) then begin                               {check that the candidate-set isn't a duplicate}
            BoxSquares.Squares[0]:=0;
-           for i:=1 to DeadlockSetCandidate__.Boxes.Count do begin              {sort the squares using insertion sort (sorting is required for calculating a stable hashkey)}
+           for i:=1 to DeadlockSetCandidate__.Boxes.Count do begin              {sort the squares using insertion sort; sorting may be unnecessary, but it ensures that the hash-key calculation is stable}
                SquareNo:=DeadlockSetCandidate__.Boxes.Squares[i]; j:=Pred(i);
                while SquareNo<BoxSquares.Squares[j] do begin
                  BoxSquares.Squares[Succ(j)]:=BoxSquares.Squares[j]; Dec(j);    {move bigger numbers to the right}
@@ -8569,16 +9709,16 @@ XX              of them is a box on a non-goal square. The non-wall
                    else break;
            end;
 
-      Result:=Result and CalculateDeadlockSetCandidateInfo(not Search__);       {'not Search__': if no search is performed, there is no further validation of the deadlock set candidate}
+      Result:=Result and CalculateDeadlockSetCandidateInfo(not Search__);       {'not Search__': if no search is performed, there is no further validation of the deadlock-set candidate}
 
       if   Result then begin
            if   Search__ then
-                Result:=CheckDeadlockSetCandidate(IsALegalSetButViolatesCapacityConstraints) {check that the candidate set is legal}
+                Result:=CheckDeadlockSetCandidate(IsALegalSetButViolatesCapacityConstraints) {check that the candidate-set is legal}
            else IsALegalSetButViolatesCapacityConstraints:=not CheckSimpleDeadlocks; {simple checks only}
            end;
 
       if   Result then begin
-           {the set is pseudo-legal, i.e., it is valid but it may violate capacity constraints imposed by other deadlock sets}
+           {the set is pseudo-legal, i.e., it is valid but it may violate capacity constraints imposed by other deadlock-sets}
            if Result and
               ((DeadlockSetCandidate__.Flags*[dsfPlayerIsInsideSet,dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet])=[]) and
               (DeadlockSetCandidate__.Capacity<0) then
@@ -8587,22 +9727,22 @@ XX              of them is a box on a non-goal square. The non-wall
            Result:=(not IsALegalSetButViolatesCapacityConstraints) or           {is the set really legal?}
                    AcceptPseudoLegalSets__;
 
-           if Result and (Position__<>nil) then                                 {check whether the new dynamically created deadlock set candidate is redundant}
+           if Result and (Position__<>nil) then                                 {check whether the new dynamically created deadlock-set candidate is redundant}
               Result:=not IsARedundantDeadlockSet(0);
 
            if Result then begin                                                 {'True': the candidate is a a new deadlock}
-              for  i:=1 to DeadlockSetCandidate__.Boxes.Count do {check for set number overflows for each square}
+              for  i:=1 to DeadlockSetCandidate__.Boxes.Count do                {check for set number overflows for each square}
                    if   not TableOverflow then begin
                         SquareNo:=DeadlockSetCandidate__.Boxes.Squares[i];
                         TableOverflow:= not EnsureSetNumbersCapacityForSquare( Succ(Game.DeadlockSets.SquareSetCount[SquareNo]),SquareNo);
                         {$IFDEF CONSOLE_APPLICATION}
                            if TableOverflow and (Position__=nil) then {nil': precalculating deadlocks when the level has been loaded}
-                              Writeln('Note: Table full (squares in a deadlock set); not all detected sets are in use.');
+                              Writeln('Note: Table full (squares in a deadlock-set); not all detected sets are in use.');
                         {$ENDIF}
                         end
                    else break; {quick-and-dirty exit the 'for' loop when a table overflow has been found}
 
-              if not TableOverflow then begin                                   {commit this deadlock set}
+              if not TableOverflow then begin                                   {commit this deadlock-set}
                  Inc(Game.DeadlockSets.Count);                                  {update number of sets}
                  NewDeadlockSetNo:=Game.DeadlockSets.Count;
                  if   Position__=nil then Inc(Game.DeadlockSets.PrecalculatedSetsCount)
@@ -8610,8 +9750,8 @@ XX              of them is a box on a non-goal square. The non-wall
                  if   (DeadlockSetCandidate__.Flags*[dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet])=[dsfPlayerMustBeOutsideSet] then
                       Inc(Game.DeadlockSets.SessionPlayerMustBeOutsideSetCount);
                  Inc(Game.DeadlockSets.SessionDeadlockSetsCount);
-
                  Inc(Game.DeadlockSets.SequenceNo);
+
                  Game.DeadlockSets.Capacity                [Game.DeadlockSets.Count]    :=DeadlockSetCandidate__.Capacity;
                  Game.DeadlockSets.CenterSquare            [Game.DeadlockSets.Count]    :=DeadlockSetCandidate__.CenterSquare;
                  Game.DeadlockSets.HashKey                 [Game.DeadlockSets.Count]    :=HashKey;
@@ -8619,7 +9759,7 @@ XX              of them is a box on a non-goal square. The non-wall
                  Game.DeadlockSets.FloorCount              [Game.DeadlockSets.Count]    :=DeadlockSetCandidate__.PaintedFloorCount; {'PaintedFloorCount' is the calculated inner floor squares; 'Floors.Count' may only contain representatives}
                  Game.DeadlockSets.SequenceNumbers         [Game.DeadlockSets.Count]    :=Game.DeadlockSets.SequenceNo;
                  Game.DeadlockSets.SquaresCount            [Game.DeadlockSets.Count]    :=DeadlockSetCandidate__.Boxes.Count;
-                 for i:=1 to DeadlockSetCandidate__.Boxes.Count do begin           {add this set to the list for each square}
+                 for i:=1 to DeadlockSetCandidate__.Boxes.Count do begin        {add this set to the list for each square}
                      SquareNo:=DeadlockSetCandidate__.Boxes.Squares[i];
                      Inc(Game.DeadlockSets.SquareSetCount  [SquareNo]);
                      Game.DeadlockSets.SquareSetNumbers    [SquareNo]^[Game.DeadlockSets.SquareSetCount[SquareNo]]:=Game.DeadlockSets.Count;
@@ -8632,9 +9772,7 @@ XX              of them is a box on a non-goal square. The non-wall
                      <=
                      High(Game.DeadlockSets.SquaresOutsideFence)
                     ) then with Game.DeadlockSets do begin
-                    {store the player-reachable squares just outside the fence for
-                     this deadlock set;
-                    }
+                    {store the player-reachable squares which are just outside the fence}
                     Inc(SquaresOutsideFenceTop);
                     Game.DeadlockSets.SquaresOutsideFenceIndex[Game.DeadlockSets.Count]:=SquaresOutsideFenceTop;
 
@@ -8668,8 +9806,8 @@ XX              of them is a box on a non-goal square. The non-wall
                  {the reason is that it seems to be slightly more efficient}
                  end
               else begin {it's a new deadlock, but it cannot be saved because of table overflow}
-                 if dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence in DeadlockSetCandidate__.Flags then {'True': whether a game state matches the deadlock set cannot be detected without a list of squares outside the corral}
-                    Result:=False {discard the candidate set}
+                 if dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence in DeadlockSetCandidate__.Flags then {'True': whether a game state matches the deadlock-set cannot be detected without a list of squares outside the corral}
+                    Result:=False {discard the candidate-set}
                  else begin
                     Inc(Game.DeadlockSets.SessionDeadlockSetsTableOverflowCount);
                     if   (DeadlockSetCandidate__.Flags*[dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet])=[dsfPlayerMustBeOutsideSet] then
@@ -8709,7 +9847,7 @@ XX              of them is a box on a non-goal square. The non-wall
                  for i:=1 to DeadlockSetCandidate__.Boxes.Count do
                      ExpandDeadlockSet(i,ExpandSet__,AcceptPseudoLegalSets__,NewDeadlockSetNo,StartPositionIsOK__);
 
-              if   Result and TableOverflow then begin {'True': the candidate set is a new deadlock, but it hasn't been saved because of table overflow}
+              if   Result and TableOverflow then begin {'True': the candidate-set is a new deadlock, but it hasn't been saved because of table overflow}
                    Result:=False;
                    Include(DeadlockSetCandidate__.Flags,dsfIsADeadlockButTableOverflow);
                    end
@@ -8733,14 +9871,15 @@ XX              of them is a box on a non-goal square. The non-wall
        OldPlayerPos:=Game.PlayerPos; OldHashValue:=Game.HashValue;
 
        repeat
-         MovePlayer(Positions.StartPosition^.PlayerPos); {the player position must be reset to the start position before the deadlock calculation}
+         if not (dsfPeelOffNonCorralBoxes in DeadlockSetCandidate__.Flags) then
+            MovePlayer(Positions.StartPosition^.PlayerPos); {the player position must be reset to the start position before the deadlock calculation}
 
          OK:=CommitDeadlockSet(not (dsfIsADeadlock in DeadlockSetCandidate__.Flags),
                                not (dsfIsADeadlock in DeadlockSetCandidate__.Flags),
-                               False,b); {commit the new set, i.e., check whether it's legal, and if it is, then add it to the deadlock sets}
+                               False,b); {commit the new set, i.e., check whether it's legal, and if it is, then add it to the deadlock-sets}
          if OK then begin
             Inc(Result); OK:=False;
-            Game.DeadlockSets.NewDynamicDeadlockSets:=True; {the solver main loop must backtrack once to the start position, so all deadlock sets are considered when a position is selected for expansion}
+            Game.DeadlockSets.NewDynamicDeadlockSets:=True; {the solver main loop must backtrack once to the start position, so all deadlock-sets are considered when a position is selected for expansion}
 {
             if Game.DeadlockSets.SequenceNo[Game.DeadlockSets.Count]>=0 then with Game.DeadlockSets do begin
                ShowBoard;
@@ -8749,7 +9888,10 @@ XX              of them is a box on a non-goal square. The non-wall
                Readln;
                end;
 }
-            if not (dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags) then begin {'True': it's not a no-progress deadlock candidate (they may have box positions not matching the current game state); check for forced pushes}
+            if (not (dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags))
+               or
+               (dsIsAGameStateDeadlockCandidate in DeadlockSetCandidate__.Flags)
+               then begin {'True': it's not a no-progress deadlock candidate with box positions not matching match the current game state; check for forced pushes}
                while (Position__<>nil) and {search for the push leading to the current deadlock state}
                      (DeadlockSetCandidate__.SquareColors[Game.BoxPos[Position__^.Move.BoxNo]]<>scDarkGray) do
                      Position__:=Position__^.Parent;
@@ -8768,7 +9910,6 @@ XX              of them is a box on a non-goal square. The non-wall
                              (DeadlockSetCandidate__.SquareColors[Square+Game.SquareOffsetRight  [Direction]]=scBlack)
                             )
                            ) then begin
-//                   if    CalculateNeighborsWithColor(Square,scWhite,True)=1 then begin
                            BoxIndex:=1; {find box index}
                            while (BoxIndex<DeadlockSetCandidate__.Boxes.Count) and
                                  (Square<>DeadlockSetCandidate__.Boxes.Squares[BoxIndex]) do Inc(BoxIndex);
@@ -8814,16 +9955,16 @@ XX              of them is a box on a non-goal square. The non-wall
                      end;
                end;
             end;
-       until (not OK); {until the pushes along the current path don't lead to a deadlocked position according to the stored deadlock sets}
+       until (not OK); {until the pushes along the current path don't lead to a deadlocked position according to the stored deadlock-sets}
 {
        if Result>1 then begin
           FlushLogFile;
           ShowBoard;
-          Write('New deadlock sets: ',Result);
+          Write('New deadlock-sets: ',Result);
           Readln;
           end;
 }
-       while MoveCount<>0 do with Moves[MoveCount] do begin {restore the game state, i.e., box positions and deadlock set capacities}
+       while MoveCount<>0 do with Moves[MoveCount] do begin {restore the game state, i.e., box positions and deadlock-set capacities}
          Square:=Game.BoxPos[BoxNo]; {remember the 'from' square before the box is pushed}
          DoPush(BoxNo,Direction,-1);
          if RemovedBoxes[MoveCount]<>0 then
@@ -9038,7 +10179,7 @@ XX              of them is a box on a non-goal square. The non-wall
                            else {there cannot be a box at the neighboring floor
                                  square, hence, there cannot be a double-L
                                  fenced-in area;
-                                 invalidate the deadlock set candidate
+                                 invalidate the deadlock-set candidate
                                 }
                                 DeadlockSetCandidate__.GoalCount:=Game.BoxCount+2; {'+2': so the count still is too high if the call below to 'RemoveSquareFromDeadlockSet()' substracts 1 from the count}
                         end;
@@ -9131,7 +10272,7 @@ XX              of them is a box on a non-goal square. The non-wall
       begin
        {preconditions:
         'Square1__' is the gate square or the square above the gate square (see figures below);
-        'Square2__' is the squares inside the deadlocked area;
+        'Square2__' is the square inside the deadlocked area;
         'Square3__' (if present) is the neighbor square outside the area in patterns E..G;
 
         patterns:
@@ -9231,12 +10372,12 @@ XX              of them is a box on a non-goal square. The non-wall
 
         Square3:=Square__+Game.SquareOffsetLeft [Direction__];
         if MakeGateDeadlockCandidate(Square__,NeighborSquare__,Square3,Direction__) and
-           CommitDeadlockSet(False,False,True,Result__) then {'AcceptPseudoLegalSets' = 'True': because without search in 'CommitDeadlockSet', the deadlock set candidate is validated for the existing board state}
+           CommitDeadlockSet(False,False,True,Result__) then {'AcceptPseudoLegalSets' = 'True': because without search in 'CommitDeadlockSet', the deadlock-set candidate is validated for the existing board state}
            Inc(Result);
 
         Square3:=Square__+Game.SquareOffsetRight[Direction__];
         if MakeGateDeadlockCandidate(Square__,NeighborSquare__,Square3,Direction__) and
-           CommitDeadlockSet(False,False,True,Result__) then {'AcceptPseudoLegalSets' = 'True': because without search in 'CommitDeadlockSet', the deadlock set candidate is validated for the existing board state}
+           CommitDeadlockSet(False,False,True,Result__) then {'AcceptPseudoLegalSets' = 'True': because without search in 'CommitDeadlockSet', the deadlock-set candidate is validated for the existing board state}
            Inc(Result);
       end;
 
@@ -9308,7 +10449,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
                                   if (NeighborSquare=Square+Game.SquareOffsetForward[Direction]) then begin
 
-                                     {try to make a deadlock set by pushing the secondary}
+                                     {try to make a deadlock-set by pushing the secondary}
                                      {box one square further into the room or the tunnel like in this example:}
                                      {#                        }
                                      {%-%  direction is 'right'}
@@ -9319,7 +10460,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                            CommitDeadlockSet(False,False,False,Result) then
                                            MakeExtendedGateSquareDeadlockSets(Square,NeighborSquare+Game.SquareOffsetForward[Direction],Direction,Result);
 
-                                        {try to make a deadlock set by pushing both the primary and the secondary}
+                                        {try to make a deadlock-set by pushing both the primary and the secondary}
                                         {box into the room or the tunnel like in this example:}
                                         {#                        }
                                         {-%%  direction is 'right'}
@@ -9359,7 +10500,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
                                   if (OppositeNeighborSquare=Square-Game.SquareOffsetForward[Direction]) then begin
 
-                                     {try to make a deadlock set by pushing the secondary}
+                                     {try to make a deadlock-set by pushing the secondary}
                                      {box one square further into the room or the tunnel like in this example:}
                                      {#                        }
                                      {%-%  direction is 'right'}
@@ -9370,7 +10511,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                            CommitDeadlockSet(False,False,False,Result) then
                                            MakeExtendedGateSquareDeadlockSets(Square,OppositeNeighborSquare-Game.SquareOffsetForward[Direction],OPPOSITE_DIRECTION[Direction],Result);
 
-                                        {try to make a deadlock set by pushing both the primary and the secondary}
+                                        {try to make a deadlock-set by pushing both the primary and the secondary}
                                         {box into the room or the tunnel like in this example:}
                                         {#                        }
                                         {-%%  direction is 'right'}
@@ -9492,7 +10633,7 @@ XX              of them is a box on a non-goal square. The non-wall
       {$ENDIF}
       Result:=True;
       for i:=1 to CornerCount do with Corners[i] do begin
-          NewSetsCount :=0;                                                      {'0': no deadlock sets created for this corner yet}
+          NewSetsCount :=0;                                                      {'0': no deadlock-sets created for this corner yet}
           IsAGoalCorner:=(Game.Board[SquareNo] and (GOAL+FLAG_ILLEGAL_BOX_SQUARE+FLAG_BOX_REACHABLE_SQUARE))
                            = GOAL+FLAG_BOX_REACHABLE_SQUARE;
 
@@ -9650,9 +10791,124 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeSemiClosedLine:Boolean;
-    var a,b,g,i,j,k,LineLength:Integer; Direction:TDirection;
-        BoxSquaresAtLine,BoxSquaresAtAdjacentLine:TBoxSquareSet;
-        SemiClosedLineDeadlock: TDeadlockSetCandidate;
+    var i,LineLength:Integer;
+        Direction:TDirection;
+
+      function  SemiClosedLine(SquareNo__,LineLength__:Integer; Direction__:TDirection):Boolean;
+      var a,b,g,j,k,BoxesWithWallsOnBothSides:Integer;
+          BoxSquaresAtLine,BoxSquaresAtAdjacentLine:TBoxSquareSet;
+          SemiClosedLineDeadlock: TDeadlockSetCandidate;
+      begin
+        Result:=True;
+        for g:=0 to 1 do                                                        {for left and right adjacent lines}
+            if InitializeDeadlockSetCandidate(-1,0,Min(Game.BoxCount,Game.DeadlockSets.BoxLimitForPrecalculatedSets)) then begin
+               LineLength__:=Abs(LineLength__);                                 {'LineLength__'>=0: maybe this is a semi-closed line} 
+               a:=SquareNo__;                                                   {get the starting square for the line}
+               k:=a;                                                            {'k' = first/next square on the line which must be filled with a box in order to create a deadlock-set}
+               BoxSquaresAtLine.Count:=0;
+               BoxSquaresAtAdjacentLine.Count:=0;
+               BoxesWithWallsOnBothSides:=0;                                    {number of boxes on the line with neighboring walls on both of the adjacent lines}
+
+               for j:=0 to Pred(LineLength__) do begin                          {for each square in the adjacent line along the edge}
+                   if (a=k) and (not IsALegalAndBoxReachableSquare(a)) then begin {'True': the square cannot accomodate a box; here it's typically a non-goal corner square}
+                      if j=Pred(LineLength__) then                              {'Tre': reached the end of the line, i.e., the corner square at the other end of the line}
+                         if BoxesWithWallsOnBothSides=0 then
+                            LineLength__:=-Abs(LineLength__)                    {'True': fail; the last box cannot be added to close the deadlock-set}
+                         else begin
+                            {no box is required at the corner square
+                             for creating a deadlock; an example:
+                                 #
+                             # % % %  #
+                             ##%#######
+                             the wall square at the top line reduces
+                             the number of boxes which can be parked at
+                             the line without creating a deadlock;}
+                            end;
+                      Inc(k,Game.SquareOffsetForward[Direction__]);             {prepare to put a box at the next square on the line}
+                      end;
+
+                   if g=0 then b:=a+Game.SquareOffsetLeft [Direction__]
+                   else        b:=a+Game.SquareOffsetRight[Direction__];
+                   if IsAFloorSquare(b) then begin                              {'True': there is a hole (a floor square) in the adjacent line}
+                      if   IsAWallSquare(b-Game.SquareOffsetForward[Direction__]) and
+                           IsAWallSquare(b+Game.SquareOffsetForward[Direction__]) and {'True': the hole in the adjacent line is only one square wide}
+                           (a=k) then begin                                     {'True': the gap is next to the square on the line which also must be filled with a box in order to create a deadlock situation}
+                           if   TryBox(b) then begin                            {'True': the gap in the adjacent line has now been filled with a box}
+                                Inc(BoxSquaresAtAdjacentLine.Count);
+                                BoxSquaresAtAdjacentLine.Squares[BoxSquaresAtAdjacentLine.Count]:=b;
+                                end
+                           else begin LineLength__:=-Abs(LineLength__); break;  {adding the new box square to the deadlock-set failed}
+                                end;
+                           end
+                      else begin LineLength__:=-Abs(LineLength__); break;       {the gap in the adjacent line is two or more squares wide, hence the open edge is not a candidate for a deadlock-set}
+                           end;
+                      end
+                   else begin                                                   {there is a wall on the adjacent line; check for a wall on the other adjacent line too}
+                      if g<>0 then b:=a+Game.SquareOffsetLeft [Direction__]
+                      else         b:=a+Game.SquareOffsetRight[Direction__];
+                      if IsAWallSquare(b) then                                  {'True': there are walls on both sides}
+                         b:=0;                                                  {'0': the square is surrounded by walls on both adjacent lines}
+                      end;
+
+                   if   a=k then begin                                          {'True': this square on the line must be filled in order to create a deadlock-set}
+                        if   TryBox(a) then begin                               {'True': the square on the line has now been added to the deadlock}
+                             Inc(BoxSquaresAtLine.Count);
+                             BoxSquaresAtLine.Squares[BoxSquaresAtLine.Count]:=a;
+                             if b=0 then                                        {'True': the box is surrounded by walls on both adjacent lines}
+                                Inc(BoxesWithWallsOnBothSides);
+                             end
+                        else begin LineLength__:=-Abs(LineLength__); break;     {adding the new box square to the deadlock-set failed}
+                             end;
+
+                        {the line must be filled with boxes having one empty floor square between them}
+                        Inc(k,2*Game.SquareOffsetForward[Direction__]);         {advance two steps}
+                        end
+                   else AddFloor(a); {add floor to the deadlock-set}
+
+                   Inc(a,Game.SquareOffsetForward[Direction__]);                {advance to the next square along the line}
+                   end;
+
+               if (LineLength__>0) and                                          {'True': filling the line and the adjacent gaps with boxes succeeded}
+                  (DeadlockSetCandidate__.GoalCount=0) then begin               {'True': there are no goal squares on the line or the adjacent filled gaps; if there are goal squares involved, then it requires more coding to ensure that it's a deadlock}
+                  Include(DeadlockSetCandidate__.Flags,dsfHasOnlyListedFloors);
+
+                  if CommitDeadlockSet(False,False,False,Result) and            {'True': registering the semi-closed line deadlock-set succeeded}
+                     (BoxSquaresAtLine.Count>0) then begin                      {try to make a corral deadlock with boxes at the semi-closed line and with open gaps in the adjacent line}
+                     {calculate square colors}
+                     for k:=0 to Game.BoardSize do
+                         if   (Game.Board[k] and WALL)<>0 then DeadlockSetCandidate__.SquareColors[k]:=scBlack
+                         else DeadlockSetCandidate__.SquareColors[k]:=scWhite;
+                     for k:=1 to BoxSquaresAtLine.Count do
+                         DeadlockSetCandidate__.SquareColors[BoxSquaresAtLine.Squares[k]]:=scDarkGray;
+                     for k:=1 to BoxSquaresAtAdjacentLine.Count do
+                         DeadlockSetCandidate__.SquareColors[BoxSquaresAtAdjacentLine.Squares[k]]:=scDarkGray;
+                     SemiClosedLineDeadlock:=DeadlockSetCandidate__;            {save a copy of the semi-closed line deadlock}
+                     for b:=1 to BoxSquaresAtAdjacentLine.Count do begin
+                         DeadlockSetCandidate__:=SemiClosedLineDeadlock;
+                         {fake a center square even though no fenced-in area has been made yet}
+                         DeadlockSetCandidate__.CenterSquare:=BoxSquaresAtAdjacentLine.Squares[b];
+                         if g=0 then k:=DeadlockSetCandidate__.CenterSquare+Game.SquareOffsetLeft [Direction__]
+                         else        k:=DeadlockSetCandidate__.CenterSquare+Game.SquareOffsetRight[Direction__];
+                         if IsAFloorSquare(k) and TryFloor(k) then begin
+                            //k:=Game.DeadlockSets.Count;
+                            RemoveSquareFromDeadlockSet(DeadlockSetCandidate__.CenterSquare);
+                            AddFloor(DeadlockSetCandidate__.CenterSquare);
+                            DeadlockSetCandidate__.EscapedBoxesCountDown:=DeadlockSetCandidate__.Boxes.Count; {all boxes must escape the fenced-in area; otherwise it's a deadlock}
+                            CommitDeadlockSet(True,True,False,Result);
+                            //while k<Game.DeadlockSets.Count do begin
+                            //   Inc(k);
+                            //   Game.ShowDeadlockSetsEnabled:=True;
+                            //   ShowDeadlockSet(k,Game.DeadlockSets.CenterSquare[k]);
+                            //   Readln;
+                            //   Game.ShowDeadlockSetsEnabled:=False;
+                            //   end;
+                            end;
+                         end;
+                     end;
+                  end;
+               end;
+      end;
+
     begin {pattern type "Semi-closed line"}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('Semi-closed line');
@@ -9661,93 +10917,14 @@ XX              of them is a box on a non-goal square. The non-wall
       for i:=1 to Pred(CornerCount) do with Corners[i] do
           for Direction:=Low(Direction) to High(Direction) do
               if (EdgeLengths[Direction]<0) then begin                          {for each open edge starting from this corner...}
-                 for g:=0 to 1 do                                               {for left and right adjacent lines}
-                     if InitializeDeadlockSetCandidate(-1,0,Min(Game.BoxCount,Game.DeadlockSets.BoxLimitForPrecalculatedSets)) then begin
-                        LineLength:=Abs(EdgeLengths[Direction]);
-                        a:=SquareNo;                                            {get the starting square for the line}
-                        k:=a;                                                   {'k' = first/next square on the line which must be filled with a box in order to create a deadlock set}
-                        BoxSquaresAtLine.Count:=0;
-                        BoxSquaresAtAdjacentLine.Count:=0;
-
-                        for j:=0 to Pred(LineLength) do begin                   {for each square in the adjacent line along the edge}
-                            if (a=k) and (not IsALegalAndBoxReachableSquare(a)) then begin {'True': the square cannot accomodate a box}
-                               if j=Pred(LineLength) then LineLength:=-Abs(LineLength); {'True': fail; the last box cannot be added to close the deadlock set}
-                               Inc(k,Game.SquareOffsetForward[Direction]);      {prepare to put a box at the next square on the line}
-                               end;
-
-                            if g=0 then b:=a+Game.SquareOffsetLeft [Direction]
-                            else        b:=a+Game.SquareOffsetRight[Direction];
-                            if IsAFloorSquare(b) then                           {'True': there is a hole (a floor square) in the adjacent line}
-                               if   IsAWallSquare(b-Game.SquareOffsetForward[Direction]) and
-                                    IsAWallSquare(b+Game.SquareOffsetForward[Direction]) and {'True': the hole in the adjacent line is only one square wide}
-                                    (a=k) then begin                            {'True': the gap is next to the square on the line which also must be filled in order to create a deadlock situation}
-                                    if   TryBox(b) then begin                   {'True': the gap in the adjacent line has now been filled with a box}
-                                         Inc(BoxSquaresAtAdjacentLine.Count);
-                                         BoxSquaresAtAdjacentLine.Squares[BoxSquaresAtAdjacentLine.Count]:=b;
-                                         end
-                                    else begin LineLength:=-Abs(LineLength); break;{adding the new box square to the deadlock set failed}
-                                         end;
-                                    end
-                               else begin LineLength:=-Abs(LineLength); break;  {the gap in the adjacent line is two or more squares wide, hence the open edge is not a candidate for a deadlock set}
-                                    end;
-
-                            if   a=k then begin                                 {'True': this square on the line must be filled in order to create a deadlock set}
-                                 if   TryBox(a) then begin                      {'True': the square on the line has now been added to the deadlock}
-                                      Inc(BoxSquaresAtLine.Count);
-                                      BoxSquaresAtLine.Squares[BoxSquaresAtLine.Count]:=a;
-                                      end
-                                 else begin LineLength:=-Abs(LineLength); break;{adding the new box square to the deadlock set failed}
-                                      end;
-
-                                 {the line must be filled with boxes having one empty floor square between them}
-                                 Inc(k,2*Game.SquareOffsetForward[Direction]);  {advance two steps}
-                                 end
-                            else AddFloor(a); {add floor to the deadlock set}
-
-                            Inc(a,Game.SquareOffsetForward[Direction]);         {advance to the next square along the line}
-                            end;
-
-                        if (LineLength>0) and                                   {'True': filling the line and the adjacent gaps with boxes succeeded}
-                           (DeadlockSetCandidate__.GoalCount=0) then begin      {'True': there are no goal squares on the line or the adjacent filled gaps; if there are goal squares involved, then it requires more coding to ensure that it's a deadlock}
-                           Include(DeadlockSetCandidate__.Flags,dsfHasOnlyListedFloors);
-                           if CommitDeadlockSet(False,False,False,Result) and   {'True': registering the semi-closed line deadlock set succeeded}
-                              (BoxSquaresAtLine.Count>0) then begin             {try to make a corral deadlock with box at the semi-closed line and with open gaps in the adjacent line}
-                              {calculate square colors}
-                              for k:=0 to Game.BoardSize do
-                                  if   (Game.Board[k] and WALL)<>0 then DeadlockSetCandidate__.SquareColors[k]:=scBlack
-                                  else DeadlockSetCandidate__.SquareColors[k]:=scWhite;
-                              for k:=1 to BoxSquaresAtLine.Count do
-                                  DeadlockSetCandidate__.SquareColors[BoxSquaresAtLine.Squares[k]]:=scDarkGray;
-                              for k:=1 to BoxSquaresAtAdjacentLine.Count do
-                                  DeadlockSetCandidate__.SquareColors[BoxSquaresAtAdjacentLine.Squares[k]]:=scDarkGray;
-                              SemiClosedLineDeadlock:=DeadlockSetCandidate__;      {save a copy of the semi-closed line deadlock}
-                              for b:=1 to BoxSquaresAtAdjacentLine.Count do begin
-                                  DeadlockSetCandidate__:=SemiClosedLineDeadlock;
-                                  {fake a center square even though no fenced-in area has been made yet}
-                                  DeadlockSetCandidate__.CenterSquare:=BoxSquaresAtAdjacentLine.Squares[b];
-                                  if g=0 then k:=DeadlockSetCandidate__.CenterSquare+Game.SquareOffsetLeft [Direction]
-                                  else        k:=DeadlockSetCandidate__.CenterSquare+Game.SquareOffsetRight[Direction];
-                                  if IsAFloorSquare(k) and TryFloor(k) then begin
-                                     //k:=Game.DeadlockSets.SequenceNo;
-                                     RemoveSquareFromDeadlockSet(DeadlockSetCandidate__.CenterSquare);
-                                     AddFloor(DeadlockSetCandidate__.CenterSquare);
-                                     DeadlockSetCandidate__.EscapedBoxesCountDown:=DeadlockSetCandidate__.Boxes.Count; {all boxes must escape the fenced-in area; otherwise it's a deadlock}
-                                     CommitDeadlockSet(True,True,False,Result);
-                                     //if k<>Game.DeadlockSets.SequenceNo then begin
-                                     //   Game.ShowDeadlockSetsEnabled:=True;
-                                     //   ShowDeadlockSet(Game.DeadlockSets.Count,Game.DeadlockSets.CenterSquare[Game.DeadlockSets.Count]);
-                                     //   Readln;
-                                     //   Game.ShowDeadlockSetsEnabled:=False;
-                                     //   end;
-                                     end;
-                                  end;
-                              end;
-                           end;
-                        end;
+                 LineLength:=Abs(EdgeLengths[Direction]);
+                 Result:=SemiClosedLine(SquareNo,LineLength,Direction) and Result;
+                 {try again, this time in the other direction}
+                 Result:=SemiClosedLine(SquareNo+Pred(LineLength)*Game.SquareOffsetForward[Direction],LineLength,OPPOSITE_DIRECTION[Direction]) and Result;
                  end;
     end;
 
-    function  PatternTypeCurrentPosition:Boolean; {the current position (e.g., the starting position) may contain a corral deadlock if only the player was outside the corral}
+    function  PatternTypeCurrentPosition:Boolean; {the current position (e.g., the starting position) may contain a corral deadlock if only the player was outside an enclosing corral}
     var BoxNo:Integer;
     begin {pattern type "Current position"}
       {$IFDEF CONSOLE_APPLICATION}
@@ -9772,26 +10949,49 @@ XX              of them is a box on a non-goal square. The non-wall
 
       function  FindDeadlocks(const GoalSet__:TGoalSet; IsAFreezingGoalSet__:Boolean):Boolean; {'GoalSet__' is the freeze-set goal squares}
       var BoxNo,Distance,GoalNo,GoalSquare,GoalsInSetCount,i,j,NeighborSquare,OldCount,
-          Square,UnreachableGoalsCount:Integer;
+          Square,SquaresOutsideFenceCount,UnreachableGoalsCount:Integer;
           Direction:TDirection;
-          OldBoard:TBoard; Distances:TBoardOfIntegers;
+          OldBoard:TBoard;
+          Distances:TBoardOfIntegers;
 
-        function  CreateFreezeSet(GoalsInSetCount__:Integer; const GoalSet__:TGoalSet; IsAFreezingGoalSet__,IsAnOverflowFreezeSet__:Boolean):Boolean;
-        var GoalNo:Integer;
-        begin {precondition: the preceding deadlock set is the controller-set for the controller/freeze-set pair, where this function creates the freeze-set}
+        function  CreateFreezeSet(GoalsInSetCount__:Integer; const GoalSet__:TGoalSet;
+                                  IsAFreezingGoalSet__,IsAnOverflowFreezeSet__:Boolean;
+                                  SquaresOutsideFenceCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__:Integer):Boolean;
+        var GoalNo,Square:Integer;
+        begin {preconditions:
+               * the preceding deadlock-set is the controller-set for the controller/freeze-set pair, where this function creates the freeze-set
+               * faked freezing squares (a tunnel which is forever blocked if there are two boxes in the tunnel) are floor squares marked as walls and as members of the set ('WALL+FLAG_SQUARE_SET')}
           Result:=False;
-          if InitializeDeadlockSetCandidate(Pred(GoalsInSetCount__),0,GoalsInSetCount__) then with Game do begin
+          Dec(GoalsInSetCount__,FakedFreezingSquaresGoalCount__); {'FakedFreezingSquaresGoalCount__' is included in 'GoalsInSetCount__'}
+          if InitializeDeadlockSetCandidate(Pred(GoalsInSetCount__+Min(2,FakedFreezingSquaresGoalCount__)),0,GoalsInSetCount__+FakedFreezingSquaresCount__) then with Game do begin
              {freeze-sets "cheat" by having the "dsfPlayerMustBeOutsideSet" flag, thereby bypassing legal push tests in 'IsALegalPush' and 'DoPush'}
              if   IsAFreezingGoalSet__ then
                   DeadlockSetCandidate__.Flags:=[dsfFreezeSet                         ,dsfPlayerMustBeOutsideSet]
              else DeadlockSetCandidate__.Flags:=[dsfFreezeSet,dsfTestForFreezingSquare,dsfPlayerMustBeOutsideSet];
              if   IsAnOverFlowFreezeSet__ then Include(DeadlockSetCandidate__.Flags,dsfIsAnOverflowSet);
-             for  GoalNo:=1 to GoalCount do
-                  if GoalNo in GoalSet__ then {'True': the goal is a member of the "freeze-set"}
-                     if AddSquareToDeadlockSet(GoalPos[GoalNo]) then
-                        if (Board[GoalPos[GoalNo]] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
 
-             Result:=(DeadlockSetCandidate__.Boxes.Count=GoalsInSetCount__) and {'True': all goal squares in the "freeze-set" were successfully registered as members of the set}
+             if   SquaresOutsideFenceCount__>0 then begin
+                  DeadlockSetCandidate__.Flags:=DeadlockSetCandidate__.Flags+[dsfPlayerMustBeOutsideFreezeSet,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence];
+                  DeadlockSetCandidate__.SquareOutsideFence:=-DeadlockSetCandidate__.SquaresOutsideFence.Squares[1]; {'-': tells 'CommitDeadlockSet()' to use the absolute value}
+                  DeadlockSetCandidate__.SquaresOutsideFence.Count:=-SquaresOutsideFenceCount__; {'-': tells 'CommitDeadlockSet()' to use the values in 'DeadlockSetCandidate.SquaresOutsideFence'}
+                  end;
+
+             for  GoalNo:=1 to GoalCount do
+                  if (GoalNo in GoalSet__) and
+                     AddSquareToDeadlockSet(GoalPos[GoalNo]) and
+                     ((Board[GoalPos[GoalNo]] and BOX)<>0) then
+                     Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+
+             if   FakedFreezingSquaresCount__>0 then begin
+                  for Square:=0 to BoardSize do
+                      if ((Board[Square] and (FLAG_SQUARE_SET+WALL+FLOOR+GOAL))=(FLAG_SQUARE_SET+WALL+FLOOR)) and {'+GOAL': avoid adding goal squares twice; faked freezing goal squares are members of the goal set}
+                         AddSquareToDeadlockSet(Square) and
+                         ((Board[Square] and BOX)<>0) then
+                         Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                  Include(DeadlockSetCandidate__.Flags,dsfHasFakedFreezingSquares);
+                  end;
+
+             Result:=(DeadlockSetCandidate__.Boxes.Count=DeadlockSetCandidate__.MaxBoxCount) and {'True': all squares in the "freeze-set" were successfully registered as members of the set}
                      CommitDeadlockSet(False,False,False,Result); {'True': registering the "freeze-set" succeeded}
              end;
           if not Result then begin
@@ -9800,496 +11000,801 @@ XX              of them is a box on a non-goal square. The non-wall
              end;
         end; {PatternTypeFrozenGoals.FindDeadlocks.CreateFreezeSet}
 
-        function  CalculateAreaOverflowDeadlocks(GoalsInSetCount__:Integer; const GoalSet__:TGoalSet):Boolean; {with frozen boxes, there may be an area of the board from which only a limited number of goals can be reached}
-        var i,BoxNo,GoalNo,OldCount,ReachableSquaresCount,Square:Integer;
-            More:Boolean;
-            Direction:TDirection;
-            ReachableGoalsSet:TBoxSetWithCount;
-            Visited:TBoardOfBooleans;
-            Distances:TSquareDirectionArrayOfInteger;
-        begin {precondition: it's a freezing goal set, i.e., 'IsAFreezingGoalSet__' = 'True', meaning the freeze-set is static and doesn't require a dynamic freeze-test during the game search}
-          Result:=True; //exit;
-          with Game do begin
-            for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
-            for Square:=0 to BoardSize do Visited[Square]:=(Board[Square] and WALL)<>0; {mark floor squares as unvisited}
-            for Square:=0 to BoardSize do
-                if IsALegalAndBoxReachableSquare(Square) and
-                   (not Visited[Square]) then begin
-                   {push a box around on the board, starting from 'Square'}
-                   ReachableSquaresCount:=0;
-                   CalculateBoxPullOrPushDistances(Square,SEARCH_STATE_INDEX_DO_PUSH,True,False,False,Distances);
-                   {
-                    accumulate the set of box-push-reachable squares from
-                    'Square', ensuring that if a square is reachable, then a box
-                    at the square is getting pushed from all legal directions;
-                   }
-                   repeat
-                     More:=False;
-                     for i:=0 to BoardSize do
-                         if (not IsAWallSquare(i)) and
-                            (MinimumDistanceToSquare(i,Distances)<>INFINITY) then begin
-                            Visited[i]:=True; Inc(ReachableSquaresCount);
-                            for Direction:=Low(Direction) to High(Direction) do
-                                if (Distances[i,Direction]=INFINITY) and {'True': the box hasn't been pushed to the square 'i' from the direction}
-                                   IsAFloorSquare(i-SquareOffsetForward[Direction]) then begin {'True': the player can get 'behind' a box at square 'i', and start pushing the box in this direction}
-                                   CalculateBoxPullOrPushDistances(i,SEARCH_STATE_INDEX_DO_PUSH,True,False,True,Distances); {the last 'True' parameter makes the calculation continue with the existing distances}
-                                   More:=True;
-                                   end;
-                            end;
-                   until not (More);
+        function  CalculateAreaOverflowAndUnderflowDeadlocks(GoalsInSetCount__:Integer; const GoalSet__:TGoalSet;
+                                                             FloorsInPlayersAccessAreaCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__:Integer):Boolean;
+        var
+          BoxNo:Integer;
+          {TimeMS:TTimeMS;}
+          SquaresGoalsCount:TBoardOfIntegers;
+          SquaresGoalSet:TBoardOfGoalSets;
 
-                   ReachableGoalsSet.Count:=0; ReachableGoalsSet.BoxSet:=[];
-                   for GoalNo:=1 to GoalCount do
-                       if (not (GoalNo in GoalSet__)) and {'True': the goal isn't a member of the frozen goals set}
-                          (MinimumDistanceToSquare(GoalPos[GoalNo],Distances)<>INFINITY) then begin {'True': the goal is a member of the reachable squares}
-                          Inc(ReachableGoalsSet.Count); Include(ReachableGoalsSet.BoxSet,GoalNo);
+          function  CalculateAreaOverflowDeadlocks:Boolean; {with frozen boxes, there may be an area of the board from which only a limited number of goals can be reached}
+          var i,BoxNo,OldCount,Square:Integer; {PlayerToSquare,OldPlayerPos,OldSquareValue:Integer;}
+              SquaresGoalsSubSetCount:TBoardOfIntegers;
+              Visited:TBoardOfBooleans;
+
+            function  IsASubSet(Square1__,Square2__:Integer; const SquaresGoalsCount__:TBoardOfIntegers; const SquaresGoalSet__:TBoardOfGoalSets):Boolean;
+            var Goal:Integer;
+            begin {returns 'True' if the goals reachable from 'Square1__' is a subset of the goals reachable from 'Square2__'}
+              {this function treats an empty set as not being a subset of any set;}
+              Result:=(SquaresGoalsCount__[Square1__]> 0) and {'True': one or more goals are reachable from 'Square1__'}
+                      (SquaresGoalsCount__[Square1__]<=SquaresGoalsCount__[Square2__]); {True: there is a chance that goals reachable from 'Square1__' is a subset of the goals reachable from 'Square2__'}
+              if Result then
+                 for Goal:=1 to Game.GoalCount do
+                     if (     Goal in SquaresGoalSet__[Square1__])  and         {'True': the goal is reachable from 'Square1__'}
+                        (not (Goal in SquaresGoalSet__[Square2__])) then begin  {'True': the goal is not reachable from 'Square2__'}
+                        Result:=False;
+                        break; {quick-and-dirty exit when the result is 'False'}
+                        end;
+            end;
+
+          begin {CalculateAreaOverflowDeadlocks}
+                {precondition: it's a freezing goal set, i.e., 'IsAFreezingGoalSet__' = 'True', meaning the freeze-set is static and doesn't require a dynamic freeze-test during the game search}
+            Result:=True;
+            with Game do begin
+              for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+              for Square:=0 to BoardSize do Visited[Square]:=(Board[Square] and WALL)<>0; {mark floor squares as unvisited; the squares with frozen goals and the faked freezing squares, if any, contain walls, so these squares are mark as visited too}
+
+              FillChar(SquaresGoalsSubSetCount,SizeOf(SquaresGoalsSubSetCount),0);
+              for Square:=0 to BoardSize do begin {for each square 'Square', calculate the number of squares with a reachable goal-set which is a subset of the reachable goals from 'Square'}
+                  if IsALegalAndBoxReachableSquare(Square) then
+                     for i:=0 to BoardSize do
+                         if (SquaresGoalsCount[i]>0)
+                            and
+                            IsALegalAndBoxReachableSquare(i)
+                            and
+                            ((i=Square)
+                             or
+                             IsASubSet(i,Square,SquaresGoalsCount,SquaresGoalSet) {'True': the goals which are reachable from the square 'i' is a subset of the goals which are reachable from the square 'Square'}
+                            ) then
+                            Inc(SquaresGoalsSubSetCount[Square]);
+                  end;
+
+              TimeCheck;
+
+              for Square:=0 to BoardSize do
+                  if (SquaresGoalsSubSetCount[Square]>1) and
+                     (not Visited[Square]) and
+                     IsALegalAndBoxReachableSquare(Square) then begin
+
+                     if (SquaresGoalsCount[Square]>0) and
+                        (SquaresGoalsCount[Square]<GoalCount-GoalsInSetCount__) and    {'True': with the frozen boxes on the board, only a subset of the goals are reachable from the currently investigated set of squares}
+                        (SquaresGoalsSubSetCount[Square]>SquaresGoalsCount[Square]) then begin {'True': there are more squares than reachable goals (avoids small confined areas)}
+
+                        if (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
+                           InitializeDeadlockSetCandidate(SquaresGoalsCount[Square],0,BoardSize) then begin
+                           {note that the capacity of the deadlock set (initialized in the previous line)
+                            may exceed the number of goals in the set;
+
+                            an example:
+
+                            ######### Level
+                            #@--#---#
+                            #.$.--*-#
+                            ######-##
+                            -----#--#
+                            -----#$-#
+                            -----#--#
+                            -----####
+
+                            ######### This is a controller set for an overflow controller/freeze set pair.
+                            #---#---# The squares in this set must contain at the most 1 box when boxes
+                            ##------# freeze at the squares in the following set.
+                            ######%##
+                            -----#%-#
+                            -----#$-# <-- The box can be pushed to the goal square in the same column,
+                            -----#--#     but the goal square is not a member of the set. A box at that
+                            -----####     goal square can be pushed to squares outside the square set.
+
+                            ######### This is a freeze set for the preceding controller set.
+                            #---#---# Boxes at squares in this set must not freeze if the squares in the
+                            #%------# preceding controller set contain too many boxes.
+                            ######-##
+                            -----#--#
+                            -----#--#
+                            -----#--#
+                            -----####
+                           }
+                           for BoxNo :=1 to Game.BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] or BOX; {put all boxes back on the board for correct deadlock-set capacity calculation}
+                           OldCount:=DeadlockSets.Count;
+                           DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfIsAnOverflowSet,dsfPlayerMustBeOutsideSet];  {controller-sets use the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
+                           for i:=0 to BoardSize do
+                               if IsALegalAndBoxReachableSquare(i)
+                                  and
+                                  IsASubSet(i,Square,SquaresGoalsCount,SquaresGoalSet) then
+                                  if   AddSquareToDeadlockSet(i) then begin {collect the floor squares from which the reachable goal set can be reached}
+                                       if (Board[i] and BOX )<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                                       end
+                                  else OldCount:=-1; {collecting the squares belonging to the controller-set failed; no new deadlock-sets have been registered yet}
+                           if   FakedFreezingSquaresGoalCount__>0 then {'True': boxes from the calculated area may be pushed into the area with the faked freezing goal squares; increase the capacity of the calculated area accordingly;}
+                                Inc(DeadlockSetCandidate__.Capacity,FakedFreezingSquaresGoalCount__-Min(2,FakedFreezingSquaresGoalCount__)); {'Min(2,...)': it takes 2 boxes to block a tunnel with goal squares}
+                           if   (OldCount=DeadlockSets.Count) and
+                                (DeadlockSetCandidate__.GoalCount<SquaresGoalsSubSetCount[Square]) and
+                                (DeadlockSetCandidate__.GoalCount<DeadlockSetCandidate__.Boxes.Count) and {'<': this also filters out candidates with 0 box squares}
+                                CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
+                                if CreateFreezeSet(GoalsInSetCount__,GoalSet__,True,True,FloorsInPlayersAccessAreaCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__) then begin
+                                   for i:=Succ(Square) to BoardSize do
+                                       if (SquaresGoalsCount[i]=SquaresGoalsCount[Square]) and
+                                          IsASubSet(i,Square,SquaresGoalsCount,SquaresGoalSet) and
+                                          IsASubSet(Square,i,SquaresGoalsCount,SquaresGoalSet) then
+                                          SquaresGoalsSubSetCount[i]:=0; {don't create duplicates based on squares sharing a common set of reachable goals}
+                                   Inc(Game.DeadlockSets.OverflowSetsCount);
+{
+                                   ShowBoard;
+                                   Game.ShowDeadlockSetsEnabled:=True;
+                                   ShowDeadlockSet(Pred(Game.DeadlockSets.Count),0);
+                                   Write('Frozen goals - overflow deadlock ', Game.DeadlockSets.Count,SPACE,Solver.PushCount);
+                                   Readln;
+                                   Game.ShowDeadlockSetsEnabled:=False;
+}
+                                   end
+                                else begin {creating the controller/freeze-set pair failed; restore the deadlock-sets to the old state}
+                                   while DeadlockSets.Count>OldCount do begin
+                                     DeleteDeadlockSet(DeadlockSets.Count);
+                                     end;
+                                   WritelnToLogFile('');
+                                   WritelnToLogFile(TEXT_CREATE_FREEZE_DEADLOCK_SET_FAILED);
+                                   end;
+                                end;
+
+                           for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+                           end;
+                        end;
+                     end;
+              end;
+          end; {PatternTypeFrozenGoals.FindDeadlocks.CalculateAreaOverflowAndUnderflowDeadlocks.CalculateAreaOverflowDeadlocks}
+
+          function  CalculateAreaUnderflowDeadlocks:Boolean; {with frozen boxes, there may be an area of the board from which only a limited number of goals can be reached}
+
+            function  IsASubSet(GoalNo1__,GoalNo2__:Integer; const SquaresGoalSet__:TBoardOfGoalSets):Boolean;
+            var Square:Integer;
+            begin {returns 'True' if the pull-reachable squares from 'GoalNo1__' is a subset of the pull-reachable squares from 'GoalNo2__';}
+              {this function treats an empty set as a subset of any set;
+               that would be a mistake in this underflow calculation, but it
+               never happens; the goal 'GoalNo1__' is always reachable from the
+               goal square itself;
+              }
+              Result:=True;
+              with Game do
+                for Square:=0 to BoardSize do
+                    if (     GoalNo1__ in SquaresGoalSet__[Square])  and          {'True': the square 'Square' is     pull-reachable from 'GoalNo1__'}
+                       (not (GoalNo2__ in SquaresGoalSet__[Square])) then begin   {'True': the square 'Square' is not pull-reachable from 'GoalNo2__'}
+                       Result:=False; break;
+                       end;
+            end;
+
+          var {CalculateAreaUnderflowDeadlocks}
+            i,BoxNo,GoalNo,OldCount,ReachableSquaresCount,ReachableSquaresLimit,Square:Integer;
+            {TimeMS:TTimeMS;}
+            GoalsSubSetCount:TBoxArrayOfIntegers;
+          begin {CalculateAreaUnderflowDeadlocks; precondition: it's a freezing goal set, i.e., 'IsAFreezingGoalSet__' = 'True', meaning the freeze-set is static and doesn't require a dynamic freeze-test during the game search}
+            Result:=True; //exit;
+            with Game do begin
+              {TimeMS:=GetTimeMS;}
+              for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+
+              for GoalNo:=1 to GoalCount do begin {for each goal 'GoalNo', calculate the number of goals with a pull-reachable square-set which is a subset of the pull-reachable squares from 'GoalNo'}
+                  GoalsSubSetCount[GoalNo]:=0;
+                  if not (GoalNo in GoalSet__) then begin {'True': the goal 'GoalNo' is neither a frozen goal nor a faked freezing square}
+                     for i:=1 to GoalCount do
+                         if (not (i in GoalSet__)) {'True': the goal 'i' is neither a frozen goal nor a faked freezing square}
+                            and
+                            ((i=GoalNo)
+                             or
+                             IsASubSet(i,GoalNo,SquaresGoalSet) {'True': if a box can be pushed from a square to goal 'i' then it can also be pushed to goal 'GoalNo'}
+                            ) then
+                            Inc(GoalsSubSetCount[GoalNo]);
+                     end;
+                  end;
+
+              TimeCheck;
+
+              for GoalNo:=1 to GoalCount do
+                  if (GoalsSubSetCount[GoalNo]>0) and {'True': it's not one of the frozen boxes}
+                     (GoalsSubSetCount[GoalNo]<GoalCount-GoalsInSetCount__) and {'True': with the frozen boxes on the board, only a subset of the goals are push-reachable from the pull-reachable squares from the goal 'GoalNo'}
+                     (Solver.SearchLimits.DepthLimit>=0) and {'True': the solver hasn't been terminated}
+                     (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
+                     InitializeDeadlockSetCandidate(GoalsSubSetCount[GoalNo],0,BoardSize) then begin
+                     for BoxNo:=1 to Game.BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] or BOX; {put all boxes back on the board for correct deadlock-set capacity calculation}
+                     ReachableSquaresCount:=0; {calculate the number of reachable squares}
+                     if   GoalsSubSetCount[GoalNo]>1 then {heuristic: only create underflow deadlocks for small areas of the board}
+                          ReachableSquaresLimit:=FloorCount div 2
+                     else ReachableSquaresLimit:=FloorCount div 4;
+                     OldCount:=DeadlockSets.Count;
+                     DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfPlayerMustBeOutsideSet];  {controller-sets use the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
+                     for Square:=0 to BoardSize do
+                         if GoalNo in SquaresGoalSet[Square] then
+                            if (ReachableSquaresCount<ReachableSquaresLimit) and {'True': the heuristic area size limit hasn't been exceeded}
+                               AddSquareToDeadlockSet(Square) then begin {collect the floor squares in the pull-reachable square set from the goal 'GoalNo'}
+                               Inc(ReachableSquaresCount);
+                               if (Board[Square] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                               end
+                            else begin  {collecting the squares belonging to the controller-set failed, or the number of squares exceeded the heuristic limit; no new deadlock-sets have been registered yet}
+                               OldCount:=-1; break;
+                               end;
+
+                     if   (ReachableSquaresCount<=ReachableSquaresLimit) and {only create small underflow areas}
+                          (OldCount=DeadlockSets.Count) and
+                          (DeadlockSetCandidate__.GoalCount=GoalsSubSetCount[GoalNo]) and
+                          //(DeadlockSetCandidate__.GoalCount<GoalSubSetCount[GoalNo]) and
+                          CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
+                          if CreateFreezeSet(GoalsInSetCount__,GoalSet__,True,False,FloorsInPlayersAccessAreaCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__) then begin
+                             for i:=Succ(GoalNo) to GoalCount do
+                                 if (GoalsSubSetCount[i]=GoalsSubSetCount[GoalNo]) and
+                                    IsASubSet(i,GoalNo,SquaresGoalSet) and
+                                    IsASubSet(GoalNo,i,SquaresGoalSet) then
+                                    GoalsSubSetCount[i]:=0; {don't create duplicates based on goals sharing a common set of pull-reachable squares}
+                             Inc(Game.DeadlockSets.UnderflowSetsCount);
+{
+                             ShowBoard;
+                             Game.ShowDeadlockSetsEnabled:=True;
+                             ShowDeadlockSet(Pred(Game.DeadlockSets.Count),0);
+                             //ShowDeadlockSet(Game.DeadlockSets.Count,0);
+                             Write('Frozen goals - underflow deadlock ', Game.DeadlockSets.Count,SPACE,Solver.PushCount);
+                             Readln;
+                             Game.ShowDeadlockSetsEnabled:=False;
+}
+                             end
+                          else begin {creating the controller/freeze-set pair failed; restore the deadlock-sets to the old state}
+                             while DeadlockSets.Count>OldCount do begin
+                               DeleteDeadlockSet(DeadlockSets.Count);
+                               end;
+                             WritelnToLogFile('');
+                             WritelnToLogFile(TEXT_CREATE_FREEZE_DEADLOCK_SET_FAILED);
+                             end;
                           end;
 
-                   if (ReachableGoalsSet.Count>0) and
-                      (ReachableGoalsSet.Count<GoalCount-GoalsInSetCount__) and   {'True': with the frozen boxes on the board, only a subset of the goals are reachable from the currently investigated set of squares}
-                      (ReachableSquaresCount >ReachableGoalsSet.Count) then begin {'True': there are more squares than reachable goals (avoids small confined areas)}
-
-                      if (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
-                         InitializeDeadlockSetCandidate(ReachableGoalsSet.Count,0,BoardSize) then begin
-                         for BoxNo :=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board for correct deadlock set capacity calculation}
-                         ReachableSquaresCount:=0; {recalculate the number of reachable squares; the existing count may contain overlaps because of the multiple calls to 'CalculateBoxPullOrPushDistances'}
-                         OldCount:=DeadlockSets.Count;
-                         DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfIsAnOverflowSet,dsfPlayerMustBeOutsideSet];  {controller-sets use the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
-                         for i:=0 to BoardSize do
-                             if (not IsAWallSquare(i)) and
-                                (MinimumDistanceToSquare(i,Distances)<>INFINITY) then
-                                if   AddSquareToDeadlockSet(i) then begin {collect the floor squares from which the reachable goal set can be reached}
-                                     Inc(ReachableSquaresCount);
-                                     if (Board[i] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                                     end
-                                else OldCount:=-1; {collecting the squares belonging to the controller-set failed; no new deadlock sets have been registered yet}
-
-                         if   (OldCount=DeadlockSets.Count) and
-                              (DeadlockSetCandidate__.GoalCount=ReachableGoalsSet.Count) and
-                              (DeadlockSetCandidate__.GoalCount<ReachableSquaresCount) and
-                              CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
-                              if CreateFreezeSet(GoalsInSetCount__,GoalSet__,True,True) then begin
-                                 end
-                              else begin {creating the controller/freeze-set pair failed; restore the deadlock sets to the old state}
-                                 while DeadlockSets.Count>OldCount do begin
-                                   DeleteDeadlockSet(DeadlockSets.Count);
-                                   end;
-                                 WritelnToLogFile('');
-                                 WritelnToLogFile(TEXT_CREATE_FREEZE_DEADLOCK_SET_FAILED);
-                                 end;
-                              end;
-
-                         for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
-                         end;
-                      end;
-                   end;
-            end;
-        end; {PatternTypeFrozenGoals.FindDeadlocks.CalculateAreaOverflowDeadlocks}
-
-        function  CalculateAreaUnderflowDeadlocks(GoalsInSetCount__:Integer; const GoalSet__:TGoalSet):Boolean; {with frozen boxes, there may be an area of the board from which only a limited number of goals can be reached}
-
-          function  IsASubSet(GoalNo1__,GoalNo2__:Integer; const SquaresGoalSet__:TBoardOfGoalSets):Boolean;
-          var Square:Integer;
-          begin {returns 'True' if the pull-reachable squares from 'GoalNo1__' is a subset of the pull-reachable squares from 'GoalNo2__'}
-            {this function treats an empty set as a sub-set of any set;
-             that would be a mistake in this underflow calculation, but it
-             never happens; the goal 'GoalNo1__' is always reachable from the
-             goal square itself;
-            }
-            Result:=True;
-            with Game do
-              for Square:=0 to BoardSize do
-                  if (     GoalNo1__ in SquaresGoalSet__[Square])  and          {'True': the square 'Square' is     pull-reachable from 'GoalNo1__'}
-                     (not (GoalNo2__ in SquaresGoalSet__[Square])) then begin   {'True': the square 'Square' is not pull-reachable from 'GoalNo2__'}
-                     Result:=False; break;
+                     for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+                     TimeCheck;
                      end;
-          end;
+              end;
+          end; {PatternTypeFrozenGoals.FindDeadlocks.CalculateAreaOverflowAndUnderflowDeadlocks.CalculateAreaUnderflowDeadlocks}
 
-        var {'CalculateAreaUnderflowDeadlocks'}
-          i,BoxNo,GoalNo,OldCount,ReachableSquaresCount,ReachableSquaresLimit,Square:Integer;
-          {TimeMS:TTimeMS;}
-          GoalSubSetCount:TBoxArrayOfIntegers;
-          SquaresGoalSet:TBoardOfGoalSets;
-        begin {'CalculateAreaUnderflowDeadlocks'; precondition: it's a freezing goal set, i.e., 'IsAFreezingGoalSet__' = 'True', meaning the freeze-set is static and doesn't require a dynamic freeze-test during the game search}
-          Result:=True; //exit;
+        begin {PatternTypeFrozenGoals.FindDeadlocks.CalculateAreaOverflowAndUnderflowDeadlocks}
           with Game do begin
             {TimeMS:=GetTimeMS;}
             for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+            Result:=(GoalsInSetCount__>0) and
+                    CalculateReachableGoalsForAllSquares(False,SquaresGoalsCount,SquaresGoalSet); {'False' parameter: calculating squares->goals by pulling boxes away from goal squares may be a little faster than pushing boxes from squares to goals}
+            if Result then begin
+               CalculateAreaOverflowDeadlocks;  {with frozen boxes, there may be areas on the board from where it is only possible to reach a limited number of goals}
+               CalculateAreaUnderflowDeadlocks; {with frozen boxes, there may be areas on the board from where it is only possible to reach a limited number of goals}
+               end;
+            end;
+        end; {PatternTypeFrozenGoals.FindDeadlocks.CalculateAreaOverflowAndUnderflowDeadlocks}
 
-            if  CalculateReachableGoalsForAllSquares(SquaresGoalSet) then begin
-                for GoalNo:=1 to GoalCount do begin {for each goal 'GoalNo', calculate the number of goals with a pull-reachable square-set which is a sub-set of the pull-reachable squares from 'GoalNo'}
-                    GoalSubSetCount[GoalNo]:=0;
-                    if (not (GoalNo in GoalSet__)) then begin {'True': the goal 'GoalNo' isn't one of the frozen goals}
-                       for i:=1 to GoalCount do
-                           if (not (i in GoalSet__)) {'True': the goal 'i' isn't one of the frozen goals}
-                              and
-                              ((i=GoalNo)
-                               or
-                               IsASubSet(i,GoalNo,SquaresGoalSet) {'True': if a box can be pushed from a square to goal 'i' then it can also be pushed to goal 'GoalNo'}
-                              ) then
-                              Inc(GoalSubSetCount[GoalNo]);
-                       end;
-                    end;
+       function  ExpandFreezeDeadlocks(GoalsInSetCount__,SquaresOutsideFenceCount__:Integer; GoalSet__:TGoalSet):Boolean;
+        var {BoxNo,}GoalNo,Index,OldCount,SquareNo,TunnelGoalCount:Integer;
+            Direction:TDirection;
+            TunnelSquares:TBoardSquareSet;
 
-                TimeCheck;
+          function  IsTunnel(Square__:Integer; TunnelDirection__:TDirection; var TunnelSquares__:TBoardSquareSet; var TunnelGoalCount__:Integer):Boolean;
+          {side effects: sets 'FLAG_VISITED_SQUARE' and 'FLAG_SQUARE_SET' flags in 'Game.Board' squares}
 
-                for GoalNo:=1 to GoalCount do
-                    if (GoalSubSetCount[GoalNo]>0) and {'True': it's not one of the frozen boxes}
-                       (GoalSubSetCount[GoalNo]<GoalCount-GoalsInSetCount__) and {'True': with the frozen boxes on the board, only a subset of the goals are push-reachable from the pull-reachable squares from the goal 'GoalNo'}
-                       (Solver.SearchLimits.DepthLimit>=0) and {'True': the solver hasn't been terminated}
-                       (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
-                       InitializeDeadlockSetCandidate(GoalSubSetCount[GoalNo],0,BoardSize) then begin
-                       for BoxNo:=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board for correct deadlock set capacity calculation}
-                       ReachableSquaresCount:=0; {calculate the number of reachable squares}
-                       if   GoalSubSetCount[GoalNo]>1 then {heuristic: only create underflow deadlocks for reasonably small areas on the board}
-                            ReachableSquaresLimit:=FloorCount div 2
-                       else ReachableSquaresLimit:=FloorCount div 4;
-                       OldCount:=DeadlockSets.Count;
-                       DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfPlayerMustBeOutsideSet];  {controller-sets use the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
-                       for Square:=0 to BoardSize do
-                           if GoalNo in SquaresGoalSet[Square] then
-                              if (ReachableSquaresCount<ReachableSquaresLimit) and {'True': the heuristic area size limit hasn't been exceeded}
-                                 AddSquareToDeadlockSet(Square) then begin {collect the floor squares ín the pull-reachable square set from the goal 'GoalNo'}
-                                 Inc(ReachableSquaresCount);
-                                 if (Board[Square] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                                 end
-                              else begin  {collecting the squares belonging to the controller-set failed, or the number of squares exceeded the heuristic limit; no new deadlock sets have been registered yet}
-                                 OldCount:=-1; break;
-                                 end;
+            function  IsBlockedByWallOnAxis(Square__:Integer; Direction__:TDirection):Boolean;
+            begin {contrary to what the function name suggests, the parameter is a direction, not an axis}
+              with Game do
+                Result:= ((( Board [ Square__ + SquareOffsetForward [ Direction__ ] ] and WALL ) <> 0 )
+                          or
+                          (( Board [ Square__ - SquareOffsetForward [ Direction__ ] ] and WALL ) <> 0 ));
+            end;
 
-                       if   (ReachableSquaresCount<=ReachableSquaresLimit) and {only create small underflow areas}
-                            (OldCount=DeadlockSets.Count) and
-                            (DeadlockSetCandidate__.GoalCount=GoalSubSetCount[GoalNo]) and
-                            //(DeadlockSetCandidate__.GoalCount<GoalSubSetCount[GoalNo]) and
-                            CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
-                            if CreateFreezeSet(GoalsInSetCount__,GoalSet__,True,False) then begin
-                               for i:=Succ(GoalNo) to GoalCount do
-                                   if (GoalSubSetCount[i]=GoalSubSetCount[GoalNo]) and
-                                      IsASubSet(i,GoalNo,SquaresGoalSet) and
-                                      IsASubSet(GoalNo,i,SquaresGoalSet) then
-                                      GoalSubSetCount[i]:=0; {don't create duplicates based on goals sharing a common set of pull-reachable squares}
-{
-                               ShowBoard;
-                               Game.ShowDeadlockSetsEnabled:=True;
-                               ShowDeadlockSet(Pred(Game.DeadlockSets.Count),0);
-                               Write('Frozen goals - underflow deadlock ', Game.DeadlockSets.Count,SPACE,Solver.PushCount);
-                               Readln;
-                               Game.ShowDeadlockSetsEnabled:=False;
-}
-                               end
-                            else begin {creating the controller/freeze-set pair failed; restore the deadlock sets to the old state}
-                               while DeadlockSets.Count>OldCount do begin
-                                 DeleteDeadlockSet(DeadlockSets.Count);
-                                 end;
-                               WritelnToLogFile('');
-                               WritelnToLogFile(TEXT_CREATE_FREEZE_DEADLOCK_SET_FAILED);
-                               end;
+            function  IsDoorSquare(Square__:Integer; Direction__:TDirection):Boolean;
+            begin {caution: 4 directions only}
+              with Game do
+                Result:=IsALegalAndBoxReachableSquare(Square__) and
+                        //(not IsALegalAndBoxReachableSquare(Square__+SquareOffsetLeft [Direction__])) and
+                        //(not IsALegalAndBoxReachableSquare(Square__+SquareOffsetRight[Direction__]));
+                        IsAWallSquare(Square__+SquareOffsetLeft [Direction__]) and
+                        IsAWallSquare(Square__+SquareOffsetRight[Direction__]);
+            end; {IsDoorSquare}
+
+            function  IsVisited(Square__:Integer):Boolean;
+            begin {returns 'True' if the square already is a member of the set (set flag), or if the square is marked as being a part of another tunnel (visited flag), or if the square isn't a floor}
+              Result:=(Game.Board[Square__] and (WALL+FLOOR+FLAG_VISITED_SQUARE+FLAG_SQUARE_SET))<>FLOOR;
+            end; {IsVisited}
+
+            function  MarkSquare(Square__:Integer):Boolean;
+            begin {returns 'False' if the square already is a member of the set (set flag), or if the square is marked as being a part of another tunnel (visited flag)}
+              Result:=not IsVisited(Square__);
+              if Result then
+                 Game.Board[Square__]:=Game.Board[Square__] or FLAG_SQUARE_SET;
+            end; {MarkSquare}
+
+            function  AddSquareToSet(Square__:Integer; DiscardVisitedSquares__:Boolean):Integer;
+            var Direction:TDirection;
+            begin {returns the tunnel squares vector index for the square if the square is added to the set; returns 0 if the square already is a member of the set;}
+              Result:=0;
+              if ((not IsVisited(Square__))
+                  or
+                  (not DiscardVisitedSquares__)
+                 )
+                 and
+                 (TunnelSquares__.Count<High(TunnelSquares__.Squares)) then with TunnelSquares__ do begin
+                 if   Count>0 then begin
+                      if   IsANeighborSquare(Squares[Count],Square__,Direction) then
+                           Result:=Succ(Count)
+                      else Msg(TEXT_INTERNAL_ERROR+': Tunnel squares: Neighbor square expected'+SPACE+IntToStr(Square__),TEXT_APPLICATION_TITLE); {sanity check failed; the square should be a neighbor or the preceding tunnel square}
+                      end
+                 else Result:=Succ(Count);                                      {Result := 1}
+                 if (Game.Board[Square__] and GOAL)<>0 then
+                    Inc(TunnelGoalCount__);
+                 Inc(Count);
+                 Squares[Count]:=Square__;
+                 Game.Board[Square__]:=Game.Board[Square__] or FLAG_SQUARE_SET;
+                 end;
+            end; {AddSquareToSet}
+
+            function  OutsideFloorNeighborCount(Square__:Integer):Integer;
+            var Direction:TDirection;
+            begin {counts neighbor floor squares which are not members of the set of tunnel squares}
+              Result:=0;
+              for Direction:=Low(Direction) to High(Direction) do
+                  if (Game.Board[Square__+Game.SquareOffsetForward[Direction]] and (WALL+FLOOR+FLAG_SQUARE_SET))=FLOOR then
+                     Inc(Result);
+            end; {OutsideFloorNeighborCount}
+
+            function  Search(Depth__,Square__:Integer; Direction__:TDirection):Integer;
+            begin {caution: 4 directions only}
+              Result:=0;
+              //if (Depth__>0) and (Depth__<=MAX_BOARD_SIZE) then // testing stack overflow
+              //   Result:=Search(Succ(Depth__),Square__,Direction__)
+              //else
+              if not IsVisited(Square__) then with Game do                      {'True': the is a floor square being visited for the first time}
+                 if IsBlockedByWallOnAxis(Square__,NEXT_DIRECTION[Direction__]) then begin {caution: 4 directions only}
+                    {example: #-?  or  ?-#    "-" is 'Square__'    direction is up}
+                    if IsDoorSquare(Square__,Direction__) then begin
+                       {example: #-#  "-" is 'Square__'  direction is up}
+                       if MarkSquare(Square__) then begin                       {'True': the square has now been visited for the first time; continue the search for tunnel squares along the current axis}
+                          if TunnelSquares__.Count>0 then                       {'True': at this stage, the search explores the tunnel starting from the original goal square, but in the opposite direction of the original tunnel direction}
+                             Result:=AddSquareToSet(Square__,False);
+                          Search(Succ(Depth__),Square__+SquareOffsetForward[Direction__],Direction__); {continue the search for tunnel squares in the given direction}
+                          if Result=0 then                                      {unwinding the recursion: add the square to the set}
+                             Result:=AddSquareToSet(Square__,False);
+                          Search(Succ(Depth__),Square__-SquareOffsetForward[Direction__],OPPOSITE_DIRECTION[Direction__]); {opposite direction}
+                          end;
+                       end
+                    else if (Depth__=0) and                                     {'True': it's an empty tunnel, i.e., no end-of-tunnel square has been found yet}
+                            IsDoorSquare(Square__+SquareOffsetForward[Direction__],Direction__) then begin
+                            {example: #-#  or  #-#
+                                      #--      --#  center "-" is 'Square__'  direction is up}
+                            Result:=AddSquareToSet(Square__,True);              {the square is the beginning of a new tunnel}
+                            if Result>0 then
+                               Search(Succ(Depth__),Square__+SquareOffsetForward[Direction__],Direction__); {continue the search for tunnel squares in the given direction}
+                            end
+                         else begin
+                            if Depth__>0 then                                   {'True': it's a non-empty tunnel, and the square is blocked on the other axis, but only on one side (with 4 directions only)}
+                               if IsAWallSquare(Square__+SquareOffsetForward[Direction__]) then begin {'True': continue the search for tunnel squares after making a turn}
+                                  {example: ?#?  or  ?#?
+                                            #-?      ?-#  center "-" is 'Square__'  direction is up}
+                                  Direction__:=NEXT_DIRECTION[Direction__];     {change axis}
+                                  if   TunnelSquares__.Count>0 then
+                                       Result:=AddSquareToSet(Square__,True)    {add the square to the set of tunnel squares}
+                                  else MarkSquare(Square__);                    {just mark the square as visited}
+                                  Search(Succ(Depth__),Square__+SquareOffsetForward[Direction__],Direction__); {only one of the directions along the new axis leads to a floor square}
+                                  Search(Succ(Depth__),Square__+SquareOffsetForward[OPPOSITE_DIRECTION[Direction__]],OPPOSITE_DIRECTION[Direction__]);
+                                  if Result=0 then                              {'True': the square is the end of the tunnel}
+                                     Result:=AddSquareToSet(Square__,False);
+                                  end
+                               else Result:=AddSquareToSet(Square__,True);      {the square is the end of the tunnel}
                             end;
+                    end
+                 else if (Depth__>0) and                                        {'True': it's a non-empty tunnel}
+                         IsABlockedBoxSquareAlongAxis(Square__,NEXT_DIRECTION[Direction__]) then {'True': a box at the square cannot be pushed along another axis} {caution: 4 directions only}
+                         Result:=AddSquareToSet(Square__,True);                 {the square is the end of the tunnel}
+            end;
 
-                       for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
-                       TimeCheck;
-                       end;
-                end;
+          begin {IsTunnel} {caution: 4 directions only}
+            with Game do with TunnelSquares__ do begin
+              Count:=0;
+              TunnelGoalCount__:=0;
+              Search(0,Square__,TunnelDirection__); {find tunnel squares, if any }
+              Result:=(Count>=3) and {discard tunnels with less than 3 squares}
+                      (TunnelGoalCount__>=2) and {discard tunnels with less than 2 goal squares; otherwise one cannot say that 2 boxes must be pushed into the tunnel in order to block the tunnel}
+                      (OutsideFloorNeighborCount(Squares[    1])>0) and {if one of the end points isn't open to the outside, then it's a dead end tunnel; for simplicity, discard these dead end tunnels}
+                      (OutsideFloorNeighborCount(Squares[Count])>0);
+              end;
+          end; {IsTunnel}
+
+        begin {ExpandFreezeDeadlocks}
+          with Game do begin
+            OldCount:=DeadlockSets.Count;
+            //ShowBoard; Write(Positions.Count,SPACE,Solver.PushCount); Readln;
+
+            for SquareNo:=0 to BoardSize do
+                Board[SquareNo]:=Board[SquareNo] and (not (FLAG_VISITED_SQUARE+FLAG_SQUARE_SET+BOX)); {remove all boxes from the board, and clear the flags used by the tunnel calculation}
+
+            for GoalNo:=1 to GoalCount do begin
+                if (not (GoalNo in GoalSet__)) then begin
+                   for Direction:=Low(Direction) to High(Direction) do with TunnelSquares do begin
+                       if IsTunnel(GoalPos[GoalNo],Direction,TunnelSquares,TunnelGoalCount) then begin
 {
-            ShowBoard;
-            Write('Frozen goals - underflow deadlock calculation ',Solver.PushCount,SPACE,CalculateElapsedTimeMS(TimeMS,GetTimeMS));
-            Readln;
+                          for Index:=1 to GoalCount do if not IsAWallSquare(GoalPos[Index]) then Dec(Board[GoalPos[Index]],GOAL);
+                          for Index:=1 to TunnelSquares.Count do Inc(Board[TunnelSquares.Squares[Index]],GOAL);
+                          ShowBoardWithColumnsAndRows;
+                          for Index:=1 to TunnelSquares.Count do Dec(Board[TunnelSquares.Squares[Index]],GOAL);
+                          for Index:=1 to GoalCount do if not IsAWallSquare(GoalPos[Index]) then Inc(Board[GoalPos[Index]],GOAL);
+
+                          Write(Solver.PushCount, ' Goal tunnel: ');
+                          for Index:=1 to Count do
+                              Write(SquareToColRowAsText(Squares[Index]),SPACE,SPACE);
+                          Writeln;
+                          Writeln('Goals: ',TunnelGoalCount);
+                          //Readln;
+}
+                          for Index:=1 to Count do begin
+                              Square:=Squares[Index];
+                              if (Board[Square] and GOAL)<>0 then
+                                 Include(GoalSet__,Cardinal(Board[Square] shr GOAL_BIT_SHIFT_COUNT));
+                              if (Index>1) and (Index<Count) then begin
+                                 Board[Square]:=Board[Square] or WALL; {temporarily turn the inner tunnel squares into walls}
+                                 with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do Squares[Square]:=High(TimeStamp) and (not 1); {temporarily give the tunnel square the timestamp assigned to walls}
+                                 end;
+                              end;
+
+                          CalculateAreaOverflowAndUnderflowDeadlocks(GoalsInSetCount__+TunnelGoalCount,GoalSet__,SquaresOutsideFenceCount__,Count,TunnelGoalCount);
+
+                          for Index:=1 to Count do begin
+                              Square:=Squares[Index];
+                              if (Board[Square] and GOAL)<>0 then
+                                 Exclude(GoalSet__,Cardinal(Board[Square] shr GOAL_BIT_SHIFT_COUNT));
+                              if (Index>1) and (Index<Count) then begin
+                                 Board[Square]:=Board[Square] and (not WALL); {remove the temporary wall from the tunnel square}
+                                 with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do Squares[Square]:=0; {remove the temporary 'wall' timestamp from the tunnel squares currently under investigation}
+                                 end;
+                              end;
+                          end;
+
+                       for Index:=1 to Count do
+                           Board[Squares[Index]]:=Board[Squares[Index]] and (not FLAG_SQUARE_SET); {clear the set member flag for the tunnel squares}
+                       for Index:=2 to Pred(Count) do {avoid finding the same tunnel again when searching from the opposite direction; the end points may be shared with other tunnels}
+                           Board[Squares[Index]]:=Board[Squares[Index]] or FLAG_VISITED_SQUARE;
+                       end;
+                   end;
+                end;
+
+            for SquareNo:=0 to BoardSize do
+                Board[SquareNo]:=Board[SquareNo] and (not (FLAG_VISITED_SQUARE+FLAG_SQUARE_SET+BOX)); {remove all boxes from the board, and clear the flags used by the tunnel calculation}
+
+            Result:=OldCount<DeadlockSets.Count; {'True': created new deadlock sets}
+{
+            if OldCount<Game.DeadlockSets.Count then begin
+               for BoxNo:=1 to Game.BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] or BOX; // put all boxes back on the board for correct deadlock-set capacity calculation
+               while OldCount<Game.DeadlockSets.Count do begin
+                     Inc(OldCount);
+                     Game.ShowDeadlockSetsEnabled:=True;
+                     ShowDeadlockSet(OldCount,Game.DeadlockSets.CenterSquare[OldCount]);
+                     Game.ShowDeadlockSetsEnabled:=False;
+                     Writeln(Game.DeadlockSets.NoProgressDeadlockCheckTimeMS,SPACE,Solver.PushCount,':');
+                     if Odd(Game.DeadlockSets.Count) then
+                        if Odd(OldCount) and (not (dsfIsAnOverflowSet in Game.DeadlockSets.Flags[Pred(OldCount)])) then //Readln
+                        else
+                     else if (not Odd(OldCount)) and (not (dsfIsAnOverflowSet in Game.DeadlockSets.Flags[Pred(OldCount)])) then; // Readln;
+                     end;
+               //Readln;
+               for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); // remove all boxes from the board
+               end;
 }
             end;
-        end; {PatternTypeFrozenGoals.FindDeadlocks.CalculateAreaUnderflowDeadlocks}
+        end; {PatternTypeFrozenGoals.FindDeadlocks.ExpandFreezeDeadlocks}
 
-      begin {'FindDeadlocks'; precondition: if 'IsAFreezingGoalSet__' is 'False' (boxes at the goal squares don't freeze), then the goal set must contain a single goal only}
+      begin {FindDeadlocks}
         with Game do begin
           Result:=False; GoalsInSetCount:=0;
           for GoalNo:=1 to GoalCount do begin
-              GoalSquare          :=GoalPos[GoalNo];
-              OldBoard[GoalSquare]:=Board[GoalSquare]; {keep the original square value for the goal square}
+              GoalSquare               :=GoalPos[GoalNo];
+              OldBoard[GoalSquare]     :=Board[GoalSquare]; {remember the original square value for the goal square}
               if GoalNo in GoalSet__ then begin
-                 Board   [GoalSquare]:=WALL; {put a wall at the goal square}
+                 Board   [GoalSquare]  :=WALL; {put a wall at the goal square}
                  with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do {'CalculateDistanceToNearestBoxStartPositionForAllSquares' which is called further down works with 'Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH]'}
-                   Squares[GoalSquare]:=High(TimeStamp) and (not 1); {temporarily give the goal square the timestamp assigned to walls}
+                   Squares[GoalSquare] :=High(TimeStamp) and (not 1); {temporarily give the goal square the timestamp assigned to walls}
                  Inc(GoalsInSetCount);
                  end;
               end;
 
-          if ((GoalsInSetCount=1) or IsAFreezingGoalSet__) and {the freeze-set deadlock detection only handles A) frozen goal sets, or B) single goal squares requiring a runtime test whether a box at the goal square has frozen}
-             (Solver.SearchLimits.DepthLimit>=0) then begin {'>=0': the search hasn't been terminated}
-             CalculateDistanceToNearestBoxStartPositionForAllSquares(1,BoxCount,False,Distances); {calculate the set of squares that still are reachable from the starting position, now that frozen boxes (represented by walls) have been added to the board}
+          if not (dsfPlayerMustBeOutsideFreezeSet in DeadlockSetCandidate__.Flags) then begin
+             if ((GoalsInSetCount=1) or IsAFreezingGoalSet__) and
+                (Solver.SearchLimits.DepthLimit>=0) then begin {'>=0': the search hasn't been terminated}
+                {this branch of the freeze-set deadlock detection handles only  A) player position independent frozen goal sets, and B) single goal squares requiring a runtime test whether a box is freezing at the goal square}
+                CalculateDistanceToNearestBoxStartPositionForAllSquares(1,BoxCount,False,Distances); {calculate the set of squares that still are reachable from the starting position, now that frozen boxes (represented by walls) have been added to the board}
 
-             UnreachableGoalsCount:=0;
-             for GoalNo:=1 to GoalCount do
-                 if not (GoalNo in GoalSet__) then
-                    if   Distances[GoalPos[GoalNo]]<>INFINITY then {'True': the goal 'GoalNo' is reachable from the starting position}
-                         Dec(Board[GoalPos[GoalNo]],GOAL) {temporarily remove all reachable goals not belonging to the freeze-set}
-                    else Inc(UnreachableGoalsCount); {the goal number 'GoalNo' is not reachable from the starting position (anymore) with boxes frozen at the goals in the set 'GoalSet__'}
+                UnreachableGoalsCount:=0;
+                for GoalNo:=1 to GoalCount do
+                    if not (GoalNo in GoalSet__) then
+                       if   Distances[GoalPos[GoalNo]]<>INFINITY then {'True': the goal 'GoalNo' is reachable from the starting position}
+                            Dec(Board[GoalPos[GoalNo]],GOAL) {temporarily remove all reachable goals not belonging to the freeze-set}
+                       else Inc(UnreachableGoalsCount); {the goal number 'GoalNo' is not reachable from the starting position (anymore) with boxes frozen at the goals in the set 'GoalSet__'}
 
-             if UnreachableGoalsCount<>0 then begin {'True': some goals are not reachable from the starting position with boxes frozen at the goals in the set 'GoalSet__'}
-                CalculateDistanceToNearestGoalForAllSquares(False,Distances); {calculate the set of squares (the "controller-set") from which the unreachable goals can be reached}
+                if UnreachableGoalsCount<>0 then begin {'True': some goals are not reachable from the starting position (anymore) with boxes frozen at the goals in the set 'GoalSet__'}
+                   CalculateDistanceToNearestGoalForAllSquares(False,Distances); {calculate the set of squares (the "controller-set") from which the unreachable goals can be reached}
 
-                if (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
-                   InitializeDeadlockSetCandidate(UnreachableGoalsCount,0,BoardSize) then begin
-                   OldCount:=DeadlockSets.Count;
-                   DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfPlayerMustBeOutsideSet];  {controller-sets "cheat" by having the "dsfPlayerMustBeOutsideSet" flag, thereby bypassing legal push tests in 'IsALegalPush' and 'DoPush'}
-                   for Square:=0 to BoardSize do
-                       if (not IsAWallSquare(Square)) and (Distances[Square]<>INFINITY) then
-                          if   AddSquareToDeadlockSet(Square) then begin {collect the floor squares from which the unreachable goals can be reached}
-                               if (Board[Square] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                               end
-                          else OldCount:=-1; {collecting the squares belonging to the controller-set failed; no new deadlock sets have been registered yet}
+                   if (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
+                      InitializeDeadlockSetCandidate(UnreachableGoalsCount,0,BoardSize) then begin
+                      OldCount:=DeadlockSets.Count;
+                      DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfPlayerMustBeOutsideSet];  {controller-sets "cheat" by having the "dsfPlayerMustBeOutsideSet" flag, thereby bypassing legal push tests in 'IsALegalPush' and 'DoPush'}
+                      for Square:=0 to BoardSize do
+                          if (not IsAWallSquare(Square)) and (Distances[Square]<>INFINITY) then
+                             if   AddSquareToDeadlockSet(Square) then begin {collect the floor squares from which the unreachable goals can be reached}
+                                  if (Board[Square] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                                  end
+                             else OldCount:=-1; {collecting the squares belonging to the controller-set failed; no new deadlock-sets have been registered yet}
 
-                   if   (OldCount=DeadlockSets.Count) and
-                        (DeadlockSetCandidate__.GoalCount=UnreachableGoalsCount) and
-                        CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
-                        if    CreateFreezeSet(GoalsInSetCount,GoalSet__,IsAFreezingGoalSet__,False) then begin {'True': registering the "freeze-set" succeeded}
+                      if   (OldCount=DeadlockSets.Count) and
+                           (DeadlockSetCandidate__.GoalCount=UnreachableGoalsCount) and {filters out this scenario: a freezing box is located at a box starting position and thereby reduces the number of reachable goals from the box starting positions}
+                           CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
+                           if    CreateFreezeSet(GoalsInSetCount,GoalSet__,IsAFreezingGoalSet__,False,0,0,0) then begin {'True': registering the "freeze-set" succeeded}
 {
-                              for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); // remove all boxes from the board
-                              ShowBoard;
-                              for GoalNo:=1 to GoalCount do
-                                  if GoalNo in GoalSet__ then Write(GoalPos[GoalNo],SPACE);
-                              Write('Frozen goal square set ',DeadlockSets.Count);
-                              Readln;
+                                 for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); // remove all boxes from the board
+                                 ShowBoard;
+                                 for GoalNo:=1 to GoalCount do
+                                     if GoalNo in GoalSet__ then Write(GoalPos[GoalNo],SPACE);
+                                 Write('Frozen goal square set ',DeadlockSets.Count);
+                                 Readln;
 }
-                              if (GoalsInSetCount=1) and
-                                 IsAFreezingGoalSet__ and
-                                 (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) then begin
-                                 {the freezing goal square is a corner square like
-                                  this:
+                                 if (GoalsInSetCount=1) and
+                                    IsAFreezingGoalSet__ and
+                                    (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) then begin
+                                    {the freezing goal square is a corner square like
+                                     this:
 
-                                  #. <- freezing goal square
-                                  ##
+                                     #. <- freezing goal square
+                                     ##
 
-                                  some corner goals have two neighboring floor squares
-                                  where at least one of them is a goal, and where
-                                  boxes at these squares cannot escape from the
-                                  corner, like this example:
+                                     some corner goals have two neighboring floor squares
+                                     where at least one of them is a goal, and where
+                                     boxes at these squares cannot escape from the
+                                     corner, like this example:
 
-                                  #*
-                                  #.$ <- goal square surrounded by two boxes
-                                  ###
+                                     #*
+                                     #.$ <- goal square surrounded by two boxes
+                                     ###
 
-                                  in that case, the two neighboring squares can act as
-                                   a freeze-set for the same controller-set as the one
-                                  created for the original freezing goal square;
+                                     in that case, the two neighboring squares can act as
+                                      a freeze-set for the same controller-set as the one
+                                     created for the original freezing goal square;
 
-                                  the following code detects the situation, duplicates
-                                  the controller-set, and makes a new freeze-set
-                                  containing the two neighbor squares;
-                                 }
-                                 GoalNo:=0;
-                                 while (GoalNo<=GoalCount) and (not (GoalNo in GoalSet__)) do Inc(GoalNo); {find the goal number}
-                                 if GoalNo<=GoalCount then begin {sanity check; this should always be true}
-                                    GoalSquare:=GoalPos[GoalNo];
-                                    for Direction:=Low(Direction) to High(Direction) do begin {look for neighboring goal squares}
-                                        Square        :=GoalSquare+SquareOffsetForward[Direction];
-                                        NeighborSquare:=GoalSquare+SquareOffsetForward[NEXT_DIRECTION[Direction]];
-                                        if (((OriginalBoard[Square        ] and GOAL)<>0)
-                                            or
-                                            ((OriginalBoard[NeighborSquare] and GOAL)<>0) {'True': the freezing corner goal square is surrounded by two neighbors where at least one of them is a goal square; caution: assume 4 directions only}
-                                           )
-                                           and
-                                           ((Board[Square                 ] and (WALL+GOAL))= 0)
-                                           and
-                                           ((Board[NeighborSquare         ] and (WALL+GOAL))= 0) {'True': the neighboring squares are both floor squares and not members of the unreachable goal squares}
-                                           and
-                                           IsAWallSquare(GoalSquare       -SquareOffsetForward[Direction])
-                                           and
-                                           IsAWallSquare(GoalSquare       -SquareOffsetForward[NEXT_DIRECTION[Direction]]) {'True': the goal square is really a corner square (a sanity check; this should always be true)}
-                                           and
-                                           IsAWallSquare(Square           +SquareOffsetRight[Direction]) {caution: assumes 4 directions only}
-                                           and
-                                           IsAWallSquare(NeighborSquare   +SquareOffsetLeft[NEXT_DIRECTION[Direction]]) {'True': boxes at the 2 neighboring squares cannot escape from the corner} {caution: assumes 4 directions only}
-                                           and
-                                           (DeadlockSets.Count<MAX_DEADLOCK_SETS-2)
-                                           and
-                                           InitializeDeadlockSetCandidate(UnreachableGoalsCount,0,BoardSize) then begin
-                                           Board[GoalPos[GoalNo]]:=OldBoard[GoalPos[GoalNo]]; {temporarily restore the original board value for the freezing corner goal square}
+                                     the following code detects the situation, duplicates
+                                     the controller-set, and makes a new freeze-set
+                                     containing the two neighbor squares;
+                                    }
+                                    GoalNo:=0;
+                                    while (GoalNo<=GoalCount) and (not (GoalNo in GoalSet__)) do Inc(GoalNo); {find the goal number}
+                                    if GoalNo<=GoalCount then begin {sanity check; this should always be true}
+                                       GoalSquare:=GoalPos[GoalNo];
+                                       for Direction:=Low(Direction) to High(Direction) do begin {look for neighboring goal squares}
+                                           Square        :=GoalSquare+SquareOffsetForward[Direction];
+                                           NeighborSquare:=GoalSquare+SquareOffsetForward[NEXT_DIRECTION[Direction]];
+                                           if (((OldBoard[Square             ] and GOAL)<>0)
+                                               or
+                                               ((OldBoard[NeighborSquare] and GOAL)<>0) {'True': the freezing corner goal square is surrounded by two neighbors where at least one of them is a goal square; caution: assume 4 directions only}
+                                              )
+                                              and
+                                              ((Board[Square                 ] and (WALL+GOAL))= 0)
+                                              and
+                                              ((Board[NeighborSquare         ] and (WALL+GOAL))= 0) {'True': the neighboring squares are both floor squares and not members of the unreachable goal squares}
+                                              and
+                                              IsAWallSquare(GoalSquare       -SquareOffsetForward[Direction])
+                                              and
+                                              IsAWallSquare(GoalSquare       -SquareOffsetForward[NEXT_DIRECTION[Direction]]) {'True': the goal square is really a corner square (a sanity check; this should always be true)}
+                                              and
+                                              IsAWallSquare(Square           +SquareOffsetRight[Direction]) {caution: assumes 4 directions only}
+                                              and
+                                              IsAWallSquare(NeighborSquare   +SquareOffsetLeft[NEXT_DIRECTION[Direction]]) {'True': boxes at the two neighboring squares cannot escape from the corner} {caution: assumes 4 directions only}
+                                              and
+                                              (DeadlockSets.Count<MAX_DEADLOCK_SETS-2)
+                                              and
+                                              InitializeDeadlockSetCandidate(UnreachableGoalsCount,0,BoardSize) then begin
+                                              Board[GoalPos[GoalNo]]:=OldBoard[GoalPos[GoalNo]]; {temporarily restore the original board value for the freezing corner goal square}
 
-                                           i:=GoalNoAtSquare(Square);
-                                           j:=GoalNoAtSquare(NeighborSquare);
+                                              i:=GoalNoAtSquare(Square);
+                                              j:=GoalNoAtSquare(NeighborSquare);
 
-                                           DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfPlayerMustBeOutsideSet];  {controller-sets have the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
-                                           for Square:=0 to BoardSize do
-                                               if (not IsAWallSquare(Square)) and (Distances[Square]<>INFINITY) then
-                                                  if   AddSquareToDeadlockSet(Square) then begin {collect the floor squares from which the unreachable goals can be reached}
-                                                       if (Board[Square] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                                                       end
-                                                  else i:=-Abs(i); {collecting the squares belonging to the controller-set failed; no new deadlock sets have been registered yet}
-                                           if   (i>0) and
-                                                (DeadlockSetCandidate__.GoalCount=UnreachableGoalsCount) and
-                                                CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
-
-                                                if   InitializeDeadlockSetCandidate(1,0,2) then begin
-                                                     DeadlockSetCandidate__.Flags:=[dsfFreezeSet,dsfPlayerMustBeOutsideSet]; {freeze-sets have the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
-                                                     if   AddSquareToDeadlockSet(GoalPos[i]) and
-                                                          AddSquareToDeadlockSet(GoalPos[j]) then begin
-                                                          if (Board[GoalPos[i]] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                                                          if (Board[GoalPos[j]] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
+                                              DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfPlayerMustBeOutsideSet];  {controller-sets have the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
+                                              for Square:=0 to BoardSize do
+                                                  if (not IsAWallSquare(Square)) and (Distances[Square]<>INFINITY) then
+                                                     if   AddSquareToDeadlockSet(Square) then begin {collect the floor squares from which the unreachable goals can be reached}
+                                                          if (Board[Square] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
                                                           end
-                                                     else i:=-Abs(i); {adding the goal squares belonging to the freeze-set failed}
-                                                     if   (i>0) and {'True': all goal squares in the "freeze-set" were successfully registered as members of the set}
-                                                          CommitDeadlockSet(False,False,False,Result) then begin {'True': registering the "freeze-set" succeeded}
+                                                     else i:=-Abs(i); {collecting the squares belonging to the controller-set failed; no new deadlock-sets have been registered yet}
+                                              if   (i>0) and
+                                                   (DeadlockSetCandidate__.GoalCount=UnreachableGoalsCount) and
+                                                   CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
+
+                                                   if   InitializeDeadlockSetCandidate(1,0,2) then begin
+                                                        DeadlockSetCandidate__.Flags:=[dsfFreezeSet,dsfPlayerMustBeOutsideSet]; {freeze-sets have the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
+                                                        if   AddSquareToDeadlockSet(GoalPos[i]) and
+                                                             AddSquareToDeadlockSet(GoalPos[j]) then begin
+                                                             if (Board[GoalPos[i]] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                                                             if (Board[GoalPos[j]] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                                                             end
+                                                        else i:=-Abs(i); {adding the goal squares belonging to the freeze-set failed}
+                                                        if   (i>0) and {'True': all goal squares in the "freeze-set" were successfully registered as members of the set}
+                                                             CommitDeadlockSet(False,False,False,Result) then begin {'True': registering the "freeze-set" succeeded}
 {
-                                                          for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); // remove all boxes from the board
-                                                          ShowBoard;
-                                                          Write(GoalPos[i],SPACE,GoalPos[j],SPACE);
-                                                          Write('Frozen goal square set ',DeadlockSets.Count);
-                                                          Readln;
+                                                             for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); // remove all boxes from the board
+                                                             ShowBoard;
+                                                             Write(GoalPos[i],SPACE,GoalPos[j],SPACE);
+                                                             Write('Frozen goal square set ',DeadlockSets.Count);
+                                                             Readln;
 }
-                                                          end
-                                                     else i:=-Abs(i); {creating the freeze-set failed}
-                                                     end
-                                                else i:=-Abs(i); {creating the freeze-set failed}
+                                                             end
+                                                        else i:=-Abs(i); {creating the freeze-set failed}
+                                                        end
+                                                   else i:=-Abs(i); {creating the freeze-set failed}
 
-                                                if   i<=0 then begin {emit a message to the log file, so the reader won't be confused by the text accompanying the controller-set which refers to a succeeding freeze-set which isn't there}
-                                                     WritelnToLogFile('');
-                                                     WritelnToLogFile(TEXT_CREATE_FREEZE_DEADLOCK_SET_FAILED);
-                                                     end;
-                                                end;
+                                                   if   i<=0 then begin {emit a message to the log file, so the reader won't be confused by the text accompanying the controller-set which refers to a succeeding freeze-set which isn't there}
+                                                        WritelnToLogFile('');
+                                                        WritelnToLogFile(TEXT_CREATE_FREEZE_DEADLOCK_SET_FAILED);
+                                                        end;
+                                                   end;
 
-                                           Board[GoalPos[GoalNo]]:=WALL; {put the wall back at the original freezing goal square}
+                                              Board[GoalPos[GoalNo]]:=WALL; {put the wall back at the original freezing goal square}
+                                              end;
                                            end;
-                                        end;
+                                       end;
                                     end;
                                  end;
-                              end;
-                        end;
+                           end;
 
-                   if OldCount>=0 then {'True': an attempt has been made to create at least one of the deadlock sets in the controller/freeze-set pair}
-                      if   not (Odd(DeadlockSets.Count-OldCount)) then with DeadlockSets do begin {'True': creating both deadlock sets in the controller/freeze-set pair(s) succeeded}
-                           for i:=Succ(OldCount) to DeadlockSets.Count do
-                               CenterSquare[i]:=0;                              {ensure that neither controller-sets nor freeze-sets have a center square; that could cause havoc to some of the "is this a deadlocked corral?" tests}
-                           end
-                      else {creating the controller/freeze-set pair failed; restore the deadlock sets to the old state}
-                           while DeadlockSets.Count>OldCount do begin
-                             DeleteDeadlockSet(DeadlockSets.Count);
-                             end;
+                      if OldCount>=0 then {'True': an attempt has been made to create at least one of the deadlock-sets in the controller/freeze-set pair}
+                         if   not (Odd(DeadlockSets.Count-OldCount)) then with DeadlockSets do begin {'True': creating both deadlock-sets in the controller/freeze-set pair(s) succeeded}
+                              for i:=Succ(OldCount) to DeadlockSets.Count do
+                                  CenterSquare[i]:=0;                              {ensure that neither controller-sets nor freeze-sets have a center square; that could cause havoc to some of the "is this a deadlocked corral?" tests}
+                              end
+                         else {creating the controller/freeze-set pair failed; restore the deadlock-sets to the old state}
+                              while DeadlockSets.Count>OldCount do begin
+                                DeleteDeadlockSet(DeadlockSets.Count);
+                                end;
+                      end;
                    end;
-                end;
 
-             for GoalNo:=1 to GoalCount do
-                 if not (GoalNo in GoalSet__) then begin
-                    GoalSquare:=GoalPos[GoalNo];
-                    Board[GoalSquare]:=Board[GoalSquare] or GOAL; {put goals back on the board, except the ones in the goal freeze-set currently under investigation, i.e., the goals in 'GoalSet__'}
-                    end;
-
-             if IsAFreezingGoalSet__ then begin
-                CalculateDistanceToNearestGoalForAllSquares(False,Distances); {calculate the set of squares from which the not frozen goals can be reached}
-
-                for Square:=0 to BoardSize do {find floor squares from which it's impossible to reach a goal square with the frozen goals on the board}
-                    if IsALegalAndBoxReachableSquare(Square) and {'True': boxes can reach the square on the normal board without the frozen goals}
-                       (Distances[Square]=INFINITY) then begin {'True': with the frozen goals on the board it's impossible to get from this square to a goal, i.e., it's a "dead square"}
-                       for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board so 'IsAFreezingMove' returns the correct result, with only the frozen goals and the "dead square"}
-                       if (not IsAFreezingMove(0,Square,False)) and {'True': a box can be put at the square without freezing}
-                          InitializeDeadlockSetCandidate(GoalsInSetCount,0,BoardSize) then begin {make a deadlock set consisting of the frozen goals + the "dead square"}
-                          for BoxNo :=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board for correct deadlock set capacity calculation}
-                          for GoalNo:=1 to GoalCount do
-                              if GoalNo in GoalSet__ then {'True': the goal is a member of the "controller-set"}
-                                 if AddSquareToDeadlockSet(GoalPos[GoalNo]) and
-                                    ((Board[GoalPos[GoalNo]] and BOX)<>0) then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                          if AddSquareToDeadlockSet(Square) and
-                             ((Board[Square] and BOX)<>0) then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                          if (DeadlockSetCandidate__.Boxes.Count=Succ(GoalsInSetCount)) and {'True': all goal squares in the "controller-set" were successfully registered as members of the set, and so was the unreachable square}
-                             CommitDeadlockSet(False,False,False,Result) then begin
-                             end;
-                          end;
+                for GoalNo:=1 to GoalCount do
+                    if not (GoalNo in GoalSet__) then begin
+                       GoalSquare:=GoalPos[GoalNo];
+                       Board[GoalSquare]:=Board[GoalSquare] or GOAL; {put goals back on the board, except the ones in the goal freeze-set currently under investigation, i.e., the goals in 'GoalSet__'}
                        end;
 
-                CalculateAreaOverflowDeadlocks (GoalsInSetCount,GoalSet__);     {with frozen boxes, there may be areas on the board from where it only is possible to reach a limited number of goals}
-                CalculateAreaUnderflowDeadlocks(GoalsInSetCount,GoalSet__);     {with frozen boxes, there may be areas on the board from where it only is possible to reach a limited number of goals}
-                end
-             else
-                if (GoalsInSetCount=1) and (Position__=nil) then
-                   {this is a single goal square requiring a runtime freeze
-                    test; find deadlocks related to boxes freezing near gate
-                    squares (a gate splits the board in two separate areas);
+                if IsAFreezingGoalSet__ then begin
+                   CalculateDistanceToNearestGoalForAllSquares(False,Distances); {calculate the set of squares from which the not frozen goals can be reached}
 
-                    an example:
-                    ----#
-                    --*-- the square between the walls is a gate square
-                    ----# which splits the board in two disjoint areas
+                   for Square:=0 to BoardSize do {find floor squares from which it's impossible to reach a goal square with the frozen goals on the board}
+                       if IsALegalAndBoxReachableSquare(Square) and {'True': boxes can reach the square on the normal board without the frozen goals}
+                          (Distances[Square]=INFINITY) then begin {'True': with the frozen goals on the board it's impossible to get from this square to a goal, i.e., it's a "dead square"}
+                          for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board so 'IsAFreezingMove' returns the correct result, with only the frozen goals and the "dead square"}
+                          if (not IsAFreezingMove(0,Square,False)) and {'True': a box can be put at the square without freezing}
+                             InitializeDeadlockSetCandidate(GoalsInSetCount,0,BoardSize) then begin {make a deadlock-set consisting of the frozen goals + the "dead square"}
+                             for BoxNo :=1 to Game.BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] or BOX; {put all boxes back on the board for correct deadlock-set capacity calculation}
+                             for GoalNo:=1 to GoalCount do
+                                 if GoalNo in GoalSet__ then {'True': the goal is a member of the "controller-set"}
+                                    if AddSquareToDeadlockSet(GoalPos[GoalNo]) and
+                                       ((Board[GoalPos[GoalNo]] and BOX)<>0) then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                             if AddSquareToDeadlockSet(Square) and
+                                ((Board[Square] and BOX)<>0) then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                             if (DeadlockSetCandidate__.Boxes.Count=Succ(GoalsInSetCount)) and {'True': all goal squares in the "controller-set" were successfully registered as members of the set, and so was the unreachable square}
+                                CommitDeadlockSet(False,False,False,Result) then begin
+                                end;
+                             end;
+                          end;
 
-                    when a box freezes at the goal square "*", then the area
-                    to the right of the gate square must at the most contain
-                    A+B+C boxes, where
-                    A = number of goals to the right of the gate
-                    B = 1 if the square to the right of "*" is a goal, otherwise 0
-                    C = 1 if the gate square is a goal, otherwise 0
-                   }
-                   for GoalNo:=1 to GoalCount do {find the goal set member}
-                       if GoalNo in GoalSet__ then begin
-                          GoalSquare          :=GoalPos[GoalNo];
-                          for Direction:=Low(Direction) to High(Direction) do begin
-                              Distance:=0; Square:=GoalSquare;
-                              DeadlockSetCandidate__.GoalCount:=0;
-                              repeat if IsAGoalSquare(Square) then Inc(DeadlockSetCandidate__.GoalCount);
-                                     NeighborSquare:=Square+SquareOffsetForward[Direction]; {the next square in this direction}
-                                     if   IsAFloorSquare(NeighborSquare) then begin
-                                          if IsAGateSquare(Square) and
-                                             IsAWallSquare(Square+SquareOffsetLeft [Direction]) {only gate squares with walls on both sides can be used here; the player must not be able to get through the gate after pushing a box through the gate}
-                                             and {caution: assumes 4 directions only}
-                                             IsAWallSquare(Square+SquareOffsetRight[Direction])
-                                             then begin
-                                             for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
-                                             Inc(Board[Square],BOX); {put a box at the gate square in order to split the board in two disjoint areas}
+                   OldCount:=DeadlockSets.Count;
+                   CalculateAreaOverflowAndUnderflowDeadlocks(GoalsInSetCount,GoalSet__,0,0,0); {with frozen boxes, there may be areas on the board from where it is only possible to reach a limited number of goals}
 
-                                             PlayerPos:=NeighborSquare; {use 'CalculatePlayersReachableSquares' to find the floor squares on the other side of the gate}
-                                             i:=CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_DO_PUSH);
+                   if (OldCount<DeadlockSets.Count) {'True': new deadlock sets have been created, in particular, a freeze set has been created with boxes freezing at the specified goal squares}
+                      or
+                      (GoalsInSetCount=0) {'True': this is the game starting position; check if there are tunnels with goal squares;}
+                      then begin
+                      {try to make variants of the created freeze deadlocks;
+                       boxes frozen at goal squares may produce new tunnels
+                       with two or more goal squares; pushing two boxes into the
+                       tunnel makes is a blocked tunnel; this may give rise to
+                       new underflow/overflow deadlocks for areas of the board;}
+                      //ExpandFreezeDeadlocks(GoalsInSetCount,0,GoalSet__); {'ExpandFreezeDeadlocks' isn't in production; it's fully implemented, but it doesn't seem worth it in its current incarnation}
+                      end;
+                   end
+                else
+                   if (GoalsInSetCount=1) and (Position__=nil) then
+                      {this is a single goal square requiring a runtime freeze
+                       test; find deadlocks related to boxes freezing near gate
+                       squares (a gate splits the board in two separate areas);
 
-                                             Dec(Board[Square],BOX); {remove the box from the gate square}
+                       an example:
+                       ----#
+                       --*-- the square between the walls is a gate square
+                       ----# which splits the board in two disjoint areas
 
-                                             if i>4 then begin {'True': the area on the other side of the gate square isn't a small degenerated area (the limit is arbitrary)}
-                                                j:=0; {count the number of goal squares on the other side of the gate}
-                                                for i:=1 to GoalCount do with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do
-                                                    if Squares[GoalPos[i]]=TimeStamp then Inc(j);
+                       when a box freezes at the goal square "*", then the area
+                       to the right of the gate square must at the most contain
+                       A+B+C boxes, where
+                       A = number of goals to the right of the gate
+                       B = 1 if the square to the right of "*" is a goal, otherwise 0
+                       C = 1 if the gate square is a goal, otherwise 0
+                      }
+                      for GoalNo:=1 to GoalCount do {find the goal set member}
+                          if GoalNo in GoalSet__ then begin
+                             GoalSquare          :=GoalPos[GoalNo];
+                             for Direction:=Low(Direction) to High(Direction) do begin
+                                 Distance:=0; Square:=GoalSquare;
+                                 DeadlockSetCandidate__.GoalCount:=0;
+                                 repeat if IsAGoalSquare(Square) then Inc(DeadlockSetCandidate__.GoalCount);
+                                        NeighborSquare:=Square+SquareOffsetForward[Direction]; {the next square in this direction}
+                                        if   IsAFloorSquare(NeighborSquare) then begin
+                                             if IsAGateSquare(Square) and
+                                                IsAWallSquare(Square+SquareOffsetLeft [Direction]) {only gate squares with walls on both sides can be used here; the player must not be able to get through the gate after pushing a box through the gate}
+                                                and {caution: assumes 4 directions only}
+                                                IsAWallSquare(Square+SquareOffsetRight[Direction])
+                                                then begin
+                                                for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+                                                Inc(Board[Square],BOX); {put a box at the gate square in order to split the board in two disjoint areas}
 
-                                                if Succ(DeadlockSetCandidate__.GoalCount)+j<GoalCount then begin {'True': there area on the other side of the gate can overflow}
-                                                   if (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
-                                                      InitializeDeadlockSetCandidate(DeadlockSetCandidate__.GoalCount+j,0,BoardSize) then begin
-                                                      OldCount:=DeadlockSets.Count;
-                                                      {controller-sets have the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
-                                                      DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfIsAnOverflowSet,dsfPlayerMustBeOutsideSet];
+                                                PlayerPos:=NeighborSquare; {use 'CalculatePlayersReachableSquares' to find the floor squares on the other side of the gate}
+                                                i:=CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_DO_PUSH);
 
-                                                      for BoxNo:=1 to Game.BoxCount do with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do
-                                                          if (Squares[BoxPos[BoxNo]]=TimeStamp) then
-                                                             Inc(Board[BoxPos[BoxNo]],BOX); {put boxes belonging to the controller set back on the board for correct deadlock set capacity calculation}
-                                                      for i:=0 to BoardSize do with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do
-                                                          if (Squares[i]=TimeStamp) and
-                                                             IsALegalAndBoxReachableSquare(i) then
-                                                             if   AddSquareToDeadlockSet(i) then begin {collect the floor squares on the other side of the gate}
-                                                                  if  (Board[i] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
-                                                                       end
-                                                                  else OldCount:=-1; {collecting the squares belonging to the controller-set failed; no new deadlock sets have been registered yet}
+                                                Dec(Board[Square],BOX); {remove the box from the gate square}
 
-                                                      if   (OldCount=DeadlockSets.Count) and
-                                                           CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
-                                                           if    CreateFreezeSet(GoalsInSetCount,GoalSet__,IsAFreezingGoalSet__,True) then begin {'True': registering the "freeze-set" succeeded}
+                                                if i>4 then begin {'True': the area on the other side of the gate square isn't a small degenerated area (the limit is arbitrary)}
+                                                   j:=0; {count the number of goal squares on the other side of the gate}
+                                                   for i:=1 to GoalCount do with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do
+                                                       if Squares[GoalPos[i]]=TimeStamp then Inc(j);
+
+                                                   if Succ(DeadlockSetCandidate__.GoalCount)+j<GoalCount then begin {'True': there area on the other side of the gate can overflow}
+                                                      if (DeadlockSets.Count<MAX_DEADLOCK_SETS-2) and
+                                                         InitializeDeadlockSetCandidate(DeadlockSetCandidate__.GoalCount+j,0,BoardSize) then begin
+                                                         OldCount:=DeadlockSets.Count;
+                                                         {controller-sets have the "dsfPlayerMustBeOutsideSet" flag to avoid some legal push tests in 'IsALegalPush' and 'DoPush'}
+                                                         DeadlockSetCandidate__.Flags:=[dsfControllerSet,dsfIsAnOverflowSet,dsfPlayerMustBeOutsideSet];
+
+                                                         for BoxNo:=1 to Game.BoxCount do with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do
+                                                             if (Squares[BoxPos[BoxNo]]=TimeStamp) then
+                                                                Inc(Board[BoxPos[BoxNo]],BOX); {put boxes belonging to the controller set back on the board for correct deadlock-set capacity calculation}
+                                                         for i:=0 to BoardSize do with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do
+                                                             if (Squares[i]=TimeStamp) and
+                                                                IsALegalAndBoxReachableSquare(i) then
+                                                                if   AddSquareToDeadlockSet(i) then begin {collect the floor squares on the other side of the gate}
+                                                                     if  (Board[i] and BOX)<>0 then Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
+                                                                          end
+                                                                     else OldCount:=-1; {collecting the squares belonging to the controller-set failed; no new deadlock-sets have been registered yet}
+
+                                                         if   (OldCount=DeadlockSets.Count) and
+                                                              CommitDeadlockSet(False,False,False,Result) then begin {'True': creating the "controller-set" succeeded}
+                                                              if    CreateFreezeSet(GoalsInSetCount,GoalSet__,IsAFreezingGoalSet__,True,0,0,0) then begin {'True': registering the "freeze-set" succeeded}
 {
-                                                                 ShowBoard;
-                                                                 Write('New gate square deadlock set: ',DeadlockSets.SequenceNo,' Capacity: ',DeadlockSets.Capacity[Pred(DeadlockSets.Count)]);
-                                                                 Readln;
+                                                                    ShowBoard;
+                                                                    Write('New gate square deadlock-set: ',DeadlockSets.SequenceNo,' Capacity: ',DeadlockSets.Capacity[Pred(DeadlockSets.Count)]);
+                                                                    Readln;
 }
-                                                                 end
-                                                           else {creating the controller/freeze-set pair failed; restore the deadlock sets to the old state}
-                                                                while DeadlockSets.Count>OldCount do begin
-                                                                      DeleteDeadlockSet(DeadlockSets.Count);
-                                                                      end;
-                                                           end;
-                                                      //for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+                                                                    end
+                                                              else {creating the controller/freeze-set pair failed; restore the deadlock-sets to the old state}
+                                                                   while DeadlockSets.Count>OldCount do begin
+                                                                         DeleteDeadlockSet(DeadlockSets.Count);
+                                                                         end;
+                                                              end;
+                                                         //for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+                                                         end;
                                                       end;
                                                    end;
-                                                end;
 
-                                             Distance:=4; {a gate square has been found; exit the 'repeat' loop}
+                                                Distance:=4; {a gate square has been found; exit the 'repeat' loop}
+                                                end
+                                             else begin {advance to the next square in this direction}
+                                                Inc(Distance); Square:=NeighborSquare;
+                                                end;
                                              end
-                                          else begin {advance to the next square in this direction}
-                                             Inc(Distance); Square:=NeighborSquare;
-                                             end;
-                                          end
-                                     else Distance:=4; {the next neighbor square isn't a floor square; exit the 'repeat' loop}
-                              until  Distance>2; {until the distance between the investigated goal square and the searched for gate square exceeds the goal's influence on the gate}
-                              end;
-                          end;
-             end;
+                                        else Distance:=4; {the next neighbor square isn't a floor square; exit the 'repeat' loop}
+                                 until  Distance>2; {until the distance between the investigated goal square and the searched for gate square exceeds the goal's influence on the gate}
+                                 end;
+                             end;
+                end;
+             end
+          else {dsfPlayerMustBeOutsideFreezeSet in DeadlockSetCandidate__.Flags}
+             with DeadlockSetCandidate__ do begin
+               {a freeze-situation with all boxes at goal squares, where the freezing condition depends on the player position}
+               //OldCount:=DeadlockSets.Count;
+               SquaresOutsideFenceCount:=SquaresOutsideFence.Count; {'SquaresOutsideFence' contains all floor squares in the player's access area next to the frozen goal squares}
+               CalculateAreaOverflowAndUnderflowDeadlocks(GoalsInSetCount,GoalSet__,SquaresOutsideFenceCount,0,0); {with frozen boxes, there may be areas on the board from where it is only possible to reach a limited number of goals}
+               //if OldCount<DeadlockSets.Count then {'True': new deadlock sets have been created, in particular, a freeze set has been created with boxes freezing at the specified goal squares}
+               //   {try to make variants of the created freeze deadlocks}
+               //   ExpandFreezeDeadlocks(GoalsInSetCount,SquaresOutsideFenceCount,GoalSet__); {'ExpandFreezeDeadlocks' isn't in production; it's fully implemented, but it doesn't seem worth it in its current incarnation}
+               end;
 
           for GoalNo:=1 to GoalCount do
               if GoalNo in GoalSet__ then begin
@@ -10300,10 +11805,9 @@ XX              of them is a box on a non-goal square. The non-wall
 
           for BoxNo:=1 to BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
           end;
-
       end; {PatternTypeFrozenGoals.FindDeadlocks}
 
-    begin {pattern types "Frozen goals block access to other goals" and "Frozen goals block paths from squares to goals"}
+    begin {PatternTypeFrozenGoals: pattern types "Frozen goals block access to other goals" and "Frozen goals block paths from squares to goals"}
       with Game do begin
         {$IFDEF CONSOLE_APPLICATION}
           if ShowDeadlockSetsEnabled then Writeln('Frozen goals blocking access to other goals');
@@ -10312,9 +11816,12 @@ XX              of them is a box on a non-goal square. The non-wall
         //OldCount:=DeadlockSets.Count;
         //ShowDeadlockSetsEnabled:=True;
         OldPlayerPosition:=PlayerPos; MovePlayer(0); {remove player from the board}
-        for BoxNo:=1 to Game.BoxCount do Dec(Board[BoxPos[BoxNo]],BOX); {remove all boxes from the board}
+        for BoxNo:=1 to Game.BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not BOX); {remove all boxes from the board}
+        Board[0]:=WALL; {repair board square 0 in case some of the boxes temporarily have been removed from the board by setting their positions to zero}
 
-        if Position__=nil then begin {'True': this is the initialization of the game}
+        if Position__=nil then begin {'True': precalculate deadlock-sets, called once during level initialization}
+           if not (dsfPlayerMustBeOutsideFreezeSet in DeadlockSetCandidate__.Flags) then
+              FindDeadlocks([],True); {find freeze deadlocks based on tunnels with goal squares}
            for GoalNo:=1 to GoalCount do begin
                GoalSquare:=GoalPos[GoalNo];
                Dec(Board[GoalSquare],GOAL); {remove the goal from the board}
@@ -10330,7 +11837,7 @@ XX              of them is a box on a non-goal square. The non-wall
                    if IsAGoalSquare(NeighborSquare) then
                       if IsAFreezingMove(0,NeighborSquare,False) then           {'True': there are two freezing neighbor goal squares}
                          FindDeadlocks([GoalNo,GoalNoAtSquare(NeighborSquare)],True)
-                      else if (Direction=Low(Direction)) and
+                      else if (Direction=dUp) and
                               IsAGoalSquare(GoalSquare    +SquareOffsetLeft[Direction]) and
                               IsAGoalSquare(NeighborSquare+SquareOffsetLeft[Direction]) then begin {'True': there is a 2x2 squares goal set on the board; check if freeze-deadlocks can be based on this goal set}
                               Board[NeighborSquare]:=Board[NeighborSquare] or BOX;
@@ -10359,15 +11866,18 @@ XX              of them is a box on a non-goal square. The non-wall
            for BoxNo:=1 to DeadlockSetCandidate__.Boxes.Count do begin
                GoalNo:=DeadlockSetCandidate__.Boxes.Squares[BoxNo];             {caution: despite the field name 'Squares' they really contain goal numbers and not square numbers here}
                Include(GoalSet,GoalNo);                                         {collect the frozen goal numbers}
-               Inc(Board[GoalPos[GoalNo]],BOX);                                 {temporarily put boxes at the listed goal squares so it can be tested whether boxes at this goal square set are frozen, independent of boxes at other squares}
+               Inc(Board[GoalPos[GoalNo]],BOX);                                 {temporarily put boxes at the listed goal squares so it can be tested whether boxes at this goal square set are frozen, independently of boxes at other squares}
                end;
 
            for BoxNo:=1 to DeadlockSetCandidate__.Boxes.Count do begin          {test whether boxes at this goal square set are frozen, independent of boxes at other squares}
                GoalNo:=DeadlockSetCandidate__.Boxes.Squares[BoxNo];             {caution: despite the field name 'Squares' they really contain goal numbers and not square numbers here}
                if not IsAFreezingMove(0,GoalPos[GoalNo],True) then begin
-                  IsAFreezingGoalSet:=False; break;
+                  IsAFreezingGoalSet:=False;
+                  break;
                   end;
                end;
+           //if IsAFreezingGoalSet then                                         {'True': the freeze situation doesn't depend on the player position}
+           //   Exclude(DeadlockSetCandidate__.Flags,dsfPlayerMustBeOutsideFreezeSet);
 
            for BoxNo:=1 to DeadlockSetCandidate__.Boxes.Count do begin          {remove the boxes which temporarily have been placed at goal squares in the set}
                GoalNo:=DeadlockSetCandidate__.Boxes.Squares[BoxNo];             {caution: despite the field name 'Squares' they really contain goal numbers and not square numbers here}
@@ -10379,10 +11889,12 @@ XX              of them is a box on a non-goal square. The non-wall
            if OldCount<>DeadlockSets.Count then Game.DeadlockSets.NewDynamicDeadlockSets:=True;
            end;
 
-        for BoxNo:=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board}
+        for BoxNo:=1 to Game.BoxCount do Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] or BOX; {put all boxes back on the board}
+        Board[0]:=WALL; {repair board square 0 in case some of the boxes temporarily have been removed from the board by setting their positions to zero}
         MovePlayer(OldPlayerPosition); {restore player position}
 
-        //if Game.DeadlockSets.NewDynamicDeadlockSets then begin
+        //ShowDeadlockSetsEnabled:=False;
+        //if OldCount<>Game.DeadlockSets.Count then begin
         //   ShowBoard;
         //   Write('New frozen goals deadlocks: ',DeadlockSets.Count-OldCount);
         //   Readln;
@@ -10412,7 +11924,7 @@ XX              of them is a box on a non-goal square. The non-wall
                         Inc(Count); Numbers[Count]:=GoalNo;
                         end;
 
-               if (GoalNumberSet.Count>0) and (GoalNumberSet.Count<GoalCount div 2) and {'div 2': since each square only can be a member of one overflow area, it may be an advantage to focus on small unreachable goal groups}
+               if (GoalNumberSet.Count>0) and (GoalNumberSet.Count<GoalCount div 2) and {'div 2': since each square can only be a member of one overflow area here, it may be an advantage to focus on small unreachable goal groups}
                   InitializeDeadlockSetCandidate(GoalCount-GoalNumberSet.Count,0,Game.BoardSize) then begin
 
                   EmptySquaresCount:=0;
@@ -10427,16 +11939,16 @@ XX              of them is a box on a non-goal square. The non-wall
                                   else
                              else break; {quick-and-dirty exit the 'for' loop as soon as it has been established that the unreachable goals from the square 'Index' isn't a subset of the unreachable goals from 'Square'}
                          if OK then begin {'True': the unreachable goals from the square number 'Index' is a subset of the unreachable goals from 'Square'}
-                            if AddSquareToDeadlockSet(Index) then {collect the floor squares having a sub-set or the same set of reachable goals as 'Square'}
+                            if AddSquareToDeadlockSet(Index) then {collect the floor squares having a subset or the same set of reachable goals as 'Square'}
                                if   (Board[Index] and BOX)=0 then
                                     Inc(EmptySquaresCount)                {count the number of empty squares in the square set}
-                               else Dec(DeadlockSetCandidate__.Capacity); {update the deadlock set capacity}
+                               else Dec(DeadlockSetCandidate__.Capacity); {update the deadlock-set capacity}
                             end;
                          end;
                   DeadlockSetCandidate__.Capacity:=Min(DeadlockSetCandidate__.Capacity,EmptySquaresCount); {'Min': the set cannot contain more boxes than the number of squares in the set}
 
                   if CommitDeadlockSet(False,False,False,Result) then with DeadlockSetCandidate__.Boxes do begin
-                     for Index:=1 to Count do Visited[Squares[Index]]:=True; {each square can only be a member of one overflow area}
+                     for Index:=1 to Count do Visited[Squares[Index]]:=True; {each square can only be a member of one overflow area here}
 
                      s:='Boxes at these squares cannot reach the goal(s):';
                      for GoalNo:=1 to GoalNumberSet.Count do begin
@@ -10459,7 +11971,7 @@ XX              of them is a box on a non-goal square. The non-wall
         if Game.ShowDeadlockSetsEnabled then Writeln('Fenced-in area');
       {$ENDIF}
       Result:=True; SetNo:=0;
-      while SetNo<Game.DeadlockSets.Count do with Game.DeadlockSets do begin    {for each deadlock set}
+      while SetNo<Game.DeadlockSets.Count do with Game.DeadlockSets do begin    {for each deadlock-set}
         Inc(SetNo);
         if CenterSquare[SetNo]<>0 then begin
            LoadCandidateFromSet(SetNo);
@@ -10482,7 +11994,7 @@ XX              of them is a box on a non-goal square. The non-wall
 }
            for i:=1 to DeadlockSetCandidate__.Boxes.Count do begin
                j:=0;
-               ExpandDeadlockSet(i,True,False,j,Result);                        {try to expand the deadlock set}
+               ExpandDeadlockSet(i,True,False,j,Result);                        {try to expand the deadlock-set}
                end;
            end;
         end;
@@ -10490,25 +12002,27 @@ XX              of them is a box on a non-goal square. The non-wall
 
   begin {CalculateDeadlockSets}
     with Game do begin
-      DeadlockSets.ControllerAndFreezeSetPairsEnabled:=False; {'False: 'IsALegalPush' ignores controller/freeze-set deadlock pairs while deadlock sets are being calculated}
-      if Position__=nil then begin // precalculate deadlock sets (called once during level initialization);}
+      if Position__=nil then begin // precalculate deadlock-sets, called once during level initialization}
          Result:=True;  {if 'Result' is 'False', then the start position is a deadlock}
          TimeMS:=GetTimeMS;
+         DeadlockSets.ControllerAndFreezeSetPairsEnabled:=False; {'False: 'IsALegalPush' ignores controller/freeze-set deadlock pairs while deadlock-sets are being calculated}
          DeadlockSets.Count:=0;
          DeadlockSets.PrecalculatedSetsCount:=0; DeadlockSets.DynamicSetsCount:=0;
          DeadlockSets.PathDeadlockCount:=0; DeadlockSets.NewDynamicDeadlockSets:=False;
          DeadlockSets.SequenceNo:=0; DeadlockSets.RedundantSetsCount:=0;
          DeadlockSets.SquaresOutsideFenceTop:=0;
          FillChar(DeadlockSets.SquareSetCount,SizeOf(DeadlockSets.SquareSetCount),0);
+         FillChar(DeadlockSets.SquareSetNumbers,SizeOf(DeadlockSets.SquareSetNumbers),0);
          FillChar(DeadlockSets.Statistics,SizeOf(DeadlockSets.Statistics),0);
          FillChar(DeadlockSets.SquaresOutsideFence,SizeOf(DeadlockSets.SquaresOutsideFence),0);
-         DeadlockSets.Flags[0]:=[]; {so the first deadlock set cannot be mistaken for a freeze-set in a controller/freeze-set pair}
+         DeadlockSets.Flags[0]:=[]; {so the first deadlock-set cannot be mistaken for a freeze-set in a controller/freeze-set pair}
          FillChar(Corners,SizeOf(Corners),0);
-         if LogFile.FileName<>'' then WriteBoardToLogFile(Game.Title);
-         {initialize memory allocation of per square deadlock set numbers}
+         if LogFile.FileName<>'' then WriteBoardToLogFile(Game.Title,0);
+         {initialize memory allocation of per square deadlock-set numbers}
          Positions.Count := 0;
-         Positions.EndOfPositions := Positions.HashBuckets; {drop precalculated deadlocks from a previouos level, if any}
-         Positions.Capacity := ( Cardinal( Positions.EndOfPositions ) - Cardinal( Positions.Positions ) ) div SizeOf( TPosition );
+         Positions.FreeList := nil;
+         Positions.HighWaterMark := Positions.HashBuckets; {drop precalculated deadlocks from a previous level, if any}
+         Positions.Capacity := ( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TPosition );
          Positions.UninitializedItemCount := Integer( Positions.Capacity );
 
 //       ShowDeadlockSetsEnabled:=True;
@@ -10529,7 +12043,7 @@ XX              of them is a box on a non-goal square. The non-wall
          Result:=Result and PatternTypeClosedEdgeWithoutGoals;
 
          {now that simple illegal squares are marked, it's possible to calculate squares reachable for at least 1 box}
-         CalculateBoxReachableSquaresForAllBoxes;
+         Game.BoxReachableSquaresCount:=CalculateBoxReachableSquaresForAllBoxes;
 
          {gate squares can be calculated now that the reachable squares have been calculated}
          CalculateGateSquares;
@@ -10599,59 +12113,69 @@ XX              of them is a box on a non-goal square. The non-wall
                   DeleteDeadlockSet(i); Inc(RedundantSetsCount);
                   end;
 
-         {protect the per square deadlock set numbers from overwriting by items in the transposition table by setting the 'EndOfPositions' high water mark}
-         Positions.EndOfPositions                   := Pointer( Addr( Positions.Positions^[ Positions.Capacity ] ) );
-         {remember the per square deadlock set numbers for the precalculated deadlock sets}
-         DeadlockSets.PrecalculatedSquareSetNumbers := DeadlockSets.SquareSetNumbers;
+         DeadlockSets.ControllerAndFreezeSetPairsEnabled:=True; {'True': 'IsALegalPush' takes controller/freeze-set deadlock pairs into account}
 
          Game.DeadlockSets.TimeMS:=CalculateElapsedTimeMS(TimeMS,GetTimeMS);
 
          if DeadlockSets.RedundantSetsCount<>0 then with DeadlockSets do begin
             WritelnToLogFile('');
-            WritelnToLogFile('Redundant precalculated deadlock sets:');
+            WritelnToLogFile('Redundant precalculated deadlock-sets:');
             for i:=1 to Pred(Count) do
                 for j:=Succ(SequenceNumbers[i]) to Pred(SequenceNumbers[Succ(i)]) do
                     WritelnToLogFile(SPACE+SPACE+IntToStr(j));
             end;
 
          WritelnToLogFile('');
-         WritelnToLogFile('Active precalculated deadlock sets: '+IntToStr(Game.DeadlockSets.Count));
+         WritelnToLogFile('Active precalculated deadlock-sets: '+IntToStr(Game.DeadlockSets.Count));
          if Game.DeadlockSets.RedundantSetsCount<>0 then
-            WritelnToLogFile('Redundant precalculated deadlock sets: '+IntToStr(Game.DeadlockSets.RedundantSetsCount));
+            WritelnToLogFile('Redundant precalculated deadlock-sets: '+IntToStr(Game.DeadlockSets.RedundantSetsCount));
          //WritelnToLogFile('Time: '+IntToStr(Game.DeadlockSets.TimeMS)+' milli seconds');
          WritelnToLogFile('');
          end
-      else with DeadlockSetCandidate__ do begin {'Position__<>nil': check if the candidate in 'DeadlockSetCandidate__' is a valid deadlock set}
+      else with DeadlockSetCandidate__ do begin {'Position__<>nil': check if the candidate in 'DeadlockSetCandidate__' is a valid deadlock-set}
          TimeMS:=GetTimeMS;
+
+         OriginalControllerAndFreezeSetPairsEnabled:=DeadlockSets.ControllerAndFreezeSetPairsEnabled;
+         DeadlockSets.ControllerAndFreezeSetPairsEnabled:=False; {'False: 'IsALegalPush' ignores controller/freeze-set deadlock pairs while deadlock-sets are being calculated}
+
+         //if Game.HashValue=5153218260479194713 then
+         //   Game.Board[MAX_BOARD_SIZE]:=FLOOR;
 
          if   not (dsfTestFrozenGoalsSet in Flags) then
               Result:=CommitDynamicallyCreatedDeadlockSet(Position__)<>0
          else Result:=PatternTypeFrozenGoals;
 
+         //Game.Board[MAX_BOARD_SIZE]:=WALL;
+
+         DeadlockSets.ControllerAndFreezeSetPairsEnabled:=OriginalControllerAndFreezeSetPairsEnabled; {if 'True': 'IsALegalPush' takes controller/freeze-set deadlock pairs into account}
+
          TimeMS:=CalculateElapsedTimeMS(TimeMS,GetTimeMS);
-         if   Game.DeadlockSets.TimeMS<=High(Game.DeadlockSets.TimeMS)-TimeMS then {in practice, this may be a silly test, but the program strives for correct behavior (in most cases)}
+         if   Game.DeadlockSets.TimeMS<=High(Game.DeadlockSets.TimeMS)-TimeMS then {in practice, this test may be unnecessary, but the program generally strives for correctness}
               Game.DeadlockSets.TimeMS:=Game.DeadlockSets.TimeMS+TimeMS
          else Game.DeadlockSets.TimeMS:=High(Game.DeadlockSets.TimeMS);
+         //if TimeMS >= 1000 then begin
+         //   ShowBoard;
+         //   Writeln( 'Deadlock calculation time: ', TimeMS );
+         //   end;
          end;
 
-      DeadlockSets.ControllerAndFreezeSetPairsEnabled:=True; {'True': 'IsALegalPush' takes controller/freeze-set deadlock pairs into account}
       if (Position__=nil) or Result then FlushLogFile; {flush the log-file, if any}
       end;
 end; {CalculateDeadlockSets}
 
 function  CheckDeadlockSetCapacities:Boolean;
 var SetNo:Integer;
-begin {a sanity check of the capacity calculation; the test is far from being 100% accurate; it's just a simple check that the capacities don't exceed the number of squares}
+begin {a sanity check of the deadlock sets capacity calculation; the test is far from being 100% accurate; it's just a simple check that the capacities don't exceed the number of squares}
   Result:=True;
   with Game.DeadlockSets do
     for SetNo:=1 to Count do
         if Result then begin
-           Result:=((Capacity[SetNo]>=-1) {for legal positions independent of the player position, capacity >=0, and for a deadlocked position, capacity = -1}
-                    or
-                    ((Flags[SetNo]*[dsfControllerSet,dsfFreezeSet,dsfPlayerMustBeOutsideSet])<>[]) {special capacity rules apply to controller sets, freeze sets and sets dependent of the player position, hence, these sets are not considered here}
-                   )
-                   and
-                   (Capacity[SetNo]<=SquaresCount[SetNo]);
+           Result:=((Flags[SetNo]*[dsfControllerSet,dsfFreezeSet,dsfPlayerMustBeOutsideSet])<>[]) {special capacity rules apply to controller sets, freeze sets and sets which depend on the player position, hence, these sets are not considered here}
+                   or
+                   ((Capacity[SetNo]>=-1) {for legal positions independent of the player position, capacity >=0, and for a deadlocked position, capacity = -1}
+                    and
+                    (Capacity[SetNo]<=SquaresCount[SetNo])
+                   );
 
            if not Result then begin
               {$IFDEF CONSOLE_APPLICATION}
@@ -10660,7 +12184,7 @@ begin {a sanity check of the capacity calculation; the test is far from being 10
                 ShowBoard;
                 Game.ShowDeadlockSetsEnabled:=True;
                 ShowDeadlockSet(SetNo,CenterSquare[SetNo]);
-                Readln;
+                //Readln;
               {$ELSE}
                 //Msg(TEXT_INTERNAL_ERROR+
                 //    ': Deadlock set '+IntToStr(SequenceNo[SetNo])+' ('+IntToStr(SetNo)+
@@ -10668,7 +12192,6 @@ begin {a sanity check of the capacity calculation; the test is far from being 10
                 //    TEXT_APPLICATION_TITLE);
               {$ENDIF}
               end;
-
            end;
 end;
 
@@ -10690,7 +12213,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     {any immovable boxes and unreachable boxes and goals are converted to
      walls here, before taking the 'original level' snaphot; otherwise, more
      work would be required at the end of a solver/optimizer search to map box
-     numbers back and forth;
+     numbers from one version of the level to another;
     }
       Result:=0;
       if Game.PlayerPos<>0 then with Game do with Solver.SearchStates[0].PlayersReachableSquares do begin
@@ -10719,7 +12242,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
          end;
     end;
 
-  begin {'FindBoxesAndGoalsAndPlayer'; precondition: the board has been initialized by calling 'InitializeBoard'}
+  begin {FindBoxesAndGoalsAndPlayer; precondition: the board has been initialized by calling 'InitializeBoard'}
     Result:=True;
     LoopCount:=0;
     with Game do begin
@@ -10851,13 +12374,15 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
   end; {FillTubes}
 
   function  CalculatePackingOrder:Boolean;
-    type TPackingOrderType=(poNone,poPullBoxes,poPullBoxesToStartingPositionsWithoutParking,poPullBoxesToStartingPositionsWithParking); {item order cannot change}
-         TSquareBoxSets=array[0..MAX_BOARD_SIZE] of TBoxSetWithCount; {for each square, the box starting positions/goals that are pull/push-reachable from the square}
-    var  ConnectedGoalsCount,GoalGroupCount,SquareGoalNo,SquareValue:Integer;
-         //BoxGoalSets:TBoxGoalSets;
-         OriginalSearchLimits:TSearchLimits;
-         GoalGroupNumbers:TBoxNumbers; {for each goal, the group of connected goals to which it belongs}
-         //SquareBoxSets,SquareGoalSets:TSquareBoxSets;
+    const END_GAME_PHASE_PERCENT=85; {in the final phase of the calculation, boxes are allowed to be removed from the board via a box starting position even if the distance to the starting position is below the normal distance threshold}
+          LARGE_BOARD_AREA_THRESHOLD_PERCENT=25;
+    type  TPackingOrderType=(poNone,poPullBoxes,poPullBoxesToStartingPositionsWithoutParking,poPullBoxesToStartingPositionsWithParking); {item order cannot change}
+          TSquareBoxSets=array[0..MAX_BOARD_SIZE] of TBoxSetWithCount; {for each square, the box starting positions/goals that are pull/push-reachable from the square}
+    var   EndGamePhaseBoxCountLimit,ConnectedGoalsCount,GoalGroupCount,LargeBoardAreaThreshold,SquareGoalNo,SquareValue:Integer;
+          BestGoalSetCount,BestGoalSetRemainingBoxesCount:Integer;
+          OriginalSearchLimits:TSearchLimits;
+          GoalGroupNumbers:TBoxNumbers; {for each goal, the group of connected goals to which it belongs}
+          BestGoalSetNumbers:TBoxNumbers;
 
     procedure CalculateConnectedGoals(var ConnectedGoalsCount__,GoalGroupCount__:Integer; var GoalGroupNumbers__:TBoxNumbers);
     var Count,GoalNo:Integer;
@@ -10867,20 +12392,20 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
       var NeighborSquare:Integer; Direction:TDirection;
       begin {precondition: 'GoalSquare__' is an unvisited goal}
         Result:=Succ(VisitedCount__); {'+1': 'GoalSquare__' is a not previously visited goal}
-        GoalGroupNumbers__[Game.Board[GoalSquare__] shr GOAL_BIT_SHIFT_COUNT]:=GroupNo__; {assign the current group number to this goal number; 'shr': the goal numbers are stored in the high-order bits of the board square values}
+        GoalGroupNumbers__[Cardinal(Game.Board[GoalSquare__] shr GOAL_BIT_SHIFT_COUNT)]:=GroupNo__; {assign the current group number to this goal number; 'shr': the goal numbers are stored in the high-order bits of the board square values}
         for Direction:=Low(Direction) to High(Direction) do begin
             NeighborSquare:=GoalSquare__+Game.SquareOffsetForward[Direction];
             if ((Game.Board[NeighborSquare] and GOAL)<>0)                       {'True': the neighbor square is also a goal}
                and
-               (GoalGroupNumbers__[Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT]=0) {'True': the neighbor goal hasn't been assigned a group number yet}
+               (GoalGroupNumbers__[Cardinal(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]=0) {'True': the neighbor goal hasn't been assigned a group number yet}
                and
                (
                 {the goal has an unvisited neighboring goal in this direction
                  but the squares along the other axis is also taken into
                  account; this improves the program's ability to distinguish
                  between true goal-rooms and goals that just happen to be
-                 loosely connected, say, by being on a line in the middle of the
-                 board;
+                 loosely connected, for instance by being on a line in the
+                 middle of the board;
 
                  only goals with a neighboring goal or a neighboring wall on the
                  other axis are counted as connected goals, counting towards the
@@ -10904,7 +12429,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
         for GoalNo:=1 to GoalCount do
             if GoalGroupNumbers__[GoalNo]=0 then begin {'True': the goal square hasn't been visited before, meaning it hasn't been assigned a group number yet}
                Inc(GoalGroupCount__);
-               Count:=FindConnectedGoals(GoalPos[GoalNo],0,GoalGroupCount__,GoalGroupNumbers__); {'FindConnectedGoals()' returns the number of goals connected to 'GoalNo' (including the goal 'GoalNo')}
+               Count:=FindConnectedGoals(GoalPos[GoalNo],0,GoalGroupCount__,GoalGroupNumbers__); {'FindConnectedGoals()' returns the number of goals connected to 'GoalNo', including the goal 'GoalNo' itself}
                if Count>1 then Inc(ConnectedGoalsCount__,Count);
                end;
         end;
@@ -10923,7 +12448,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
         for Square:=0 to BoardSize do
             if ((Board[Square] and (WALL+FLAG_BOX_REACHABLE_SQUARE+FLAG_ILLEGAL_BOX_SQUARE))=FLAG_BOX_REACHABLE_SQUARE) and {'True': the square isn't a wall, and it's a legal box-reachable square}
                (Solver.SearchLimits.DepthLimit>=0) then begin {'True': the solver hasn't been terminated}
-               CalculateBoxPullOrPushDistances(Square,SEARCH_STATE_INDEX_DO_PUSH,False,False,False,Distances);
+               CalculateBoxPullOrPushDistances(Square,SEARCH_STATE_INDEX_DO_PUSH,False,False,False,False,Distances);
 
                for GoalNo:=1 to BoxCount do
                    if MinimumDistanceToSquare(GoalPos[GoalNo],Distances)<>INFINITY then with SquareGoalSets__[Square] do begin
@@ -10969,16 +12494,17 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculatePackingOrder.CalculateReachableGoalsFromEachBoxStartPosition}
 
     procedure PackingOrderToText(var BoardAsTextLines__:TBoardAsTextLines);
-    const PADDING_CHARACTER='-'; // CH_FLOOR;
-    var Col,Row,SetNo,Square,SquareValue:Integer; s:String;
+    const PADDING_CHARACTER='-'; // UNDERSCORE; // CH_FLOOR;
+    var Col,Row,SetNo,Square,SquareGoalNo,SquareValue:Integer; s:String;
     begin
       for Row:=1 to Game.BoardHeight do with Game do begin
           BoardAsTextLines__[Row]:='';
           for Col:=1 to BoardWidth do begin
               Square:=ColRowToSquare(Col,Row);
               SquareValue:=Board[Square];
+              SquareGoalNo:=Cardinal(SquareValue shr GOAL_BIT_SHIFT_COUNT);
               if ((SquareValue and GOAL)=0) and
-                 ( SquareValue shr GOAL_BIT_SHIFT_COUNT=0) then begin
+                 ( SquareGoalNo=0) then begin
                  if   (SquareValue and WALL)<>0 then
                       s:=CH_WALL
                  else s:=PADDING_CHARACTER;
@@ -10986,8 +12512,12 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                  end
               else with Solver.PackingOrder do begin
                  s:='';
-                 SetNo:=Solver.PackingOrder.GoalSetNo[SquareValue shr GOAL_BIT_SHIFT_COUNT];
-                 if SetNo<>0 then s:=IntToStr(SetNo); //s:=IntToStr(Succ( SetCount ) - SetNo);
+                 SetNo:=Solver.PackingOrder.GoalSetNo[SquareGoalNo];
+                 if SetNo<>0 then begin
+                    s:=IntToStr(SetNo); //s:=IntToStr(Succ( SetCount ) - SetNo);
+                    if NextGoalAtSameSquare[SquareGoalNo]<>SquareGoalNo then
+                       s:=ASTERISK+s; // s:=ASTERISK+IntToStr(NextGoalAtSameSquare[SetNo]);
+                    end;
                  while Length(s)<3 do s:=PADDING_CHARACTER+s;
                  BoardAsTextLines__[Row]:=BoardAsTextLines__[Row]+s;
                  end;
@@ -10996,15 +12526,35 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculatePackingOrder.PackingOrderToText}
 
     procedure ShowPackingOrder;
-    var Row:Integer; BoardAsTextLines:TBoardAsTextLines;
+    var {Index,}Row:Integer; BoardAsTextLines:TBoardAsTextLines;
     begin
       with Game do begin
+        Writeln;
         Write(TEXT_PACKING_ORDER);
         if Solver.PackingOrder.SetCount<=0 then Write(' (none)');
         Writeln;
         PackingOrderToText(BoardAsTextLines);
         for Row:=1 to BoardHeight do
             Writeln(BoardAsTextLines[Row]);
+{
+        with Solver.PackingOrder do begin
+          Writeln;
+          for Index:=1 to GoalAndParkingSquareCount do
+              Write(ParkedBoxDestinationGoalSetNo[Index]:3);
+          Writeln;
+          end;
+}
+{
+        Writeln;
+        with Solver.PackingOrder do
+          for Index:=1 to GoalAndParkingSquareCount do
+              Write( GoalSetNo[SetMembers[Index]], ':',
+                     TotalReachableBoxStartingPositionsCounts[SetMembers[Index]],':',
+                     TotalReachableSquaresCounts[SetMembers[Index]],
+                     SPACE,SPACE );
+        Writeln;
+        Writeln('Box-reachable squares: ', Game.BoxReachableSquaresCount);
+}
         Msg('','');
         end;
     end; {CalculatePackingOrder.ShowPackingOrder}
@@ -11018,24 +12568,168 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           //Distances:TSquareDirectionArrayOfInteger;
           BoardAsTextLines:TBoardAsTextLines;
 
+      procedure PutBoxesOnBoard;
+      var BoxNo,Square:Integer;
+      begin {puts all boxes on the board; some of them may already be there}
+        for BoxNo:=1 to Game.BoxCount do begin
+            Square:=Game.BoxPos[BoxNo];
+            Game.Board[Square]:=Game.Board[Square] or BOX;
+            end;
+      end;
+
+      procedure RemoveBoxesFromBoard;
+      var BoxNo:Integer;
+      begin {removes all boxes from the board; some of them may already have been removed}
+        for BoxNo:=1 to Game.BoxCount do begin
+            Square:=Game.BoxPos[BoxNo];
+            Game.Board[Square]:=Game.Board[Square] and (not BOX);
+            end;
+      end;
+
+      procedure PutBoxesAtGoals;
+      var GoalNo,Square:Integer;
+      begin {puts boxes at all goal squares on the board; some of them may already be there}
+        for GoalNo:=1 to Game.GoalCount do begin
+            Square:=Game.GoalPos[GoalNo];
+            Game.Board[Square]:=Game.Board[Square] or BOX;
+            end;
+      end;
+
+      procedure RemoveBoxesFromGoals;
+      var GoalNo:Integer;
+      begin {removes boxes from all goal squares on the board; some of them may already have been removed}
+        for GoalNo:=1 to Game.GoalCount do begin
+            Square:=Game.GoalPos[GoalNo];
+            Game.Board[Square]:=Game.Board[Square] and (not BOX);
+            end;
+      end;
+
+      procedure PutBoxSquareSetOnBoard( OldCount__:Integer; var BoxSquareSet__:TBoxSquareSet);
+      var Square:Integer;
+      begin {puts removed boxes back on the board; some of them may already be there}
+        while OldCount__<BoxSquareSet__.Count do begin
+          Square:=BoxSquareSet__.Squares[BoxSquareSet__.Count];
+          Game.Board[Square]:=Game.Board[Square] or BOX;
+          Dec(BoxSquareSet__.Count);
+          end;
+      end;
+
+      procedure RemoveBoxSquareSetFromBoard( OldCount__:Integer; var BoxSquareSet__:TBoxSquareSet);
+      var Square:Integer;
+      begin {removes boxes from the board; some of them may already have been removed}
+        while OldCount__<BoxSquareSet__.Count do begin
+          Square:=BoxSquareSet__.Squares[BoxSquareSet__.Count];
+          Game.Board[Square]:=Game.Board[Square] and (not BOX);
+          Dec(BoxSquareSet__.Count);
+          end;
+      end;
+
       function  Search(PlayerPos__:Integer; PackingOrderType__:TPackingOrderType):Boolean;
       const MAX_PARKED_TWICE_GOAL_COUNT=2;
       var   BoxNo,GoalNo{,NewBoxPos,NewPlayerPos},PullCount:Integer;
+            Count,Index,SetMembersCount,RemainingBoxesCount,RemainingRealGoalsCount:Integer;
             ParkedTwiceGoalSet,SeenBoxStartPositions:TBoxSetWithCount;
             ReachableBoxStartingPositions:array[0..MAX_BOX_COUNT] of TBoxSetWithCount;
             UsedBoxStartPositions:TBoxNumbers;
+            GoalParkingSquares:TBoxSquares;
 
-        function  Search__(SetCount__,SetMembersCount__,GoalAndParkingSquareCount__,
-                           RemainingBoxCount__,PlayerPos__:Integer;
-                           SeenBoxStartPositions__:TBoxSetWithCount;
+        function  Search__(Depth__,SetCount__,SetMembersCount__,GoalAndParkingSquareCount__,RemainingBoxesCount__,RemainingRealGoalsCount__,PlayerPos__:Integer;
+                           SeenBoxStartPositions__:TBoxSetWithCount; {note that it's a value parameter, not a variable parameter}
                            var ParkedTwiceGoalSet__:TBoxSetWithCount;
-                           var UsedBoxStartPositions__:TBoxNumbers):Boolean; {this is a depth-first recursive search where 'SetCount__' depicts the search depth}
+                           var UsedBoxStartPositions__:TBoxNumbers):Boolean; {this is a depth-first recursive search where 'Depth__' is the search depth}
         type TParkingSpace =record Distance,Square,PlayerPositionAfterParking:Integer; end;
              TParkingSpaces=array[0..2] of TParkingSpace; {elements 1..2 are the true parking spaces; element 0 is only used as a local variable}
-        var  BoxNo,BoxStartPosIndex,Count,GoalNo,i,Index,j,NeighborFloorCount,
-             NewPlayerPos,NewSetNo,Square,NeighborSquare:Integer;
+        var  BoxNo,BoxStartPosIndex,GoalCandidate,GoalNo,i,Index,NewPlayerPos,OldGoalRemovalCandidatesCount,Square,
+             TotalReachableBoxStartingPositionsCount,
+             TotalReachableSquaresCount:Integer;
              Direction:TDirection;
-             ParkingSpaces:TParkingSpaces; TestedGoalsSet:TGoalSet;
+             ParkingSpaces:TParkingSpaces;
+             GoalParkingCandidates,GoalRemovalCandidates:TBoxNumberSet;
+             GoalRemovalCandidatesBoxStartPositions:TBoxNumbers;
+             TestedGoalsSet:TGoalSet;
+
+          function  PostProcessPackingOrder:Boolean;
+
+            function  CalculateFreezeDeadlocks: Boolean;
+            const FROZEN_GOALS_PATTERN_THRESHOLD = 4;
+            var   GoalNo, Index, Index2, Square, NeighborSquare, OldCount, OldPlayerPos : Integer;
+                  Found : Boolean;
+                  Direction : TDirection;
+                  DeadlockSetCandidate : TDeadlockSetCandidate;
+                  APosition : TPosition;
+            begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.PostProcessPackingOrder.CalculateFreezeDeadlocks}
+                  {creates freeze deadlocks based on the packing order}
+              with Game do with Solver.PackingOrder do begin
+                Result          := False;
+                OldPlayerPos    := Game.PlayerPos;
+                RemoveBoxesFromGoals;
+
+                for Index       := GoalAndParkingSquareCount downto 1 do begin
+                    GoalNo      := SetMembers[ Index ];
+                    if GoalNo   <= GoalCount then begin                         {'True': a real goal square, not a parking square}
+                       Square   := GoalPos[ GoalNo ];
+                       Found    := False;
+                       if IsAFreezingMove( 0, Square, True) then
+                          for Direction := Low( Direction ) to High( Direction ) do begin
+                              NeighborSquare := Square + SquareOffsetForward[ Direction ];
+                              if IsABoxSquare( NeighborSquare ) and ( not IsAFreezingMove( 0, NeighborSquare, True ) ) then {'True': the neighbor box, which has been filled earlier in the packing order hasn't frozen yet}
+                                 Found := True;                                 {freezing a box at the current goal square gives rise to a new freeze situation on the board}
+                              end;
+
+                       Board[ Square ] := Board[ Square ] or BOX;               {put box on board}
+
+                       //ShowBoard; Writeln(Ord(Found),SPACE,GoalNo,SPACE,Game.DeadlockSets.SequenceNo); Readln;
+
+                       if Found then begin                                      {'True':  a box freezing at the current goal square gives rise to a new freeze situation on the board}
+                          DeadlockSetCandidate.Boxes.Count := 0;
+                          DeadlockSetCandidate.Boxes.Squares[ 0 ] := 0;
+                          for Index2 := Index  to GoalAndParkingSquareCount do begin
+                              GoalNo := SetMembers[ Index2 ];
+                              if ( GoalNo <= GoalCount ) and IsAFreezingMove(0, GoalPos[ GoalNo ], True ) then with DeadlockSetCandidate.Boxes do begin
+                                 Inc( Count ); Squares[ Count ] := GoalNo;      {caution: despite the field name 'Squares', the squares really contain goal numbers and not square numbers here}
+                                 end;
+                              end;
+                          if DeadlockSetCandidate.Boxes.Count >=FROZEN_GOALS_PATTERN_THRESHOLD then begin
+                             RemoveBoxesFromGoals;
+                             PutBoxesOnBoard;
+                             MovePlayer( OldPlayerPos );                        {restore player position}
+                             DeadlockSetCandidate.Flags := [ dsfTestFrozenGoalsSet ]; {with this flag only, 'Boxes' is the only used deadlock-set candidate information, hence, the other fields don't need to be filled}
+                             OldCount      := DeadlockSets.Count;
+                             //ShowBoard; Write('>'); Readln;
+                             CalculateDeadlockSets( PPosition( Addr( APosition ) ), DeadlockSetCandidate );
+                             Result        := Result or ( OldCount <> DeadlockSets.Count ); {'True': new deadlock-sets have been created by this function}
+{
+                             if ( OldCount <> DeadlockSets.Count ) then begin
+                                Game.ShowDeadlockSetsEnabled := True;
+                                for Index2 := Succ( OldCount ) to DeadlockSets.Count do
+                                    ShowDeadlockSet( Index2, 0 );
+                                Game.ShowDeadlockSetsEnabled := False;
+                                Readln;
+                                end;
+}
+                             RemoveBoxesFromBoard;
+                             for Index2    := Index to GoalAndParkingSquareCount do begin
+                                 GoalNo    := SetMembers[ Index2 ];
+                                 if GoalNo <= GoalCount then
+                                    Inc( Board[ GoalPos[ GoalNo ] ], BOX );     {put boxes on the board again}
+                                 end;
+                             end;
+                          end;
+                       end;
+                    end;
+
+                RemoveBoxesFromGoals;
+                MovePlayer( OldPlayerPos );                                     {restore player position}
+                end;
+            end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.PostProcessPackingOrder.CalculateFreezeDeadlocks}
+
+          begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.PostprocessPackingOrder}
+                {performs post-processing of the calculated packing order}
+            with Game do with Solver.PackingOrder do begin
+              Result:=True;
+              CalculateFreezeDeadlocks;                                         {calculate freeze deadlocks based on the packing order}
+              end;
+          end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.PostprocessPackingOrder}
 
           procedure ShowUnusedBoxStartingPositions;
           var BoxNo,StartBoxPosition:Integer;
@@ -11050,15 +12744,20 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
             Writeln;
           end;
 
-          function  FindGoalCandidateForParking(SearchDepth__:Integer; const TestedGoalsSet__:TGoalSet; const ParkedTwiceGoalSet__:TBoxSetWithCount; var GoalNo__:Integer; var ParkingSpaces__:TParkingSpaces):Integer;
+          function  FindGoalCandidateForParking(SearchDepth__:Integer;
+                                                const TestedGoalsSet__:TGoalSet; const ParkedTwiceGoalSet__:TBoxSetWithCount;
+                                                var GoalNo__:Integer;
+                                                var ParkingSpaces__:TParkingSpaces):Integer;
           {returns the number of found parking spaces, i.e., 0..2}
           var GoalNo,ParkingSpacesCount,Square:Integer;
               IsACornerGoalSquare:Boolean;
               Direction:TDirection;
               ParkingSpaces:TParkingSpaces;
 
-            function  CanPullBoxToParkingSquare(GoalNo__:Integer; var ParkingSpaces__:TParkingSpaces):Integer; {returns the number of found parking spaces, i.e., 0..2}
-            const SEARCH_STATE_INDEX=SEARCH_STATE_INDEX_SCRATCHPAD_1; {index for calculating the player's reachable squares; 'Solver.SearchStates' must be freely available for the chosen index}
+            function  CanPullBoxToParkingSquare(GoalNo__:Integer;
+                                                UsePlayerPosition__:Boolean;
+                                                var ParkingSpaces__:TParkingSpaces):Integer; {returns the number of found parking spaces, i.e., 0..2}
+            const SEARCH_STATE_INDEX=SEARCH_STATE_INDEX_SCRATCHPAD_1; {index for calculating the player's reachable squares; 'Solver.SearchStates' must be freely available for the selected index}
             var   BoxSquare,{Col,Row,}Distance,
                   OldPlayerPosition,Square:Integer;
                   Direction{,d}:TDirection;
@@ -11081,11 +12780,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                 ParkingSpaces__[1].Square:=0; ParkingSpaces__[2].Square:=0;
 
                 BoxSquare:=GoalPos[GoalNo__];
-                CalculateBoxPullOrPushDistances(BoxSquare,SEARCH_STATE_INDEX,False,True,False,BoxPullSquareDirectionDistances);
-                {the 'True' parameter: the player's current position matters
-                 when the initial legal pulls are generated;
-                 otherwise all pullable boxes would be considered;
-                }
+                CalculateBoxPullOrPushDistances(BoxSquare,SEARCH_STATE_INDEX,False,UsePlayerPosition__,False,False,BoxPullSquareDirectionDistances);
 
                 OldPlayerPosition:=PlayerPos;
                 Dec(Board[BoxSquare],BOX); {temporarily remove the box from the square}
@@ -11136,9 +12831,10 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                          Inc(Square);
                          if ((Board[Square]
                               and
-                              (FLAG_BOX_REACHABLE_SQUARE+FLAG_ILLEGAL_BOX_SQUARE+FLAG_VISITED_SQUARE+
+                              (FLAG_BOX_REACHABLE_SQUARE+FLAG_ILLEGAL_BOX_SQUARE //+FLAG_VISITED_SQUARE+
                                +
-                               FLAG_GATE_SQUARE+DIRECTION_TO_TUNNEL_FLAGS)) {gate squares and 'do not stop here' tunnel squares are avoided}
+                               {//FLAG_DOOR_SQUARE +                            don't avoid door squares; there are many puzzles which require parking at door squares}
+                               FLAG_GATE_SQUARE+DIRECTION_TO_TUNNEL_FLAGS))     {avoid gate squares and 'do not stop here' tunnel squares}
                              =
                              FLAG_BOX_REACHABLE_SQUARE
                             )
@@ -11156,7 +12852,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                               (Square<>ParkingSpaces__[1].Square)               {'True': the square is different from the best parking square counting push-back distance}
                              )
                              or
-                             ((Result=2) {'2': search for a secondary parking square, with maximum Manhattan distance between box square and parking square, using Manhattan distance between primary and secondary parking square as tiebreaker}
+                             ((Result=2) {'2': search for a secondary parking square, with maximum Manhattan distance between box square and parking square, using Manhattan distance between primary and secondary parking square as Tiebreaker}
                               and
                               (ManhattanDistance(Square,BoxSquare)=ParkingSpaces__[2].Distance)
                               and {'True': the square is farther away from the primary parking space than the existing secondary parking space}
@@ -11169,20 +12865,21 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                             then
                             {'Square' is a parking square candidate; check that
                              the pusher can get back to where it came from if
-                             this square is used as parking square; this is the
-                             criteria used for selecting a parking square;
+                             this square is selected as parking square; this is
+                             a heuristic criterion for accepting the parking
+                             square candidate;
                             }
                             for Direction:=Low(Direction) to High(Direction) do
                                 if (Square<=BoardSize) and
                                    (BoxPullSquareDirectionDistances[Square,Direction]<>INFINITY) then begin
-                                   Inc(Board[Square],BOX); {put the box on the square}
+                                   Inc(Board[Square],BOX);                      {put the box on the square}
 
                                    ParkingSpaces__[0].PlayerPositionAfterParking:=Square+SquareOffsetForward[Direction]; {uses 'ParkingSpaces__[0]' as a temporary variable}
                                    MovePlayer(ParkingSpaces__[0].PlayerPositionAfterParking);  {move the player next to the box}
 
                                    CalculatePlayersReachableSquares(SEARCH_STATE_INDEX);
 
-                                   Dec(Board[Square],BOX); {remove the box from the square again}
+                                   Dec(Board[Square],BOX);                      {remove the box from the square again}
 
                                    if PlayersReachableSquares.Squares[BoxSquare]=PlayersReachableSquares.TimeStamp then begin
                                       {the pusher can get back to where it came
@@ -11198,9 +12895,9 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                    end;
                          end;
 
-                       if Square=BoardSize then                                    {'True': no parking square was found with the currently tested distance}
-                          if      Result=0 then Dec(ParkingSpaces__[1].Distance)   {prepare for the next round if no square was found with the currently tested parking distance}
-                          else if Result=1 then Dec(ParkingSpaces__[2].Distance);  {prepare for the next round if no square was found with the currently tested parking distance}
+                       if Square=BoardSize then                                   {'True': no parking square was found with the currently tested distance}
+                          if      Result=0 then Dec(ParkingSpaces__[1].Distance)  {prepare for the next round if no square was found with the currently tested parking distance}
+                          else if Result=1 then Dec(ParkingSpaces__[2].Distance); {prepare for the next round if no square was found with the currently tested parking distance}
                 until  (Result=2) {until two parking square candidates have been found, or until all parking distances have been tested}
                        or
                        (ParkingSpaces__[1].Distance<=0)
@@ -11213,7 +12910,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
             end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.FindGoalCandidateForParking.CanPullBoxToParkingSquare}
 
           begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.FindGoalCandidateForParking}
-                {precondition: the player's reachable squares have been calculated by calling 'CalculatePlayersReachableSquares(SearchDepth__)', i.e., with index 'SearchDepth__'}
+                {precondition: the player's reachable squares have been calculated by calling 'CalculatePlayersReachableSquares(SearchDepth__)', i.e., with given index 'SearchDepth__'}
             with Game do with Solver.PackingOrder do with Solver.SearchStates[SearchDepth__] do begin
               Result:=0;
               ParkingSpaces__[1].Distance:=-1;
@@ -11223,7 +12920,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                   if (GoalSetNo[GoalNo]=0) and                                  {'True': the goal hasn't been assigned a packing order set number yet}
                      (not (GoalNo in TestedGoalsSet__)) and                     {'True': the box hasn't used its chance for parking}
                      ((Board[Square] and BOX)<>0) and                           {'True': there is a box at the goal square (a sanity check; it should always be true)}
-                     ((GoalNo<=GoalCount)
+                     ((GoalNo<=GoalCount)                                       {'True': this is a real goal, not a parking space}
                       or
                       ((ParkedTwiceGoalSet__.Count<MAX_PARKED_TWICE_GOAL_COUNT) {'True': the maximum number of parked-twice boxes hasn't been exceeded}
                        and
@@ -11244,7 +12941,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                              if ((Board[Square+SquareOffsetForward[Direction]] and (BOX+WALL+FLAG_BOX_REACHABLE_SQUARE))=FLAG_BOX_REACHABLE_SQUARE) and {'True': the neighbor square is an empty floor square, and it's legal to put a box there}
                                 (PlayersReachableSquares.Squares[Square+2*SquareOffsetForward[Direction]]=PlayersReachableSquares.TimeStamp) then begin {'True': the player can reach the 'pull-from' square in this direction}
 
-                                ParkingSpacesCount:=CanPullBoxToParkingSquare(GoalNo,ParkingSpaces);
+                                ParkingSpacesCount:=CanPullBoxToParkingSquare(GoalNo,True,ParkingSpaces);
 
                                 if (ParkingSpacesCount>=1) and {'True': 1 or 2 parking squares for the box at the goal square have been found}
                                    (( ParkingSpaces[1].Distance>ParkingSpaces__[1].Distance) {'True': this is the first or a new highest parking distance}
@@ -11252,10 +12949,10 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                     ((ParkingSpaces[1].Distance=ParkingSpaces__[1].Distance)
                                      and
                                      {prefer parking goals taken from the middle
-                                      of the board instead of parking goals from
+                                      of the board instead of goals taken from
                                       corner squares; a corner goal doesn't
                                       block as many squares as a goal in the
-                                      middle of the board
+                                      middle of the board;
                                      }
                                      (not IsACornerGoalSquare)
                                     )
@@ -11265,7 +12962,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                    GoalNo__                  :=GoalNo;          {remember the best found parking candidate}
                                    ParkingSpaces__           :=ParkingSpaces;   {keep the best found parking squares}
                                    end;
-                                Square:=0;                                      {'0': the square has been processed; break out of the 'for each direction' loop}
+                                Square:=0;                                      {'0': the square has been processed; exit the 'for each direction' loop}
                                 end;
                              end
                           else break;                                           {quick-and-dirty exit the 'for' loop as soon as it has been established that the player can pull the box away from the goal square}
@@ -11286,17 +12983,24 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
               end;
           end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.FindGoalCandidateForParking}
 
-          function  CanPullBoxToStartingPosition(GoalNo__:Integer; var NewBoxStartPosIndex__,NewPlayerPos__,PullCount__:Integer; var ReachableBoxStartingPositions__:TBoxSetWithCount):Boolean;
-          const END_GAME_PHASE_PERCENT=85; {in the final phase of the calculation, boxes are allowed to be removed from the board via a box starting position even if the distance to the starting position is below the normal distance threshold}
-                MINIMUM_DISTANCE_BETWEEN_BOX_AND_REMOVAL_SQUARE=3;  {Manhattan distance threshold; allowing a box to be removed from the board using a too close starting square may make it easier to remove the remaining boxes than it really is}
+          function  CanPullBoxToStartingPosition(GoalNo__:Integer;
+                                                 var NewBoxStartPosIndex__,NewPlayerPos__,PullCount__,TotalReachableBoxStartingPositionsCount__,TotalReachableSquaresCount__:Integer;
+                                                 var ReachableBoxStartingPositions__:TBoxSetWithCount):Boolean; {'ReachableBoxStartingPositions__': box starting positions not yet used for removing a box from the board}
+          const MINIMUM_DISTANCE_BETWEEN_BOX_AND_REMOVAL_SQUARE=3;  {Manhattan distance threshold; if a box is removed from the board by using a too close starting square, then removal of the remaining boxes may look easier than it really is}
                 SEARCH_STATE_INDEX=SEARCH_STATE_INDEX_SCRATCHPAD_1; {index for calculating the player's reachable squares; 'Solver.SearchStates' must be freely available for the chosen index}
           var   BoxNo,GoalNo,GoalSquare,MaxGoalBoxEdgeCount,MinGoalBoxEdgeCount,OldPlayerPosition,StartBoxPosition,LastReachableBoxStartingPositionIndex:Integer;
                 Direction:TDirection; Distances:TSquareDirectionArrayOfInteger;
           begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.CanPullBoxToStartingPosition}
             with Game do with Solver.PackingOrder do with Solver.SearchStates[SEARCH_STATE_INDEX] do begin
               Result:=False;
+              NewBoxStartPosIndex__:=0;
+              NewPlayerPos__:=0;
+              PullCount__:=0;
+              TotalReachableBoxStartingPositionsCount__:=0;
+
               GoalSquare:=GoalPos[GoalNo__];
-              CalculateBoxPullOrPushDistances(GoalSquare,SEARCH_STATE_INDEX,False,True,False,Distances); {the 'True' parameter: the player's current position matters when the initial legal pulls are generated}
+              TotalReachableSquaresCount__:=
+                CalculateBoxPullOrPushDistances(GoalSquare,SEARCH_STATE_INDEX,False,True,False,True,Distances); {the first 'True' parameter: the player's current position matters when the initial legal pulls are generated}
               OldPlayerPosition:=PlayerPos;
               Dec(Board[GoalSquare],BOX); {temporarily remove the box from the square}
 
@@ -11304,17 +13008,23 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
               ReachableBoxStartingPositions__.Count:=0;
               MaxGoalBoxEdgeCount:=-1;
 
+              //if (GoalNo__>Game.GoalCount) and (GoalAndParkingSquareCount__=26) then begin
+              //   ShowBoard;
+              //   Writeln(GoalNo__,SPACE, SquareToColRowAsText(GoalPos[GoalNo__]));
+              //   Readln;
+              //   end;
+
               {the following search for a target box starting position is a
                greedy search, selecting the not yet used box starting position
                which leaves the most chances open for the remaining goals when
-               they are assigned a box starting position later;
+               they later are assigned a box starting position;
               }
               for BoxNo:=1 to Game.BoxCount do begin
                   StartBoxPosition:=BoxPos[BoxNo];
                   if ((Board[StartBoxPosition] and FLAG_VISITED_SQUARE)=0) {'True': the box starting position hasn't been used for removing another box}
                      and
                      ((ManhattanDistance(StartBoxPosition,GoalSquare)
-                       >= {'True': the box and the removal square aren't too close; otherwise, if it's a tightly packed goal room then using this square for removal could make the removal of the remaining boxes more easy than it really is}
+                       >= {'True': the box and the removal square aren't too close; otherwise, if it's a tightly packed goal room then using this square for removal could make the removal of the remaining boxes easier than it really is}
                        MINIMUM_DISTANCE_BETWEEN_BOX_AND_REMOVAL_SQUARE
                       )
                       or
@@ -11323,8 +13033,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                        (GoalNo__<=GoalCount) {'True': it's a goal square and not a parking space}
                       )
                       or
-//                    (SetMembersCount__>=Pred(GoalAndParkingSquareCount__)) {'True': this is the last box}
-                      (SetMembersCount__>=((END_GAME_PHASE_PERCENT*GoalAndParkingSquareCount__) div 100)) {'True': most of the boxes, including the parked boxes, have been removed from the board}
+                      (RemainingBoxesCount__<=EndGamePhaseBoxCountLimit) {'True': most of the boxes, including parked boxes, have been removed from the board}
                      ) then begin
                      MinGoalBoxEdgeCount:=High(MinGoalBoxEdgeCount);
                      if StartBoxPosition<>GoalSquare then begin
@@ -11336,18 +13045,21 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                      ReachableBoxStartingPositions__.BoxSet:=[];
                                   Inc(ReachableBoxStartingPositions__.Count);
                                   Include( ReachableBoxStartingPositions__.BoxSet,BoxNo);
+                                  Inc(TotalReachableBoxStartingPositionsCount__);
                                   end;
                                {check if the pusher after pulling the box to
                                 this box starting position can get back to
-                                where it came from;
-                                this is the heuristic criteria for accepting
-                                this original box square as target for the pull;
+                                where it came from; this is the heuristic
+                                criterion for accepting the box starting square
+                                as target for the pull;
                                }
                                Inc(Board[StartBoxPosition],BOX); {temporarily move the box to the original box square under investigation}
                                PlayerPos:=StartBoxPosition+SquareOffsetForward[Direction]; {place the player accordingly, next to the box}
                                CalculatePlayersReachableSquares(SEARCH_STATE_INDEX);
                                Dec(Board[StartBoxPosition],BOX); {remove the box from the board again}
-                               if (PlayersReachableSquares.Squares[OldPlayerPosition]=PlayersReachableSquares.TimeStamp) {'True': the pusher can get back to where it came from; this is a heuristic used for using the target square}
+                               if (PlayersReachableSquares.Squares[OldPlayerPosition]=PlayersReachableSquares.TimeStamp) {'True': the pusher can get back to where it came from; this is a heuristic used for selecting the target square}
+                                  //or
+                                  //(OldPlayerPosition=StartBoxPosition)        {'True': the player happens to be located at the targeted box starting position}
                                   or
                                   (SetMembersCount__>=Pred(GoalAndParkingSquareCount__)) {'True': this is the last box; ignore the player position after the pull}
                                   then begin
@@ -11380,12 +13092,23 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                            MaxGoalBoxEdgeCount  :=MinGoalBoxEdgeCount; {remember the best score}
                            PullCount__          :=0;
                            end;
+
                         LastReachableBoxStartingPositionIndex:=BoxNo;
                         if ReachableBoxStartingPositions__.Count=0 then {'True': this is the first found box starting position; initialize the box set}
                            ReachableBoxStartingPositions__.BoxSet:=[];
                         Inc(ReachableBoxStartingPositions__.Count);
                         Include( ReachableBoxStartingPositions__.BoxSet,BoxNo);
+                        Inc(TotalReachableBoxStartingPositionsCount__);
                         end;
+                     end
+                  else begin {this box starting position is not a candidate for removing the box at the given goal}
+                     for Direction:=Low(Direction) to High(Direction) do
+                         if (Abs(Distances[StartBoxPosition,Direction])<>INFINITY) then {'True': the box at the given goal can be pulled to this box starting position}
+                            if BoxNo<>LastReachableBoxStartingPositionIndex then begin {count the total number of reachable box starting positions}
+                               LastReachableBoxStartingPositionIndex:=BoxNo;
+                               Inc(TotalReachableBoxStartingPositionsCount__);
+                               break; {quick-and-dirty exit loop when the box starting position has been counted}
+                               end;
                      end;
                   end;
 
@@ -11405,52 +13128,100 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                    end;
           end;
 
+          procedure AddGoalRemovalCandidate(GoalNo__,BoxStartPosIndex__:Integer);
+          var Index:Integer;
+          begin
+            with Game do with Solver.PackingOrder do begin
+              Inc(GoalRemovalCandidates.Count);
+              GoalRemovalCandidates.Numbers[GoalRemovalCandidates.Count]:=GoalNo__;
+              GoalSetNo[GoalNo__]:=SetCount__;                                  {tentatively assign a packing order set number to the goal}
+              GoalRemovalCandidatesBoxStartPositions[GoalRemovalCandidates.Count]:=BoxStartPosIndex__;    {collect the used box starting position numbers locally for this recursive call to 'Search__'}
+              UsedBoxStartPositions__[SetMembersCount__+GoalRemovalCandidates.Count]:=BoxStartPosIndex__; {collect the used box starting position numbers globally for passing values to recursive calls of 'Search__'}
+              if PackingOrderType__>=poPullBoxesToStartingPositionsWithoutParking then begin
+                 Board[BoxPos[BoxStartPosIndex]]:=Board[BoxPos[BoxStartPosIndex]] or FLAG_VISITED_SQUARE; {mark the box starting position as 'used'}
+                 for Index:=1 to GoalAndParkingSquareCount__ do with GoalBoxSets[Index] do {update the number of remaining unused box starting positions for all boxes on the board, i.e., boxes at goals and parking squares}
+                     if BoxStartPosIndex__ in BoxSet then Dec(Count);
+                 end;
+              if GoalNo__<=GoalCount then
+                 Dec(RemainingRealGoalsCount__);
+              end;
+          end;
+
+          procedure ClearRemovalCandidateSet;
+          var BoxStartPosIndex,GoalNo,Index:Integer;
+          begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.ClearRemovalCandidateSet}
+            with Game do with Solver.PackingOrder do
+              while GoalRemovalCandidates.Count>0 do begin
+                GoalNo:=GoalRemovalCandidates.Numbers[GoalRemovalCandidates.Count];
+                BoxStartPosIndex:=GoalRemovalCandidatesBoxStartPositions[GoalRemovalCandidates.Count];
+                Dec(GoalRemovalCandidates.Count);
+                GoalSetNo[GoalNo]:=0;                                           {clear the tentatively assigned packing order set number for the goal}
+                if PackingOrderType__>=poPullBoxesToStartingPositionsWithoutParking then begin
+                   Board[BoxPos[BoxStartPosIndex]]:=Board[BoxPos[BoxStartPosIndex]] and (not FLAG_VISITED_SQUARE); {clear the 'used' mark for the box starting position}
+                   for Index:=1 to GoalAndParkingSquareCount__ do with GoalBoxSets[Index] do {update the number of remaining unused box starting positions for all boxes on the board, i.e., boxes at goals and parking squares}
+                       if BoxStartPosIndex in BoxSet then Inc(Count);
+                   end;
+                if GoalNo<=GoalCount then
+                   Inc(RemainingRealGoalsCount__);
+                end;
+          end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.ClearRemovalCandidateSet}
+
         begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__}
-          {the search function is a recursive depth-first search; each
-           successful invocation performs one of these operations:
+          {the search function is a recursive depth-first search;
+           each successful call performs one of these operations:
            1. removes the set of boxes that can be pulled to box starting positions, which haven't been used for that purpose earlier,
            or
-           2. moves one box from a goal square to a parking square
+           2. moves one box from a target square (a goal square or a parking square) to a parking square
           }
-          Result:=RemainingBoxCount__=0;                                        {'True': all boxes have been removed from the board}
+          Result:=RemainingBoxesCount__=0;                                      {'True': all boxes have been removed from the board}
 
           if not Result then begin                                              {'True': some boxes haven't been removed from the board yet}
-             if SetCount__<=MAX_HISTORY_BOX_MOVES then                          {'True': the maximum search depth hasn't been exceeded ('SetCount__' matches the recursion depth}
+             if SetCount__<=MAX_HISTORY_BOX_MOVES then                          {'True': the maximum search depth hasn't been exceeded}
                 with Game do with Solver.PackingOrder do with Solver.SearchStates[SetCount__] do begin
-                  Count:=0;
                   MovePlayer(PlayerPos__);
                   CalculatePlayersReachableSquares(SetCount__);
+
+                  GoalRemovalCandidates.Count:=0;
+                  GoalParkingCandidates.Count:=0;
+                  GoalRemovalCandidates.Numbers[0]:=0;                          {a sort of sentinel}
+                  GoalParkingCandidates.Numbers[0]:=0;                          {a sort of sentinel}
 
                   if  SeenBoxStartPositions__.Count<BoxCount then {'True': the player hasn't had access to all box starting positions yet; add any new positions reachable from the current player position}
                       for BoxNo:=1 to BoxCount do
                           if (not (BoxNo in SeenBoxStartPositions__.BoxSet)) and
                              (PlayersReachableSquares.Squares[BoxPos[BoxNo]]>=PlayersReachableSquares.TimeStamp) then begin
-                             Inc(SeenBoxStartPositions__.Count);                {note that even though 'SeenBoxStartPositions__' stems from the caller, the parameter is local to this invocation of 'Search__', and it's OK to update the set}
+                             Inc(SeenBoxStartPositions__.Count);                {collect seen box starting positions}
                              Include(SeenBoxStartPositions__.BoxSet,BoxNo);
                              end;
 
                   if  False
                       and
+                      //(Solver.PushCount>=1735)
+                      //and
                       //(PackingOrderType__=poPullBoxesToStartingPositionsWithParking)
                       //and
-                      ((MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown)>=0)
-                      and
+                      //((MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown)>=0)
+                      //((MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown)>271423)
+                      //and
                       //(SetCount__>=10)
                       //(PackingOrderType__=poPullBoxes)
-                      //and
                       True
                       then begin
                       Writeln;
                       ShowUnusedBoxStartingPositions;
-                      ShowBoard;
+                      ShowBoardWithColumnsAndRows;
                       Write(Ord(PackingOrderType__),
+                            SPACE,Depth__,
                             SPACE,MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown,
                             SPACE,PlayerPos__,
                             SPACE,ParkedTwiceGoalSet__.Count,
-                            SPACE,COLON,SPACE,Count,' Find set: ',SetCount__,
+                            SPACE,Solver.PushCount,
+                            //SPACE,Cardinal(Addr(BoardAsTextLines))-Cardinal(Addr(GoalRemovalCandidates)),
+                            ' Find set: ',SetCount__,
                             ' Set members: ',SetMembersCount__,
                             ' Unseen start positions: ',BoxCount-SeenBoxStartPositions__.Count);
                       Readln;
+                      //Writeln;
                       end;
 
                   if  (SeenBoxStartPositions__.Count=BoxCount)                  {'True': boxes may be removed from the board when the player has had access to all box starting positions}
@@ -11459,9 +13230,12 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                       then begin
                       GoalNo:=1;
                       while GoalNo<=GoalAndParkingSquareCount__ do begin        {for each box at a goal square, and for each parked box, check if the box can be removed from the board}
+                        Result:=False;                                          {'False': the goal hasn't been registered as a candidate yet}
                         Square:=GoalPos[GoalNo];
                         for Direction:=Low(Direction) to High(Direction) do
-                            if (GoalSetNo[GoalNo]=0)                            {'True': the goal or parking square hasn't been assigned a packing order set number yet}
+                            if (GoalSetNo[GoalNo]=0)                            {'True': the goal or parking square hasn't been assigned a packing order set number}
+                               and
+                               (not Result)                                     {'True': the goal hasn't been registered in this round as a candidate after a visit from another direction}
                                and
                                ((Board[Square] and BOX)<>0)
                                and
@@ -11480,203 +13254,246 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                and
                                (Solver.SearchLimits.DepthLimit>=0)              {'True': the search hasn't been terminated; (the search may be terminated manually by the user, or by a time limit)}
                                and
-                               (( PackingOrderType__ =poPullBoxes)
+                               (CanPullBoxToStartingPosition(GoalNo,BoxStartPosIndex,NewPlayerPos,PullCount,
+                                                             TotalReachableBoxStartingPositionsCount,TotalReachableSquaresCount,
+                                                             ReachableBoxStartingPositions[GoalNo])
+                                //or
+                                //(RemainingBoxesCount__<=EndGamePhaseBoxCountLimit)
                                 or
-                                ((PackingOrderType__>=poPullBoxesToStartingPositionsWithoutParking)
-                                 //and
-                                 //(PlayersReachableSquares.Squares[Game.StartPlayerPos]=PlayersReachableSquares.TimeStamp)
-                                 and
-                                 CanPullBoxToStartingPosition(GoalNo,BoxStartPosIndex,NewPlayerPos,PullCount,ReachableBoxStartingPositions[GoalNo])
-                                 //and
-                                 //( ReachableBoxStartingPositionsCount>=(RemainingBoxCount__ div 3))
-                                )
+                                (PackingOrderType__ =poPullBoxes)
                                )
                                then begin
-                               Inc(Count);
-                               GoalSetNo[GoalNo]:=SetCount__;                   {tentatively assign a packing order set number to the goal}
-                               SetMembers[SetMembersCount__+Count]:=GoalNo;     {use 'SetMembers' temporarily to collect the goals in the packing order}
-
-                               if   PackingOrderType__>=poPullBoxesToStartingPositionsWithoutParking then begin
-                                    Inc(Board[BoxPos[BoxStartPosIndex]],FLAG_VISITED_SQUARE); {mark the box starting position as 'used'}
-                                    UsedBoxStartPositions[SetMembersCount__+Count]:=BoxStartPosIndex; {collect the used box starting position numbers}
-                                    for i:=1 to GoalAndParkingSquareCount__ do with GoalBoxSets[i] do {update the number of remaining unused box starting positions for all boxes on the board, i.e., boxes at goals and parking squares}
-                                        if BoxStartPosIndex in BoxSet then Dec(Count);
-                                    Inc(Solver.PushCount,PullCount);
-                                    end
-                               else Inc(Solver.PushCount);
+                               if (TotalReachableSquaresCount>=LargeBoardAreaThreshold) or {'True': the box comes from a relatively large area of the board; assume their will be a box in the area at the time the goal must be filled}
+                                  (RemainingBoxesCount__<=EndGamePhaseBoxCountLimit) or {'True': most of the boxes, including parked boxes, have been removed from the board}
+                                  (PackingOrderType__ =poPullBoxes) or
+                                  (GoalNo>GoalCount) {'True': it's a box from a parking square as opposed to a box from a real goal square}
+                                  then begin
+                                  {it's often better to push boxes to parking squares before pushing boxes to final goal squares;
+                                   therefore, boxes at goal squares and parking squares are not removed from the board in the same game phase,
+                                   i.e., they are not getting the same packing order number;}
+                                  if        (GoalNo<=GoalCount) and (GoalRemovalCandidates.Numbers[GoalRemovalCandidates.Count]> GoalCount) then begin
+                                            ClearRemovalCandidateSet;           {drop already found boxes from parking squares which were candidates for removal in this game phase}
+                                            GoalCandidate:=GoalNo;
+                                            end
+                                  else if   (GoalNo> GoalCount) and (GoalRemovalCandidates.Numbers[GoalRemovalCandidates.Count]<=GoalCount) and (GoalRemovalCandidates.Count>0) then
+                                            {don't remove the parked box in this game phase; boxes are ready for removal directly from goal squares}
+                                            GoalCandidate:=0 {don't use the box from the parking square as candidate for this game phase}
+                                       else GoalCandidate:=GoalNo;
+                                  if GoalCandidate>0 then begin
+                                     AddGoalRemovalCandidate(GoalNo,BoxStartPosIndex);
+                                     Result:=True;                              {'True': don't add the goal again in this round when visited from a different direction}
+                                     end;
+                                  end
+                               else begin                                       {the box comes from a relative small area of the board}
+                                  Inc(GoalParkingCandidates.Count);
+                                  GoalParkingCandidates.Numbers[GoalParkingCandidates.Count]:=GoalNo;
+                                  Result:=True;                                 {'True': don't add the goal again in this round when visited from a different direction}
+                                  end;
                                end;
-
-                        if   (GoalNo=GoalCount) and                             {'True': this is the last of the goal squares, before the parking squares, if any}
-                             (Count=0) and                                      {'True': no boxes could be removed in this round}
-                             (PackingOrderType__=poPullBoxesToStartingPositionsWithParking) and
-                             (SetMembersCount__<GoalCount)                      {'True:  some boxes haven't left their goal squares yet}
-                             then                                               {'True': don't remove parked boxes before the boxes have left their goal squares}
-                             GoalNo:=Succ(GoalAndParkingSquareCount__);         {exit 'while' loop, i.e., stop removing boxes from the board in this round}
-
-                        if   (GoalNo=GoalCount) and (Count<>0)                  {'True': this is the last normal goal square (before the parking squares), and some of the boxes at the goal squares could be removed}
-                             and
-                             (SetMembersCount__>=                               {'True': more than half of the boxes have been pulled away from the goal squares,}
-                              (GoalAndParkingSquareCount div 2)                 {meaning the packing order calculation is probably in its final phase, dealing with the last boxes;}
-                             ) then                                             {this is just a heuristic for choosing when to break goals/parked boxes groups; it may equally well be removed, it just happened to work slightly better in a few tests}
-                             {it's often better to push boxes to parking
-                              squares before pushing boxes to final goal
-                              squares; therefore, boxes at goal squares and
-                              parking squares are not removed from the board in
-                              the same phase, i.e., they are not getting the
-                              same packing order number;
-                             }
-                             GoalNo:=Succ(GoalAndParkingSquareCount__)          {exit 'while' loop, i.e., stop removing boxes from the board in this round}
-                        else Inc(GoalNo);                                       {advance to the next goal number}
+                        Inc(GoalNo);                                            {advance to the next goal number}
                         end;
+                        Result:=False;                                          {'False': no complete packing order calculated yet}
                       end;
 
-                  if  Count<>0 then begin                                       {'True': some boxes can be pulled away from the goal-squares or the parking squares}
-                      for i:=1 to Count do begin                                {remove the boxes that can be pulled away from their goal-squares}
-                          GoalNo:=SetMembers[SetMembersCount__+i];
+                  if ((GoalRemovalCandidates.Count>0) and (GoalRemovalCandidates.Numbers[GoalRemovalCandidates.Count]<=GoalCount)) {'True': boxes from goal squares are ready for removal from the board in this game phase}
+                     and
+                     {it's often better to push boxes to parking squares before pushing boxes to final goal squares;
+                      therefore, boxes at goal squares and parking squares are not removed from the board in the same
+                      game phase, i.e., they are not getting the same packing order number;}
+                     (not ((GoalParkingCandidates.Count>0) and (GoalParkingCandidates.Numbers[1]<=GoalCount))) {'True': there are no boxes from goal squares ready for parking in this game phase}
+                     then
+                     GoalParkingCandidates.Count:=0;
+
+                  if (GoalRemovalCandidates.Numbers[GoalRemovalCandidates.Count]>GoalCount) and {'True': the only boxes ready for removal come from parking squares}
+                     (RemainingRealGoalsCount__>0) and {'True': some boxes haven't left the real goal squares yet}
+                     (GoalParkingCandidates.Count=0) then
+                     {it's often better not to remove parked boxes from the board before all the real goal squares have been emptied}
+                     ClearRemovalCandidateSet;
+
+                  {check goal candidates ready for parking}                     {park boxes}
+                  if ((GoalParkingCandidates.Count<>0)                          {'True': boxes have been selected for parking because a goal square must be filled with a box coming from a relatively small area of the board}
+                      or
+                      ((GoalRemovalCandidates.Count=0)
+                       and
+                       (PackingOrderType__=poPullBoxesToStartingPositionsWithParking)
+                      ))
+                     and
+                     (GoalAndParkingSquareCount__<High(TBoxNo)) and             {'True': some goal numbers are still free to use as pseudo-goal numbers for parking squares}
+                     (Solver.SearchLimits.DepthLimit>=0) then begin             {'True': the search hasn't been terminated}
+                     OldGoalRemovalCandidatesCount:=GoalRemovalCandidates.Count; {remember the number of candidates ready for removal in this game phase}
+                     ClearRemovalCandidateSet;                                  {clear tentative assignments for the boxes ready for removal in this game phase}
+
+                     TestedGoalsSet:=[];
+                     if GoalParkingCandidates.Count<>0 then begin               {'True': one of the goal candidates should be pulled away now and parked in a relatively small reachable area of the board}
+                        for GoalNo:=1 to GoalAndParkingSquareCount__ do Include(TestedGoalsSet,GoalNo);
+                        for Index:=1 to GoalParkingCandidates.Count do
+                            Exclude(TestedGoalsSet,GoalParkingCandidates.Numbers[Index]);
+                        end;
+
+                     while (not Result) and                                     {'True': no full packing order has been found yet}
+                           (FindGoalCandidateForParking(SetCount__,TestedGoalsSet,ParkedTwiceGoalSet__,GoalNo,ParkingSpaces)>0) do begin {'True': 1 or 2 parking squares have been found for the box at goal number 'GoalNo'}
+                           Include(TestedGoalsSet,GoalNo);                      {each goal is only given one chance for parking}
+                           GoalSetNo[GoalNo]:=SetCount__;                       {tentatively assign a packing order set number to the goal}
+                           SetMembers[Succ(SetMembersCount__)]:=GoalNo;         {use 'SetMembers' temporarily to collect the goals and parking squares (pseudo goals) in the packing order}
+                           Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]] and (not BOX); {remove the box from the goal square before it's moved to the parking square}
+
+                           if   GoalNo>GoalCount then with ParkedTwiceGoalSet__ do begin {'True': a parking square as opposed to a real goal square}
+                                Inc(Count); Include(BoxSet,GoalNo);
+                                end
+                           else Dec(RemainingRealGoalsCount__);
+
+                           for Index:=1 to High(ParkingSpaces) do with ParkingSpaces[Index] do {'1': item 0 is unused}
+                               if (not Result) and (Square>0) then begin        {'True': a full packing order hasn't been found yet, and there is a parking square candidate in 'ParkingSpaces[Index]'}
+                                  Board                  [Square]                           :=Board[Square] or BOX; {put a box at the parking square}
+                                  GoalPos                [Succ(GoalAndParkingSquareCount__)]:=Square; {make the parking square a pseudo goal square}
+                                  GoalSetNo              [Succ(GoalAndParkingSquareCount__)]:=0; {'0': the parked box hasn't been assigned a packing order number yet}
+                                  UsedBoxStartPositions__[Succ(SetMembersCount__          )]:=0; {'0': the parked box hasn't been removed from the board yet, i.e., it hasn't been assigned a box starting position}
+                                  ParkedBoxDestinationGoalSetNo[Succ(GoalAndParkingSquareCount__)]:=SetCount__; {a parked box should preferably stay at its parking square until it't time to fill the goal the parked box originally came from}
+                                  Inc(Solver.PushCount,Distance);               {update the number of pushes}
+                                  GoalParkingSquares[GoalNo]:=Square;           {collect goal parking squares}
+                                  //GoalBoxSets[Succ(GoalAndParkingSquareCount__)]:=SquareBoxSets[Square]; {the initial pull-reachable box starting positions from the parking square can be found in the 'SquareBoxSets' array (not in production)}
+                                  with GoalBoxSets[Succ(GoalAndParkingSquareCount__)] do begin
+                                    Count:=0; BoxSet:=[];                       {the reachable box starting positions aren't calculated for parking squares, so instead the set must be cleared}
+                                    for i:=1 to SetMembersCount__ do            {for logical completeness, update the count of the still available box starting positions for the parked box, as if the set wasn't empty at this point}
+                                        if UsedBoxStartPositions__[i] in BoxSet then Dec(Count); {update the count of the still available box starting positions for the parked box by retracting the already used box start positions}
+                                    end;
+
+                                  Result:=Search__(Succ(Depth__),Succ(SetCount__),Succ(SetMembersCount__),Succ(GoalAndParkingSquareCount__),RemainingBoxesCount__,RemainingRealGoalsCount__,PlayerPositionAfterParking,
+                                                   SeenBoxStartPositions__,ParkedTwiceGoalSet__,UsedBoxStartPositions__);
+
+                                  Board[Square]:=Board[Square] and (not BOX);   {remove the parked box from the board again}
+
+                                  if (not Result) and
+                                     (Succ(SetMembersCount__)>BestGoalSetCount) and
+                                     (BestGoalSetRemainingBoxesCount=BoxCount) then begin {'True': new best found partial packing order, but with no boxes removed from the board yet}
+                                     BestGoalSetCount:=Succ(SetMembersCount__);
+                                     BestGoalSetNumbers:=GoalSetNo;
+{
+                                     Writeln;
+                                     ShowUnusedBoxStartingPositions;
+                                     ShowBoardWithColumnsAndRows;
+                                     Write(Ord(PackingOrderType__),
+                                           SPACE,Depth__,
+                                           SPACE,MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown,
+                                           SPACE,PlayerPos__,
+                                           SPACE,ParkedTwiceGoalSet__.Count,
+                                           SPACE,Solver.PushCount,
+                                           //SPACE,Cardinal(Addr(BoardAsTextLines))-Cardinal(Addr(GoalRemovalCandidates)),
+                                           ' Find set: ',SetCount__,
+                                           ' Set members: ',SetMembersCount__,
+                                           ' Unseen start positions: ',BoxCount-SeenBoxStartPositions__.Count);
+                                     Writeln;
+                                     Write('Best so far, parking only');
+                                     Writeln; //Readln;
+}
+                                     end;
+                                  end;
+
+                           if   GoalNo>GoalCount then with ParkedTwiceGoalSet__ do begin {'True': a parking square as opposed to a real goal square}
+                                Dec(Count); Exclude(BoxSet,GoalNo);
+                                end
+                           else Inc(RemainingRealGoalsCount__);
+
+                           if Result then begin                                 {'True': a packing order has been calculated}
+                              if GoalParkingCandidates.Count>0 then             {'True': the parked box comes from a relatively small area of the board}
+                                 LastPhaseWithABoxParkedInASmallArea:=Max(SetCount__,LastPhaseWithABoxParkedInASmallArea)
+                              end
+                           else begin                                           {the recursive call could not remove the remaining boxes from the board}
+                              GoalSetNo[GoalNo]:=0;                             {reset the packing order set number for the goal}
+                              GoalParkingSquares[GoalNo]:=0;                    {reset the parking square for the goal}
+                              ParkedBoxDestinationGoalSetNo[Succ(GoalAndParkingSquareCount__)]:=0;
+                              LastPhaseWithABoxParkedInASmallArea:=0;           {reset}
+                              end;
+
+                           Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]] or BOX; {put the box back at the goal square}
+                           MovePlayer(PlayerPos__);                             {restore the player position}
+                           end;
+
+                     if not Result then                                         {put goals ready for removal in this game phase back in the candidate-set}
+                        for Index:=1 to OldGoalRemovalCandidatesCount do
+                            AddGoalRemovalCandidate(GoalRemovalCandidates.Numbers[Index],GoalRemovalCandidatesBoxStartPositions[Index]);
+                     end;
+
+                  {check goal candidates ready for removal from the board}      {remove boxes}
+                  if  (GoalRemovalCandidates.Count>0) and                       {'True': some boxes can be pulled away from the goal-squares or the parking squares}
+                      (not Result) then begin                                   {'True': a full packing order has already been found}
+                      for Index:=1 to GoalRemovalCandidates.Count do begin      {remove the boxes that can be pulled away from their goal-squares}
+                          GoalNo:=GoalRemovalCandidates.Numbers[Index];
+                          SetMembers[SetMembersCount__+Index]:=GoalNo;
+                          if   PackingOrderType__>=poPullBoxesToStartingPositionsWithoutParking then
+                               Inc(Solver.PushCount,PullCount)
+                          else Inc(Solver.PushCount);
+
                           if   (Board[GoalPos[GoalNo]] and BOX)<>0 then
-                               Dec(Board[GoalPos[GoalNo]],BOX)
+                               Dec(Board[GoalPos[GoalNo]],BOX)                  {remove box from board}
                           else Msg(TEXT_INTERNAL_ERROR+': Calculate packing order, goal: '+IntToStr(GoalNo),TEXT_APPLICATION_TITLE);
                           end;
 
                       if  False
-                          and
-                          (PackingOrderType__=poPullBoxesToStartingPositionsWithParking) then begin
+                          //and
+                          //(PackingOrderType__=poPullBoxesToStartingPositionsWithParking)
+                          then begin
                           ShowBoard;
+                          //for i:=1 to GoalRemovalCandidates.Count do begin
+                          //    GoalNo:=GoalRemovalCandidates.Numbers[i];
+                          //    Write(GoalNo,':',TotalReachableBoxStartingPositionsCounts[GoalNo],SPACE,SPACE);
+                          //    end;
+                          //Writeln;
                           Write(Ord(PackingOrderType__),
                                 MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown,
-                                SPACE,PlayerPos__,COLON,SPACE,Count,' Sets completed: ',SetCount__);
+                                SPACE,PlayerPos__,COLON,SPACE,GoalRemovalCandidates.Count,' Sets completed: ',SetCount__);
                           Readln;
                           end;
 
-                      {try to remove any remaining boxes from the board}
-                      Result:=Search__(Succ(SetCount__),SetMembersCount__+Count,GoalAndParkingSquareCount__,RemainingBoxCount__-Count,PlayerPos__,SeenBoxStartPositions__,ParkedTwiceGoalSet__,UsedBoxStartPositions__);
+                      {try to remove any remaining boxes from the board by calling 'Search__' recursively}
+                      Result:=Search__(Succ(Depth__),Succ(SetCount__),SetMembersCount__+GoalRemovalCandidates.Count,GoalAndParkingSquareCount__,RemainingBoxesCount__-GoalRemovalCandidates.Count,RemainingRealGoalsCount__,PlayerPos__,
+                                       SeenBoxStartPositions__,ParkedTwiceGoalSet__,UsedBoxStartPositions__);
 
-                      for i:=1 to Count do begin                                {put the removed boxes back on the board}
-                          GoalNo       :=SetMembers[SetMembersCount__+i];
+                      if (not Result)
+                         and
+                         (BestGoalSetCount<=MAX_BOX_COUNT) {'True': store best partial order}
+                         and
+                         (((SetMembersCount__+GoalRemovalCandidates.Count)>BestGoalSetCount)
+                          or
+                          (BestGoalSetRemainingBoxesCount=Game.BoxCount)
+                         ) {'True': new best found partial order with boxes removed from the board}
+                         then begin
+                         BestGoalSetCount:=SetMembersCount__+GoalRemovalCandidates.Count;
+                         BestGoalSetNumbers:=GoalSetNo;
+                         BestGoalSetRemainingBoxesCount:=RemainingBoxesCount__-GoalRemovalCandidates.Count;
+{
+                         Writeln;
+                         ShowUnusedBoxStartingPositions;
+                         ShowBoardWithColumnsAndRows;
+                         Write(Ord(PackingOrderType__),
+                               SPACE,Depth__,
+                               SPACE,MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown,
+                               SPACE,PlayerPos__,
+                               SPACE,ParkedTwiceGoalSet__.Count,
+                               SPACE,Solver.PushCount,
+                               //SPACE,Cardinal(Addr(BoardAsTextLines))-Cardinal(Addr(GoalRemovalCandidates)),
+                               ' Find set: ',SetCount__,
+                               ' Set members: ',SetMembersCount__,
+                               ' Unseen start positions: ',BoxCount-SeenBoxStartPositions__.Count);
+                         Writeln;
+                         Write('Best so far');
+                         Writeln; //Readln;
+}
+                         end;
+
+                      for i:=1 to GoalRemovalCandidates.Count do begin          {put the removed boxes back on the board}
+                          GoalNo       :=GoalRemovalCandidates.Numbers[i];
                           Square       :=GoalPos[GoalNo];
                           Board[Square]:=Board[Square] or BOX;
-
-                          if   Result then begin
-{
-                               // fill this goal as soon as it's surrounded by walls
-                               // and/or boxes on all sides except one;
-                               // this is not in production because the idea is
-                               // flawed; it can just as easily destroy the packing
-                               // order as it can help;
-                               NewSetNo:=Solver.PackingOrder.SetCount;
-                               NeighborFloorCount:=DIRECTION_COUNT;             // count the number of empty floor square neighbors
-                               for Direction:=Low(Direction) to High(Direction) do begin
-                                   NeighborSquare:=Square+SquareOffsetForward[Direction];
-                                   if      (Board[NeighborSquare] and (WALL+FLAG_ILLEGAL_BOX_SQUARE))<>0 then
-                                           Dec(NeighborFloorCount)
-                                   else if ((Board[NeighborSquare] and BOX)<>0) and
-                                           (GoalCount=GoalAndParkingSquareCount__) then begin
-                                           Dec(NeighborFloorCount);
-                                           NewSetNo:=Min(NewSetNo,Pred(GoalSetNo[GoalNoAtSquare(NeighborSquare)]));
-                                           end;
-                                   end;
-                               if  NeighborFloorCount=1 then                    // 'True': the goal is surrounded by walls and/or filled goals at all sides except one
-                                   GoalSetNo[GoalNo]:=Max(GoalSetNo[GoalNo],NewSetNo); // fill this goal as soon as it's surrounded by walls and/or boxes at all sides except one
-}
-                               end
-                          else GoalSetNo[GoalNo]:=0;                            {no packing order has been found yet; reset the packing order set number for the goal}
-
-                          if   PackingOrderType__>=poPullBoxesToStartingPositionsWithoutParking then begin
-                               BoxNo:=UsedBoxStartPositions[SetMembersCount__+i];
-                               Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not FLAG_VISITED_SQUARE); {clear the 'used' flag for all the box starting positions used in this round}
-                               for j:=1 to GoalAndParkingSquareCount__ do with GoalBoxSets[j] do         {for each box on the board, restore the number of pull-reachable box starting positions}
-                                   if BoxNo in BoxSet then Inc(Count);
-                               end;
                           end;
-(*
-                      if Result and ( Count > 1 ) then begin
-                         {sort the goals in descending order on the number of box starting positions they could choose from}
-                         for i := 2 to Count do begin {insertion sort}
-                             GoalNo := SetMembers[ SetMembersCount__ + i ];
-                             j := Pred( i );
-                             while ( j > 0 ) and ( ReachableBoxStartingPositions[ GoalNo ].Count > ReachableBoxStartingPositions[ SetMembers[ SetMembersCount__ + j ] ].Count ) do begin
-                                   SetMembers[ SetMembersCount__ + Succ( j ) ] := SetMembers[ SetMembersCount__ + j ];
-                                   Dec( j );
-                                   end;
-                             SetMembers[ SetMembersCount__ + Succ( j ) ] := GoalNo;
-                             end;
 
-                         i := Succ( Count );
-                         while   ReachableBoxStartingPositions[ SetMembers[ SetMembersCount__ + Pred( i ) ] ].Count <
-                               ( ReachableBoxStartingPositions[ SetMembers[ Succ( SetMembersCount__ )     ] ].Count div 2 ) do
-                               Dec( i );
-                         if i <= Count then begin
-                            {there is a large difference in the number of box
-                             starting positions to choose from; this could
-                             indicate that the goals should be filled from
-                             different sides of the board; split the phase in
-                             two}
-                            Inc( SetCount );
-                            for j := SetMembersCount__ + i to GoalAndParkingSquareCount do
-                                Inc( GoalSetNo[ SetMembers[ j ] ] );
-                            end;
-                         end;
-*)
+                      if not Result then
+                         ClearRemovalCandidateSet;                              {no packing order has been found yet; reset the packing order set number for the goal}
                       end
-                  else                                                          {no boxes could be removed from the board; try if there are boxes that can parked somewhere on the board}
-                    if (PackingOrderType__=poPullBoxesToStartingPositionsWithParking) and
-//                     (RemainingBoxCount__=BoxCount) and                       {'True': no boxes have been removed from the board yet}
-                       (GoalAndParkingSquareCount__<High(TBoxNo)) and           {'True': some goal numbers are still free to use as pseudo-goal numbers for parking squares}
-                       (Solver.SearchLimits.DepthLimit>=0) then begin           {'True': the search hasn't been terminated}
-                       TestedGoalsSet:=[];
-                       while (not Result) and                                   {'True': no full packing order has been found yet}
-                             (FindGoalCandidateForParking(SetCount__,TestedGoalsSet,ParkedTwiceGoalSet__,GoalNo,ParkingSpaces)>0) do begin {'True': 1 or 2 parking squares have been found for the box at goal number 'GoalNo'}
-                             Include(TestedGoalsSet,GoalNo);                    {each goal is only given one chance for parking}
-                             GoalSetNo[GoalNo]:=SetCount__;                     {tentatively assign a packing order set number to the goal}
-                             SetMembers[Succ(SetMembersCount__)]:=GoalNo;       {use 'SetMembers' temporarily to collect the goals and parking squares (pseudo goals) in the packing order}
-                             Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]] and (not BOX); {remove the box from the goal square before it's moved to the parking square}
+                  else                                                          {no boxes could be removed from the board; try to find boxes which can be parked somewhere on the board}
 
-                             if  GoalNo>GoalCount then with ParkedTwiceGoalSet__ do begin
-                                 Inc(Count); Include(BoxSet,GoalNo);
-                                 end;
-
-                             for Index:=1 to High(ParkingSpaces) do with ParkingSpaces[Index] do {'1': item 0 is unused}
-                                 if (not Result) and (Square>0) then begin      {'True': a full packing order hasn't been found yet, and there is a parking square candidate in 'ParkingSpaces[Index]'}
-                                    Board                  [Square]                           :=Board[Square] or BOX; {put a box at the parking square}
-                                    GoalPos                [Succ(GoalAndParkingSquareCount__)]:=Square; {make the parking square a pseudo goal square}
-                                    GoalSetNo              [Succ(GoalAndParkingSquareCount__)]:=0; {'0': the parked box hasn't been assigned a packing order number yet}
-                                    UsedBoxStartPositions__[Succ(SetMembersCount__          )]:=0; {'0': the parked box hasn't been removed from the board yet, i.e., it hasn't been assigned a box starting position}
-                                    Inc(Solver.PushCount,Distance); {update the number of pushes}
-
-                                    //GoalBoxSets[Succ(GoalAndParkingSquareCount__)]:=SquareBoxSets[Square]; {the initial pull-reachable box starting positions from the parking square can be found in the 'SquareBoxSets' array (not in production)}
-                                    with GoalBoxSets[Succ(GoalAndParkingSquareCount__)] do begin
-                                      Count:=0; BoxSet:=[]; {the reachable box starting positions aren't calculated for parking squares, so instead the set must be cleared}
-                                      for i:=1 to SetMembersCount__ do {for logical completeness, update the count of the still available box starting positions for the parked box, as if the set wasn't empty at this point}
-                                          if UsedBoxStartPositions__[i] in BoxSet then Dec(Count); {update the count of the still available box starting positions for the parked box by retracting the already used box start positions}
-                                      end;
-
-                                    Result:=Search__(Succ(SetCount__),Succ(SetMembersCount__),Succ(GoalAndParkingSquareCount__),RemainingBoxCount__,PlayerPositionAfterParking,SeenBoxStartPositions__,ParkedTwiceGoalSet__,UsedBoxStartPositions__);
-
-                                    Board[Square]:=Board[Square] and (not BOX); {remove the parked box from the board again}
-                                    end;
-
-                             if  GoalNo>GoalCount then with ParkedTwiceGoalSet__ do begin
-                                 Dec(Count); Exclude(BoxSet,GoalNo);
-                                 end;
-
-                             if   Result then begin                             {'True': a packing order has been calculated}
-                                  Square:=GoalPos[Succ(GoalAndParkingSquareCount__)]; {get the parking square}
-                                  i:=Board[Square] shr GOAL_BIT_SHIFT_COUNT;          {get the goal number stored in the parking square, if any}
-                                  if (i=0) or (i>GoalAndParkingSquareCount__) then    {'True': the goal number stored in the parking square isn't one of the real goal numbers, i.e., the number is 0 or a parking square number}
-                                     Board[Square]:=Board[Square]
-                                                    {insert pseudo goal number (parking space number) in the square value; numbers are inserted during backtracking so the smallest number wins}
-                                                    +Cardinal(Succ(GoalAndParkingSquareCount__) shl GOAL_BIT_SHIFT_COUNT)
-                                                    {substract previously inserted goal number, if any, from the square value}
-                                                    -Cardinal(i shl GOAL_BIT_SHIFT_COUNT);
-
-                                  ParkedBoxDestinationGoalSetNo[Succ(GoalAndParkingSquareCount__)]:=SetCount__; {a parked box should preferably stay at its parking square until it't time to fill the goal the parked box originally came from}
-                                  end
-                             else GoalSetNo[GoalNo]:=0;                         {the recursive call could not remove the remaining boxes from the board; reset the packing order set number for the goal}
-
-                             Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]] or BOX; {put the box back at the goal square}
-                             MovePlayer(PlayerPos__);                           {restore the player position}
-                             end;
-                       end;
+                  if (Depth__=0) and Result then                                {True': this is the top level call to the recursive search, and a packing order has been found}
+                     PostprocessPackingOrder;                                   {perform post-processing of the found packing order, e.g., insert additional parking operations}
                   end;
              end
           else begin {all boxes have been removed from the board; update the global variables with the found packing order information}
@@ -11690,111 +13507,50 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
         {postcondition: all boxes have been removed from the board (from the goal positions and any parking squares)}
         with Game do with Solver.PackingOrder do begin
           MovePlayer(PlayerPos__);
-          for GoalNo:=1 to GoalCount do Inc(Board[GoalPos[GoalNo]],BOX);        {put boxes at all the goal squares}
+          PutBoxesAtGoals;
 
-          SetCount:=0; GoalAndParkingSquareCount:=GoalCount;
+          SetCount:=0; GoalAndParkingSquareCount:=GoalCount; LastPhaseWithABoxParkedInASmallArea:=0;
           FillChar(GoalSetNo,SizeOf(GoalSetNo),0);
           FillChar(ParkedBoxDestinationGoalSetNo,SizeOf(ParkedBoxDestinationGoalSetNo),0);
+          FillChar(GoalParkingSquares,SizeOf(GoalParkingSquares),0);
           FillChar(ParkedTwiceGoalSet,SizeOf(ParkedTwiceGoalSet),0);
           ParkedTwiceGoalSet.Count:=MAX_PARKED_TWICE_GOAL_COUNT;                {disables moving parked boxes}
           //ParkBoxesCountDown:=MAX_PARK_BOXES_ATTEMPTS;
 
-          FillChar(SeenBoxStartPositions,SizeOf(SeenBoxStartPositions),0);      {when to park, and when to remove boxes, is governed by which and how many starting positions the player has been able to reach}
-          for BoxNo:=1 to BoxCount do                                           {boxes at goal squares are counted as "seen starting positions"; this is just a heuristic which seems reasonable, helping to get things started}
+          FillChar(SeenBoxStartPositions,SizeOf(SeenBoxStartPositions),0);      {the choice between parking and removing boxes from the board depends on how many starting positions the player has been able to reach}
+          for BoxNo:=1 to BoxCount do begin                                     {boxes at goal squares are counted as "seen starting positions"; this is just a heuristic which seems reasonable, helping to get things started}
               if IsAGoalSquare(BoxPos[BoxNo]) then with SeenBoxStartPositions do begin
                  Inc(Count); Include(BoxSet,BoxNo);
                  end;
+              end;
 
-          Result:=Search__(1,0,GoalCount,BoxCount,PlayerPos__,SeenBoxStartPositions,ParkedTwiceGoalSet,UsedBoxStartPositions);
+          Count:=0; SetMembersCount:=0; RemainingBoxesCount:=BoxCount; RemainingRealGoalsCount:=BoxCount;
+
+          if (PackingOrderType__=poPullBoxes) and (BestGoalSetCount>0) and (BestGoalSetCount<=MAX_BOX_COUNT) then begin  {'True': use the best found partial packing order from the previous run}
+             for GoalNo:=1 to GoalCount do                                      {find highest packing order set number}
+                 Count:=Max(Count,BestGoalSetNumbers[GoalNo]);
+             for Index:=1 to Count do begin                                     {for each set number}
+                 for GoalNo:=1 to GoalCount do begin                            {'GoalCount': only use the best found partial packing order for real goal squares, i.e., ignore parking squares, if any}
+                     SetNo:=BestGoalSetNumbers[GoalNo];
+                     if SetNo=Index then with Solver.PackingOrder do begin
+                        Inc(SetMembersCount);
+                        Dec(RemainingBoxesCount);
+                        SetMembers[SetMembersCount]:=GoalNo;
+                        GoalSetNo[GoalNo]:=Index;
+                        Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]] and (not BOX); {remove boxes from goal squares which already have been assigned a packing order group number}
+                        if GoalNo<=GoalCount then
+                           Dec(RemainingRealGoalsCount);
+                        end;
+                    end;
+                 end;
+             end;
+
+          Result:=Search__(0,Succ(Count),SetMembersCount,GoalAndParkingSquareCount,RemainingBoxesCount,RemainingRealGoalsCount,PlayerPos__,SeenBoxStartPositions,ParkedTwiceGoalSet,UsedBoxStartPositions);
 
           for GoalNo:=1 to GoalAndParkingSquareCount do Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]] and (not BOX); {remove boxes from the board}
           MovePlayer(PlayerPos__);                                              {restore player position}
           end;
       end; {CalculatePackingOrder.CalculatePackingOrder__.Search}
-
-      function  CalculateFreezeDeadlocks: Boolean;
-      const FROZEN_GOALS_PATTERN_THRESHOLD = 4;
-      var   BoxNo, GoalNo, Index, Square, NeighborSquare, OldCount, OldPlayerPos : Integer;
-            Found : Boolean;
-            Direction : TDirection;
-            DeadlockSetCandidate : TDeadlockSetCandidate;
-            APosition : TPosition;
-            OldBoxPositions : TBoxSquares;
-      begin {creates freeze deadlocks based on the packing order}
-        with Game do with Solver.PackingOrder do begin
-          Result          := False;
-          for BoxNo       := 1 to BoxCount do                                   {remove all boxes from the board}
-              Board[ BoxPos[ BoxNo ] ] := Board[ BoxPos[ BoxNo ] ] and ( not BOX );
-          OldBoxPositions := Game.BoxPos;                                       {save box positions}
-          OldPlayerPos    := Game.PlayerPos;
-          Game.BoxPos     := Game.GoalPos;                                      {use goal positions as box positions}
-
-          for Index       := GoalAndParkingSquareCount downto 1 do begin
-              GoalNo      := SetMembers[ Index ];
-              if GoalNo   <= GoalCount then begin
-                 Square   := GoalPos[ GoalNo ];
-                 Found    := False;
-                 if IsAFreezingMove( 0, Square, True) then
-                    for Direction := Low( Direction ) to High( Direction ) do begin
-                        NeighborSquare := Square + SquareOffsetForward[ Direction ];
-                        if IsABoxSquare( NeighborSquare ) and ( not IsAFreezingMove( 0, NeighborSquare, True ) ) then {'True': the neighbor box, which has been filled earlier in the packing order hasn't frozen yet}
-                           Found := True;                                       {freezing a box at the current goal square gives rise to a new freeze situation on the board}
-                        end;
-
-                 Board[ Square ] := Board[ Square ] or BOX;                     {put box on board}
-
-                 if Found then begin                                            {'True': freezing a box at the current goal square gives rise to a new freeze situation on the board}
-                    DeadlockSetCandidate.Boxes.Count := 0;
-                    DeadlockSetCandidate.Boxes.Squares[ 0 ] := 0;
-                    for BoxNo  := Index  to GoalAndParkingSquareCount do begin
-                        GoalNo := SetMembers[ BoxNo ];
-                        if ( GoalNo <= GoalCount ) and IsAFreezingMove(0, GoalPos[ GoalNo ], True ) then with DeadlockSetCandidate.Boxes do begin
-                           Inc( Count ); Squares[ Count ] := GoalNo;            {caution: despite the field name 'Squares', the squares really contain goal numbers and not square numbers here}
-                           end;
-                        end;
-                    if DeadlockSetCandidate.Boxes.Count >= FROZEN_GOALS_PATTERN_THRESHOLD then begin
-                       for BoxNo     := 1 to BoxCount do                        {remove all boxes on the board}
-                           Board[ BoxPos[ BoxNo ] ] := Board[ BoxPos[ BoxNo ] ] and ( not BOX );
-                       BoxPos        := OldBoxPositions;                        {restore start position}
-                       for BoxNo     := 1 to BoxCount do                        {put all boxes on the board}
-                           Board[ BoxPos[ BoxNo ] ] := Board[ BoxPos[ BoxNo ] ] or BOX;
-                       MovePlayer( OldPlayerPos );                              {restore player position}
-                       DeadlockSetCandidate.Flags := [ dsfTestFrozenGoalsSet ]; {with this flag, 'Boxes' is the only used deadlock set candidate information, hence, the other fields don't need to be filled}
-
-                       OldCount      := DeadlockSets.Count;
-                       CalculateDeadlockSets( PPosition( Addr( APosition ) ), DeadlockSetCandidate );
-                       Result        := Result or ( OldCount <> DeadlockSets.Count ); {'True': new deadlock sets have been created by this function}
-{
-                       if ( OldCount <> DeadlockSets.Count ) then begin
-                          Game.ShowDeadlockSetsEnabled := True;
-                          for BoxNo := Succ( OldCount ) to DeadlockSets.Count do // not really a box number in this loop
-                              ShowDeadlockSet( BoxNo, 0 );
-                          Game.ShowDeadlockSetsEnabled := False;
-                          Readln;
-                          end;
-}
-                       for BoxNo     := 1 to BoxCount do                        {remove all boxes from the board again}
-                           Board[ BoxPos[ BoxNo ] ] := Board[ BoxPos[ BoxNo ] ] and ( not BOX );
-                       BoxPos        := GoalPos;                                {go back to working with goal positions}
-                       for BoxNo     := Index to GoalAndParkingSquareCount do begin {'BoxNo' isn't really a box number here; it's just used as an index}
-                           GoalNo    := SetMembers[ BoxNo ];
-                           if GoalNo <= GoalCount then
-                              Inc( Board[ GoalPos[ GoalNo ] ], BOX );           {put boxes on the board again}
-                           end;
-                       end;
-                    end;
-                 end;
-              end;
-
-          for BoxNo       := 1 to BoxCount do                                   {remove all boxes from the board}
-              Board[ BoxPos[ BoxNo ] ] := Board[ BoxPos[ BoxNo ] ] and ( not BOX );
-          Game.BoxPos     := OldBoxPositions;                                   {restore box start positions}
-          for BoxNo       := 1 to BoxCount do                                   {put all boxes on the board}
-              Board[ BoxPos[ BoxNo ] ] := Board[ BoxPos[ BoxNo ] ] or BOX;
-          MovePlayer( OldPlayerPos );                                           {restore player position}
-
-          end;
-      end; {CalculatePackingOrder.CalculatePackingOrder__.CalculateFreezeDeadlocks}
 
     begin {CalculatePackingOrder.CalculatePackingOrder__}
       with Game do with Solver.PackingOrder do with Solver.SearchStates[0] do begin
@@ -11807,13 +13563,21 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
         for BoxNo:=1 to BoxCount do                                             {remove all boxes from the board and clear the 'Visited?' flag for all the box starting positions}
             Board[BoxPos[BoxNo]]:=Board[BoxPos[BoxNo]] and (not (BOX+FLAG_VISITED_SQUARE));
 
+        EndGamePhaseBoxCountLimit:=((BoxCount*(100-END_GAME_PHASE_PERCENT))+50) div 100;
+        LargeBoardAreaThreshold:=(BoxReachableSquaresCount*LARGE_BOARD_AREA_THRESHOLD_PERCENT) div 100;
         ParkBoxesCountDown:=MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS;
 
-        if PackingOrderType__=poPullBoxesToStartingPositionsWithoutParking then
-           CalculateTunnelSquares;                                              {calculate the tunnel squares so parking at 'do not stop here' squares can be avoided}
+        if      PackingOrderType__=poPullBoxesToStartingPositionsWithoutParking then begin
+                CalculateTunnelSquares;                                         {calculate the tunnel squares so parking at 'do not stop here' squares can be avoided}
+                BestGoalSetCount:=MAX_BOX_COUNT+1;                              {disable saving of the best found partial packing order}
+                end
+        else if (PackingOrderType__ = poPullBoxesToStartingPositionsWithParking) and
+                (BestGoalSetCount>MAX_BOX_COUNT) then
+                BestGoalSetCount:=0;                                            {enable saving of the best found partial packing order, so it's available for a plain "pull boxes away from goal" search if the search with parking fails}
+        BestGoalSetRemainingBoxesCount:=BoxCount;                               {no boxes removed from the board yet}
 
         repeat
-          for GoalNo:=1 to GoalCount do Inc(Board[GoalPos[GoalNo]],BOX);        {put boxes at all the goal squares}
+          PutBoxesAtGoals;
 
           Square:=PlayerPos; {goal squares contain boxes, hence, ensure that the player isn't on a goal square}
           while  ((Board[Square] and (BOX+WALL+FLAG_BOX_REACHABLE_SQUARE))<>FLAG_BOX_REACHABLE_SQUARE) and {the goal squares contain boxes; ensure that the player isn't on top of one of them}
@@ -11828,7 +13592,9 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           MovePlayer(Square);
           CalculatePlayersReachableSquares(0);                                  {the reachable squares timestamps were cleared before the 'repeat' loop, hence, the squares in an unvisited player access area contain '0'}
 
-          for GoalNo:=1 to GoalCount do Dec(Board[GoalPos[GoalNo]],BOX);        {remove boxes from the goal squares again}
+          RemoveBoxesFromGoals;
+
+          //ShowBoard; Write(MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS-ParkBoxesCountDown); Readln;
 
           Result:=Search(PlayerPos,PackingOrderType__);                         {postcondition: 'Search()' has removed boxes from the board (from the goal squares and any parking squares)}
 
@@ -11845,14 +13611,14 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
              MovePlayer(Square);
              end;
 
-        until Result or (PlayerPos=OldPlayerPos); {until a packing order has been found, or until all player access areas on the board have been tested}
+        until Result or (PlayerPos=OldPlayerPos);                               {until a packing order has been found, or until all player access areas on the board have been tested}
 
-        for BoxNo:=1 to BoxCount do Inc(Board[BoxPos[BoxNo]],BOX);              {put all boxes back on the board}
+        PutBoxesOnBoard;
         MovePlayer(OldPlayerPos);                                               {restore player position}
 
         if Result then begin
            if GoalAndParkingSquareCount>GoalCount then                          {'True': some boxes require parking; calculate the distances from all squares to the parking squares; the parking squares are handled as pseudo goal squares}
-              CalculateSquareGoalDistances(Succ(GoalCount),GoalAndParkingSquareCount,0,False,SquareGoalDistance,GoalBoxSets);
+              CalculateSquareGoalDistances(Succ(GoalCount),GoalAndParkingSquareCount,0,False,SquareGoalDistance,GoalBoxSets); {'Succ(GoalCount)': calculate distances for parking squares}
            if ( 2 * GoalAndParkingSquareCount ) < High( TBoxNo ) then begin
               {the square->goal distance table is big enough to contain the
               distances calculated taking the packing order into account;
@@ -11861,7 +13627,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
               and penalties based on distances to goals and parking spaces to
               fill in the current game phase}
               DistancesBasedOnPackingOrder:=GoalAndParkingSquareCount; {offset from the normal distances where the packing order aware distances can be found}
-              CalculateSquareGoalDistances(1,GoalAndParkingSquareCount,DistancesBasedOnPackingOrder,True,SquareGoalDistance,GoalBoxSets);
+              CalculateSquareGoalDistances(1,GoalAndParkingSquareCount,DistancesBasedOnPackingOrder,True,SquareGoalDistance,GoalBoxSets); {calculate distances for real goal squares and for parking squares}
               end;
 (*
            {the peeling algorithm has peeled smaller groups from the board}
@@ -11932,37 +13698,54 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                   SetMembers[FirstSetMemberIndex[SetNo]+SetSize[SetNo]]:=GoalNo;
                   end;
                end;
+
+           {calculate the last (lowest) game phase where a box is parked because
+            a goal square must be filled with a box coming from a relatively
+            small area of the board}
+           i:=LastPhaseWithABoxParkedInASmallArea;
+           LastPhaseWithABoxParkedInASmallArea:=Succ(SetCount); {'Succ()': none, i.e., no boxes parked in a small area because a goal must be filled with a box coming from a relative small area of the board}
+           for GoalNo:=1 to GoalAndParkingSquareCount do begin
+               SetNo:=ParkedBoxDestinationGoalSetNo[GoalNo];
+               if (SetNo>0) and (SetNo<=i) then
+                  LastPhaseWithABoxParkedInASmallArea:=Min(GoalSetNo[GoalNo],LastPhaseWithABoxParkedInASmallArea);
+               end;
            end
         else begin
            SetCount:=0; {'0': no packing order}
            FillChar(GoalSetNo,SizeOf(GoalSetNo),0);
+           GoalAndParkingSquareCount:=GoalCount;
+           LastPhaseWithABoxParkedInASmallArea:=0;
            end;
 
         {restore the board, and store the goal numbers in the board square values for all goal squares and parking squares}
         for GoalNo:=1 to GoalCount do Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]] or GOAL; {ensure that goals are back on the board}
-
-        for GoalNo:=0 to GoalAndParkingSquareCount do NextGoalAtSameSquare[GoalNo]:=GoalNo; {initially, make a circular list for each goal, where the goal itself is the only member of the list}
+        for Square:=0 to MAX_BOARD_SIZE            do Board[Square]:=Board[Square] and ((1 shl GOAL_BIT_SHIFT_COUNT)-1); {remove any old goal numbers which link back from board squares to goals}
         for GoalNo:=1 to GoalAndParkingSquareCount do begin {for each goal and parking square}
-            SquareValue                       :=Board[GoalPos[GoalNo]];               {the board square value for the goal number}
-            SquareGoalNo                      :=SquareValue shr GOAL_BIT_SHIFT_COUNT; {the existing goal number for this square; a parking square may overlap real goal squares and previous parking squares}
-            NextGoalAtSameSquare[GoalNo      ]:=NextGoalAtSameSquare[SquareGoalNo];   {link from the current goal back to the first member of the circular list of goals for this square}
-            NextGoalAtSameSquare[SquareGoalNo]:=GoalNo;                               {link from the existing goal number for this square to the current goal number}
-
-            Board[GoalPos[GoalNo]]:=(SquareValue and (not WALL))                {remove temporary wall, if any, from the goal square}
-                                    -(SquareGoalNo shl GOAL_BIT_SHIFT_COUNT)    {substract previously inserted goal number from the square value}
-                                    +(GoalNo shl GOAL_BIT_SHIFT_COUNT);         {insert the goal number in the square value, so there is a mapping from the board square values to the highest goal/parking place number}
+            Square                :=GoalPos[GoalNo];
+            SquareValue           :=Board[Square];                              {the board square value for the goal number}
+            SquareGoalNo          :=Cardinal(SquareValue shr GOAL_BIT_SHIFT_COUNT); {the existing goal number for this square; a parking square may overlap real goal squares and previous parking squares}
+            Board[GoalPos[GoalNo]]:=(SquareValue   and (not WALL))              {remove temporary wall, if any, from the goal square}
+                                    -Integer(Cardinal(SquareGoalNo shl GOAL_BIT_SHIFT_COUNT))  {substract previously inserted goal number from the square value}
+                                    +Integer(Cardinal(GoalNo       shl GOAL_BIT_SHIFT_COUNT)); {insert the goal number in the square value, so there is a mapping from the board square values to the highest goal/parking place numbers}
             end;
-        if Result then
-           CalculateFreezeDeadlocks; {calculate freeze deadlocks based on the packing order}
+
+        for GoalNo:=1 to GoalAndParkingSquareCount do NextGoalAtSameSquare[GoalNo]:=GoalNo; {initially, make a circular list for each goal, where the goal itself is the only member of the list}
+        for GoalNo:=GoalAndParkingSquareCount downto 1 do begin                        {for each goal and parking square}
+            SquareValue                       :=Board[GoalPos[GoalNo]];                {the board square value for the goal number}
+            SquareGoalNo                      :=Cardinal(SquareValue shr GOAL_BIT_SHIFT_COUNT); {the highest real goal number or parking space for this square; a parking square may overlap real goal squares and other parking squares}
+            NextGoalAtSameSquare[GoalNo      ]:=NextGoalAtSameSquare[SquareGoalNo];    {link from the current goal to the next member of the circular list of goals for this square}
+            NextGoalAtSameSquare[SquareGoalNo]:=GoalNo;                                {link from the highest goal number for this square to the current goal number; this is the link from the last member of the circular list back to the first member}
+            end;
         end;
 
-      if Result and (LogFile.FileName<>'') then with Game do begin
-         //WritelnToLogFile('');
-         case PackingOrderType__ of
-           poPullBoxesToStartingPositionsWithParking   : WritelnToLogFile(TEXT_PACKING_ORDER+': Parking');
-           poPullBoxesToStartingPositionsWithoutParking: WritelnToLogFile(TEXT_PACKING_ORDER+': Simple, i.e., no parking required');
-           else                                          WritelnToLogFile(TEXT_PACKING_ORDER+': Failed (This is just a fallback packing order)');
-         end; // case
+      if Result and (LogFile.FileName<>'') then with Game do with Solver.PackingOrder do begin
+         WritelnToLogFile('');
+         if        GoalAndParkingSquareCount>BoxCount then
+                   WritelnToLogFile(TEXT_PACKING_ORDER+': Parking')
+         else if   (PackingOrderType__=poPullBoxesToStartingPositionsWithParking) or
+                   (PackingOrderType__=poPullBoxesToStartingPositionsWithoutParking) then
+                   WritelnToLogFile(TEXT_PACKING_ORDER+': Simple, i.e., no parking required')
+              else WritelnToLogFile(TEXT_PACKING_ORDER+': Failed (This is just a fallback packing order)');
          PackingOrderToText(BoardAsTextLines);
          for Row:=1 to BoardHeight do WritelnToLogFile(BoardAsTextLines[Row]);
          //WritelnToLogFile('');
@@ -11982,8 +13765,9 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     }
     with Game do with Solver.PackingOrder do begin
       TimeMS:=GetTimeMS; {remember the start time; the field is updated to elapsed time upon exit from the funtion}
-      SetCount:=0; SetMembers[0]:=0; FirstSetMemberIndex[0]:=0; FirstSetMemberIndex[1]:=0; DistancesBasedOnPackingOrder:=0;
+      SetCount:=0; SetMembers[0]:=0; FirstSetMemberIndex[0]:=0; FirstSetMemberIndex[1]:=0; DistancesBasedOnPackingOrder:=0; BestGoalSetCount:=0;
       FillChar(GoalSetNo,SizeOf(GoalSetNo),0);
+      {SquareDirectionTimestamp:=High(SquareDirectionTimestamp);}
       Solver.PushCount:=0;
 
       if Solver.Enabled and Solver.PackingOrder.Enabled and (Solver.SearchMethod=smPerimeter) then begin
@@ -12007,10 +13791,11 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
             //CalculateReachableBoxStartPositionsForAllSquares(SquareBoxSets); {first calculate the reachable box starting positions from all squares}
             //CalculateReachableGoalsFromEachBoxStartPosition(SquareBoxSets,BoxGoalSets); {then calculate the reachable goals from each box starting position}
             //CalculatePullReachableGoalsForAllSquares(SquareGoalSets);
-
-            if        CalculatePackingOrder__(poPullBoxesToStartingPositionsWithoutParking) then {first try pulling all boxes straight to the box starting positions}
-            else if   CalculatePackingOrder__(poPullBoxesToStartingPositionsWithParking) then {then try pulling all boxes to box starting positions with intermediate steps, parking boxes at suitable squares}
-                 else CalculatePackingOrder__(poPullBoxes); {as fall back method, simply pull boxes away from goal squares}
+            CalculateTunnelSquares; // this is necessary when the first call to 'CalculatePackingOrder__' isn't with PackingOrderType__=poPullBoxesToStartingPositionsWithoutParking
+            //if        CalculatePackingOrder__(poPullBoxesToStartingPositionsWithoutParking) then {first try pulling all boxes straight to the box starting positions}
+            //else
+                 if   CalculatePackingOrder__(poPullBoxesToStartingPositionsWithParking) then {then try pulling all boxes to box starting positions with intermediate steps, parking boxes at suitable squares}
+                 else CalculatePackingOrder__(poPullBoxes); {as fallback method, simply pull boxes away from goal squares}
 
             Solver.SearchLimits:=OriginalSearchLimits; {restore search limits}
             end;
@@ -12020,13 +13805,9 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
 
       Solver.PushCount:=0;
 
-      if Game.DeadlockSets.Count > Game.DeadlockSets.PrecalculatedSetsCount then begin {'True': new deadlock sets have been created by the packing order calculation; they must be added to the precalculated sets}
+      if Game.DeadlockSets.Count > Game.DeadlockSets.PrecalculatedSetsCount then begin {'True': new deadlock-sets have been created by the packing order calculation; they must be added to the precalculated sets}
          Game.DeadlockSets.PrecalculatedSetsCount   := Game.DeadlockSets.Count;
-         {protect the per square deadlock set numbers from overwriting by items in the transposition table by setting the 'EndOfPositions' high water mark}
-         Positions.EndOfPositions                   := Pointer( Addr( Positions.Positions^[ Positions.Capacity ] ) );
-         {remember the per square deadlock set numbers for the precalculated deadlock sets}
-         DeadlockSets.PrecalculatedSquareSetNumbers := DeadlockSets.SquareSetNumbers;
-         Game.DeadlockSets.DynamicSetsCount         := 0; {reset count; the newly created deadlock sets have been registered as dynamic deadlocks rather than precalculated deadlocks}
+         Game.DeadlockSets.DynamicSetsCount         := 0; {reset count; the newly created deadlock-sets were registered as dynamic deadlocks rather than precalculated deadlocks}
          end;
 
       {$IFDEF CONSOLE_APPLICATION}
@@ -12085,12 +13866,12 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                    y-#
 
                    if "x" is a floor then the ">" square is not just a door
-                   square; at the same time it's a corner square belonging to
-                   the room having "x" as member (the top-right quadrant);
+                   square; it's also a corner square belonging to the room
+                   having "x" as member (the top-right quadrant);
 
                    if "y" is a floor then the ">" square is not just a door
-                   square; at the same time it's a corner square belonging to
-                   the room having "y" as member (the bottom-left quadrant);
+                   square; it's also a corner square belonging to the room
+                   having "y" as member (the bottom-left quadrant);
                   }
                   if DoorSquares[Square]=0 then begin
                      ASquare:=Square;
@@ -12114,12 +13895,12 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
 
                    or mirrored squares, but with the same direction:
                    ?-#  "?": don't care
-                   #>-  ">": the square; the direction is =>; "-": floor squares
+                   #>-  ">": the square; the direction is ->; "-": floor squares
                    ?xy
 
                    if "x" and "y" are floor squares then the ">" square is not
-                   just a door square; at the same time it's a corner square
-                   belonging to the room having "x" and "y" as members
+                   just a door square; it's also a corner square belonging to
+                   the room having "x" and "y" as members
                   }
                   if DoorSquares[Square]=0 then begin
                      ASquare:=Square;
@@ -12276,9 +14057,10 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
       if Solver.Enabled then begin
          CalculateDoors;
          CalculateRooms__;
-         WriteRoomsToLogFile;
+         if Rooms.Count>0 then
+            WriteRoomsToLogFile;
          //for BoxNo:=1 to BoxCount do Inc(Rooms.RoomBoxCount[Rooms.Squares[BoxPos[BoxNo]].RoomNo]); {calculate the number of boxes in each room}
-         {ShowRooms;}
+         {ShowRooms;} 
          end;
       end;
   end; {CalculateRooms}
@@ -12312,6 +14094,7 @@ begin {InitializeGame}
     Game.EndPlayerPos:=0;
     Solver.PackingOrder.GoalAndParkingSquareCount:=Game.GoalCount;
     FillChar(SolutionPathHashValues,SizeOf(SolutionPathHashValues),0);
+    DeadlockSets.TestedCandidatesCount:=0;
     DeadlockSets.TimeMS:=0; Solver.PackingOrder.TimeMS:=0;
     InitializationTimeMS:=0; Solver.TimeMS:=0; Optimizer.TimeMS:=0;
 
@@ -12342,7 +14125,7 @@ begin {InitializeGame}
                    Solver.SearchStates[ 0 ].PlayersReachableSquares.Timestamp ) then
                  Dec( Board[ SquareNo ], FLOOR );                               {make the unreachable floor square a "non-floor"}
 
-          if not CalculateDeadlockSets(nil,DeadlockSetCandidate)  then SimpleLowerBound:=INFINITY; {'INFINITY': the level is unsolvable or the time-limit was exceeded}
+          if not CalculateDeadlockSets(nil,DeadlockSetCandidate) then SimpleLowerBound:=INFINITY; {'INFINITY': the level is unsolvable or the time-limit was exceeded}
           if SimpleLowerBound<>INFINITY then SimpleLowerBound:=CalculateSimpleLowerBound;
           if SimpleLowerBound<>INFINITY then begin
              CalculateRooms;
@@ -12413,7 +14196,7 @@ var
        Result:={inline simple checks for legal moves}
                (Squares[BoxPos[BoxNo__]-SquareOffsetForward[Direction__]]=TimeStamp){'=TimeStamp': the player can reach the opposite neighbor-square}
                and
-               ((Board [BoxPos[BoxNo__]+SquareOffsetForward[Direction__]] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE))=0) {'=0' the square is legal and not blocked by a wall or another box}
+               ((Board [BoxPos[BoxNo__]+SquareOffsetForward[Direction__]] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE))=0) {'0': the square is legal and not blocked by a wall or another box}
                and
                {extended checks for legal moves}
                YASS.IsALegalPush(BoxNo__,Direction__,-1);
@@ -12583,7 +14366,7 @@ var
       MovePlayer(OldPlayerPos);
 
       if Result<>0 then begin // 'True': the number of box changes has been reduced by rearranging the pushes on the solution path
-         // remove redundant to and fro pushes, e.g., going left and then right, with the player in the same player access area as before the two pushes
+         // remove redundant back and forth pushes, e.g., going left and then right, with the player in the same player access area as before the two pushes
          k:=Game.TubeFillingPushCount; // 'k': pushes performed so far
          i:=Succ(k); // first push on the solution path after tube-filling pushes, if any
          while i<Count do begin
@@ -12595,7 +14378,7 @@ var
            else begin // check if pushes 'i' and 'i+1' are redundant; the board position matches push 'i-1';
               NormalizedPlayerPos:=Solver.SearchStates[0].PlayersReachableSquares.MinPlayerPos; // remember the normalized player position for the current position
               if DoPushes(Succ(k),i+2,0,k)=2 then begin // 'True': the pushes 'i' and 'i+1' have been performed
-                 if NormalizedPlayerPos<>Solver.SearchStates[0].PlayersReachableSquares.MinPlayerPos then // 'True': the pushes 'i' and 'i+1' are not redundant, even though they are to and fro pushes
+                 if NormalizedPlayerPos<>Solver.SearchStates[0].PlayersReachableSquares.MinPlayerPos then // 'True': the pushes 'i' and 'i+1' are not redundant, even though they are back and forth pushes
                     k:=UndoPushes(Succ(i),k) // backtrack to the board position matching push 'i' and continue checking for redundant pairs from 'i+1'; (see i:=Succ(k) further down)
                  else begin // the pushes 'i' and 'i+1' are redundant
                     k:=UndoPushes(Pred(i),k); // backtrack to the board position matching push 'i-2'; the pushes 'i-1' and i+2' may be a new redundant pair;
@@ -12639,7 +14422,7 @@ var {$IFDEF CONSOLE_APPLICATION}
       a,b,
     {$ENDIF}
     i,j,n,Len,SquareNo:Integer; Ch:Char; Direction:TDirection;
-begin {replays a game from a string; mostly used for testing that deadlock sets are all right}
+begin {replays a game from a string; mostly used for testing that deadlock-sets are all right}
   Result:=True;
   Game.OriginalSolutionMoveCount:=0;
   Game.OriginalSolutionPushCount:=0; Game.DeadlockSets.IsALegalPushOverflowingSets[1]:=0;
@@ -12674,11 +14457,12 @@ begin {replays a game from a string; mostly used for testing that deadlock sets 
                   while (not Result) and (j<Game.BoxCount) do begin
                     Inc(j);
                     if Game.BoxPos[j]=SquareNo then begin
-                       Result:=IsALegalPush(j,Direction,0);
+                       Result:=IsALegalPush(j,Direction,0)
+                               and
+                               DoPush(j,Direction,0);
                        if Result then begin
                           Inc(Game.OriginalSolutionMoveCount);
                           Inc(Game.OriginalSolutionPushCount);
-                          DoPush(j,Direction,0);
                           if Game.OriginalSolutionPushCount<=High(Game.SolutionPathHashValues) then
                              Game.SolutionPathHashValues[Game.OriginalSolutionPushCount]:=Game.HashValue;
                           if Game.OriginalSolutionPushCount<=High(Game.History.Moves) then begin
@@ -12714,10 +14498,12 @@ begin {replays a game from a string; mostly used for testing that deadlock sets 
                             Msg('','');
 
                             if Game.DeadlockSets.IsALegalPushOverflowingSets[1]<>0 then begin
-                               Writeln; Writeln('Violated deadlock set:');
+                               Writeln; Writeln('Violated deadlock-set:');
                                Game.ShowDeadlockSetsEnabled:=True;
+                               //ShowDeadlockSet(Pred(Game.DeadlockSets.IsALegalPushOverflowingSets[1]),0);
                                ShowDeadlockSet(Game.DeadlockSets.IsALegalPushOverflowingSets[1],0);
                                Game.ShowDeadlockSetsEnabled:=False;
+                               Msg('','');
                                end;
                           {$ENDIF}
                           end;
@@ -12732,16 +14518,10 @@ begin {replays a game from a string; mostly used for testing that deadlock sets 
              Writeln('Moves: ',MoveCount,' Pushes: ',PushCount);
              Readln;
 }
-             end
-          else with Game do begin
-             OriginalSolution:='';
-             OriginalSolutionMoveCount:=0; OriginalSolutionPushCount:=0;
              end;
           end;
        end;
     end;
-
-    Game.History.Count:=Min(Game.OriginalSolutionPushCount,High(Game.History.Moves));
 
     n:=Game.OriginalSolutionMoveCount;
     while (i>0) and
@@ -12756,7 +14536,15 @@ begin {replays a game from a string; mostly used for testing that deadlock sets 
          end;
       end;
 
-    if Result then Inc(Game.DeadlockSets.SessionTestedGamesCount);
+    if Result then begin
+       Inc(Game.DeadlockSets.SessionTestedGamesCount);
+       end
+    else with Game do begin
+       OriginalSolution:='';
+       OriginalSolutionMoveCount:=0; OriginalSolutionPushCount:=0;
+       end;
+
+    Game.History.Count:=Min(Game.OriginalSolutionPushCount,High(Game.History.Moves));
 {
     ShowBoard;
     Msg('Start position','');
@@ -12790,14 +14578,13 @@ begin
      or
      Assigned(Solver.SokobanCallBackFunction) then begin
      Solver.TimeMS:=CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS);
-
      if Solver.TimeMS<Solver.SearchLimits.TimeLimitMS then begin
         if Assigned(Solver.SokobanCallBackFunction) and
            (Solver.TimeMS-Solver.LastCallBackTimeMS>=SOKOBAN_PLUGIN_CALL_BACK_FUNCTION_THRESHOLD_TIME_MS) then begin
            Solver.LastCallBackTimeMS:=Solver.TimeMS;
-           if PerformSokobanCallBackFunction<>0 then begin                      // '<>0': indicates that the plugin should terminate
-              Solver.Terminated:=True;                                          // terminate the solver, not just the current search
-              TerminateSearch;                                                  // terminate the current search
+           if PerformSokobanCallBackFunction<>0 then begin                      {'<>0': indicates that the plugin should terminate}
+              Solver.Terminated:=True;                                          {terminate the solver, not just the current search}
+              TerminateSearch;                                                  {terminate the current search}
               SetSokobanStatusText(TEXT_TERMINATED_BY_USER);
               end;
            end;
@@ -12914,9 +14701,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          repeat
            with Next^ do begin
              if   not Game.ReverseMode then begin
+                  Solver.SearchStates[PushCount].PlayersReachableSquares.Calculated:=False; {initialize 'Calculated' before calling 'DoPush()'}
                   // check that the push is legal; it's unlikely that 2 different
                   // positions accidentally have identical 64-bit hashvalues,
-                  // but if it happened it could destroy the path chains;
+                  // but if/when it happens it destroys the path chains;
                   //
                   // a more common reason for an illegal push is that the path
                   // to a position has changed; in that case there is still a
@@ -12935,7 +14723,6 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                              TerminateSearch;
                              end;
                            end;
-                      Solver.SearchStates[PushCount].PlayersReachableSquares.Calculated:=False; {initialize 'Calculated' before calling 'DoPush()'}
 {
                       if Solver.PushCount=2072 then begin
                          ShowBoard;
@@ -12945,7 +14732,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 }
                       if DoPush(Move.BoxNo,Move.Direction,PushCount) then begin
                          end
-                      else begin // the move was performed, but it violates one or more of the dynamically calculated deadlock sets
+                      else begin // the move was performed, but it violates one or more of the dynamically calculated deadlock-sets
                          UInt8(Move.Direction):=UInt8(Move.Direction) or POSITION_DEADLOCK_TAG;
                          Inc(Game.DeadlockSets.PathDeadlockCount);
 {
@@ -13084,7 +14871,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             //ShowBoard; Write('Goal'); Readln;
             for Index:=Count downto 1 do with Moves[Index] do {replay pulls}
                 DoPull(BoxNo,Direction);
-            //ShowBoard; Write('Backwards'); Readln;
+            //ShowBoard; Write('Backward'); Readln;
             {now backward box-numbers can be mapped to the forward numbers}
             FillChar(ForwardBoxNo,SizeOf(ForwardBoxNo),0);
             for BoxNo:=1 to Game.BoxCount do                                    {map backward box-numbers to numbers used in the forward game}
@@ -13116,22 +14903,136 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     if not Result then Positions.SolutionPosition:=nil;
   end; {Search.ConcatenateMovesFromBackwardSearch} {$I+}
 
-  procedure InitializeProgressCheckPoint(Score__:Integer; ClearLastPushedTimeStamps__ : Boolean);
+  procedure InitializeProgressCheckPoint;
   begin
     with Solver.ProgressCheckPoint do begin
-      PushCountDown:=SOLVER_PROGRESS_CHECK_POINT_INTERVAL;
-      if ClearLastPushedTimeStamps__ then begin
-         FillChar( BoxTimeStamps, SizeOf( BoxTimeStamps ), 0 );
-         BestScore:=High(BestScore);
-         end;
-      FillChar(PushedBoxes,SizeOf(PushedBoxes),0);
+      FillChar( BoxPushBonuses, SizeOf( BoxPushBonuses ), 0 );
+      FillChar( BoxPushCounts , SizeOf( BoxPushCounts  ), 0 );
+      FillChar( BoxTimeStamps , SizeOf( BoxTimeStamps  ), 0 );
+      FillChar( SortedBoxes   , SizeOf( SortedBoxes    ), 0 );
+      LazyBoxPushBonus:=LAZY_BOX_DEFAULT_PUSH_BONUS;
+      OpenListEscapeInterval:=DEFAULT_OPEN_LIST_ESCAPE_INTERVAL;
+      SortedBoxes.Count:=0;
+      BestGamePhase:=Solver.PackingOrder.SetCount;
+      BestScore:=High(BestScore);
+      NoProgressCount:=0;
+      InitializeRandomState(0,RandomState);
+      LastCheckPointPushCount:=Solver.PushCount;
+      PushCountDown:=SOLVER_PROGRESS_CHECKPOINT_INTERVAL;
+      end;
+  end; {Search.InitializeProgressCheckPoint}
+
+  function  MakeProgressCheckPoint(Score__,GamePhase__:Integer):Integer;
+    {if the score or the game phase is a new best result, then the function returns 0,
+     otherwise, the function returns the number of infrequently pushed boxes since the last checkpoint}
+  var GoalNo,Index:Integer;
+
+    function  CalculateBoxPushBonuses:Integer;
+    var BoxNo,CutoffPoint,Index,TotalPushCount:Integer;
+    begin {Search.MakeProgressCheckPoint.CalculateBoxPushBonuses}
+      {if the solver doesn't make any progress, then the normal evaluation
+       function isn't doing a good job; as an attempt to compensate for that,
+       the least frequently pushed boxes since the last progress checkpoint get
+       a bonus for being pushed during the next checkpoint interval;
+       precondition: the boxes have been sorted on their number of pushes;
+       }
+      with Game do with Solver.ProgressCheckPoint do begin
+        Result:=0; {'Result': the number of boxes which get a bonus}
+        TotalPushCount:=0; {calculate the total number of pushes since the last checkpoint}
+        for BoxNo:=1 to BoxCount do
+            Inc(TotalPushCount,BoxPushCounts[BoxNo]);
+        if TotalPushCount>=SOLVER_PROGRESS_CHECKPOINT_INTERVAL then begin {otherwise, this is the first time, or a new checkpoint is being made because a new better score has been found}
+           LazyBoxPushBonus:=LAZY_BOX_DEFAULT_PUSH_BONUS;
+           CutoffPoint:=((LAZY_BOX_PUSH_COUNT_PERCENTILE*TotalPushCount)+50) div 100; {calculate the cutoff point for the accumulated push counts}
+           for Index:=1 to BoxCount do begin
+               BoxNo:=SortedBoxes.Numbers[Index];
+               if   CutoffPoint>0 then begin
+                    BoxPushBonuses[BoxNo]:=LazyBoxPushBonus;
+                    Inc(Result);
+                    end
+               else BoxPushBonuses[BoxNo]:=0;
+               Dec(CutoffPoint,BoxPushCounts[BoxNo]); {countdown}
+               end;
+           //Writeln;
+           //for Index:=1 to BoxCount do begin
+           //    BoxNo:=SortedBoxes.Numbers[Index];
+           //    Writeln(Index:5,SortedBoxes.Numbers[Index]:5,BoxPushCounts[BoxNo]:10,BoxPushBonuses[BoxNo]:5);
+           //    end;
+           //Readln;
+           end
+        else begin {reset bonus}
+           LazyBoxPushBonus:=0;
+           for BoxNo:=1 to BoxCount do
+               BoxPushBonuses[BoxNo]:=0;
+           end;
+        SortedBoxes.Count:=Result; {set the count to the number of boxes which get a bonus}
+        end;
+    end; {Search.InitializeProgressCheckPoint.CalculateBoxPushBonuses}
+
+  begin {Search.MakeProgressCheckPoint}
+        {returns the number of infrequently pushed boxes since the last checkpoint}
+    with Solver.ProgressCheckPoint do begin
+      Result:=0;
       if Score__<BestScore then begin
          BestScore:=Score__;
          NoProgressCount:=0;
+         Inc(Result);
          end;
-      Score:=Score__;
+      if GamePhase__<BestGamePhase then begin
+         BestGamePhase:=GamePhase__;
+         NoProgressCount:=0;
+         Inc(Result);
+         end;
+      if Result=0 then begin {'True': this is not a new best score or a new best game phase; calculate statistics for the pushes since the last checkpoint}
+         {sort the boxes in ascending order on the number of pushes since last checkpoint; returns the number of 0-push boxes}
+         Result:=SortBoxes(SortedBoxes.Numbers,BoxPushCounts,Random(MaxInt-MAX_BOX_COUNT-1,RandomState));
+         SortedBoxes.Count:=0; {the count is not used for the number of boxes, but for the number of boxes which get a bonus; initialize it to zero;}
+         if (Solver.PackingOrder.SetCount>0) then
+            Result:=CalculateBoxPushBonuses; {calculate bonuses for pushing infrequently pushed boxes}
+
+         if (Solver.PackingOrder.LastPhaseWithABoxParkedInASmallArea>0) and
+            (Positions.Count>=Cardinal(Min(INITIAL_PARKING_POSITION_COUNT_LIMIT,Integer(Positions.Capacity div 4)))) then with Solver.PackingOrder do begin
+            {the initial parking operations seems to be unsuccesful; abandon all parking operations in the initial phases of the game}
+            for Index:=FirstSetMemberIndex[LastPhaseWithABoxParkedInASmallArea] to GoalAndParkingSquareCount do begin
+                GoalNo:=SetMembers[Index];
+                if GoalNo>Game.GoalCount then begin {'True': it's a parking square as opposed to a real goal square}
+                   {delete the parking square from the packing order; the search continues as if this parking square has been successfully filled}
+                   GoalSetNo[GoalNo]:=0;
+                   Game.GoalPos[GoalNo]:=0; {in effect designating a wall square}
+                   SetMembers[Index]:=0; {so a reference from the goal with this member index to the goal square in effect designates a wall square}
+                   ParkedBoxDestinationGoalSetNo[Index]:=0;
+                   end;
+                end;
+            Solver.PackingOrder.LastPhaseWithABoxParkedInASmallArea:=0;
+            //Writeln;
+            //Write('New packing order: ');
+            //for Index:=1 to GoalAndParkingSquareCount do Write(SetMembers[Index],SPACE);
+            //Readln;
+            end;
+
+         Inc(NoProgressCount);
+         if NoProgressCount>1 then begin
+            {$IFDEF CONSOLE_APPLICATION}
+              //Writeln('No progress: ', NoProgressCount);
+            {$ENDIF}
+            {toggle room pruning for the next "no progress" detection cycle}
+            Game.Rooms.Count := -Game.Rooms.Count;
+            end;
+
+         if ((NoProgressCount and 15)=0) and                                    {'True': it's a long time since the search made progress}
+            (OpenListEscapeInterval>MIN_OPEN_LIST_ESCAPE_INTERVAL) then         {begin to expand more of the seemingly inferior positions from the OPEN queue}
+            OpenListEscapeInterval:=OpenListEscapeInterval div 2;
+         end
+      else begin {new best score or game phase}
+         OpenListEscapeInterval:=DEFAULT_OPEN_LIST_ESCAPE_INTERVAL;
+         Result:=0;
+         end;
+      LastCheckPointPushCount:=Solver.PushCount;
+      PushCountDown:=SOLVER_PROGRESS_CHECKPOINT_INTERVAL;
+      FillChar(BoxPushCounts,SizeOf(BoxPushCounts[0])*Succ(Game.BoxCount),0);
+      //Writeln('Progress checkpoint ', Positions.Count, SPACE, Solver.PushCount);
       end;
-  end; {Search.InitializeProgressCheckPoint}
+  end; {Search.MakeProgressCheckPoint}
 
   {- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - }
 
@@ -13163,32 +15064,26 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
          LastPushedBoxNo:=Position__^.Move.BoxNo;
 
+         SuccessorPushCount:=Succ(Position__^.PushCount);
+
          {check for tunnel pushes}
          with Game do
-           {having 'SuccessorPushCount:=...' in both forks of the following}
-           {'if'-statement may look strange but the rationale is that since an}
-           {'if' cannot be avoided here, then the normal case should at least}
-           {'fall through' in order to avoid cpu stalling; therefore, this}
-           {assignment has been put into the 'if' so there is something to do}
-           {in the normal case}
-           if (Board[BoxPos[LastPushedBoxNo]] and DIRECTION_TO_TUNNEL_FLAG[TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)])=0 then
-              SuccessorPushCount:=Succ(Position__^.PushCount)
-           else with Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares do begin
-             SuccessorPushCount:=Succ(Position__^.PushCount);
-             {the box left a tunnel square, and therefore it's unnecessary}
-             {to generate moves for the other boxes; see 'CalculateTunnelSquares'}
-             {for figures depicting the situation}
-             for BoxNo:=1 to BoxCount do Squares[BoxPos[BoxNo]]:=0;             {mark all boxes as not being candidates for expansion in the current position}
-             Squares[BoxPos[LastPushedBoxNo]]:=Succ(TimeStamp);                 {mark the last pushed box as the only candidate for expansion in the current position}
-             UInt8(Position__^.Move.Direction):=UInt8(Position__^.Move.Direction) or POSITION_REVISIT_TAG; {nodes marked for revisiting are not subject to filters such as the corral pruning found in the forward search}
-             {
-             if True or (TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)<>dDown) then begin
-                ShowBoard;
-                Write(DIRECTION_TO_TEXT[TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)]);
-                Readln;
+           if (Board[BoxPos[LastPushedBoxNo]] and DIRECTION_TO_TUNNEL_FLAG[TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)])<>0 then
+              with Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares do begin
+                {the box left a tunnel square, and therefore it's unnecessary}
+                {to generate moves for the other boxes; see 'CalculateTunnelSquares'}
+                {for figures depicting the situation}
+                for BoxNo:=1 to BoxCount do Squares[BoxPos[BoxNo]]:=0;             {mark all boxes as not being candidates for expansion in the current position}
+                Squares[BoxPos[LastPushedBoxNo]]:=Succ(TimeStamp);                 {mark the last pushed box as the only candidate for expansion in the current position}
+                UInt8(Position__^.Move.Direction):=UInt8(Position__^.Move.Direction) or POSITION_REVISIT_TAG; {nodes marked for revisiting are not subject to filters such as the corral pruning found in the forward search}
+                {
+                 if True or (TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)<>dDown) then begin
+                   ShowBoard;
+                   Write(DIRECTION_TO_TEXT[TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)]);
+                   Readln;
+                   end;
+                }
                 end;
-             }
-             end;
 
          if   LastPushedBoxNo<>0 then
               BoxNo:=LastPushedBoxNo {starting with the last pushed box helps a little to make solutions look more natural}
@@ -13376,6 +15271,21 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
     if Game.TubeFillingPushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit then begin {'True': the level might be solvable with this search depth limit}
        OriginalCapacity := Positions.Capacity;                                  {remember the total transposition table capacity}
+
+       if Solver.SearchMethod=smPerimeter then with Positions do begin
+          {reserve memory for dynamically created deadlock sets, in case it's
+           necessary to perform a forward search after this backward search;
+           if the backward search was allowed to fill the transposition table
+           completely, then the forward search couldn't "steal" memory from the
+           top of the transposition table for the per-square deadlock set
+           numbers;
+           the memory reserved here supplements the memory already allocated
+           while precalculating deadlock sets at level load time;
+          }
+          Dec(Capacity, Capacity div 100); {reserve 1% of the transposition table memory for per-square deadlock set numbers}
+          UninitializedItemCount := Integer( Capacity );
+          end;
+
        if (Solver.SearchLimits.TimeLimitMS<High(Solver.SearchLimits.TimeLimitMS)) {'True': the search time is limited}
           and
           (Solver.SearchMethod<>smBackward) then begin                          {'True': the backward search isn't the only requested search; a forward search will follow if the the backward search doesn't find a solution}
@@ -13413,7 +15323,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
        OPENClear; {clear open-queue}
        OriginalReuseNodesEnabled:=Solver.ReuseNodesEnabled;
-       if Solver.SearchMethod=smPerimeter then Solver.ReuseNodesEnabled:=False;
+       if Solver.SearchMethod=smPerimeter then
+          Solver.ReuseNodesEnabled:=False;
        Positions.CurrentPosition:=nil;
        //Solver.HighestSearchDepth:=0;
 
@@ -13454,11 +15365,11 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
        while OPENRemoveNextPositionSelectedForExpansion(Position) do begin
          SetPosition(Position); {update the board so it matches this position}
          {ShowBoard; Write('Depth: ',Position^.PushCount); Readln;}
-         CalculatePlayersReachableSquares(Position^.PushCount);                 {find the player's reachable squares; a precondition for 'Search'}
+         CalculatePlayersReachableSquares(Position^.PushCount);              {find the player's reachable squares; a precondition for 'Search'}
          Search(Position);
          end;
 
-       if Positions.SolutionPosition<>nil then with Positions do begin
+       if (Positions.SolutionPosition<>nil) then with Positions do begin
           SetPosition(SolutionPosition);
 
           for BoxNo:=1 to Game.BoxCount do                                      {map backward box-numbers to numbers used in the forward game}
@@ -13515,7 +15426,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          WritelnToLogFile('Deadlock set statistics - blocked pushes');
          for i:=1 to Game.DeadlockSets.Count do begin
              WritelnToLogFile(IntToStr(i)+COLON+SPACE+IntToStr(Game.DeadlockSets.Statistics[i]));
-             Totals[i<=Game.DeadlockSets.PrecalculatedSetsCount]:=Totals[i<=Game.DeadlockSets.PrecalculatedSetsCount]+Game.DeadlockSets.Statistics[i]; {'i<=...': it's a precalculated deadlock set}
+             Totals[i<=Game.DeadlockSets.PrecalculatedSetsCount]:=Totals[i<=Game.DeadlockSets.PrecalculatedSetsCount]+Game.DeadlockSets.Statistics[i]; {'i<=...': it's a precalculated deadlock-set}
              if (i=Game.DeadlockSets.PrecalculatedSetsCount) and
                 (Game.DeadlockSets.PrecalculatedSetsCount<Game.DeadlockSets.Count) then
                 WritelnToLogFile(Copy(s,1,4));
@@ -13541,18 +15452,20 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         BoxSquares           : TBoxSquareSet;
         MinPlayerPos         : Integer;
         NextCorral           : PCorral; {linked list of neighboring corrals}
+        TimeStamp            : TTimeStamp;
       end;
 
     var
       BoxNo,CorralBoxCount,Distance,GoalNo,i,Index,j,k,LastPushedBoxNo,
-      NeighborSquare,OldPushCount,PositionScore,FreezePenalty,
+      NeighborSquare,OldPushCount,PositionScore,
       RoomNo,RoomPruningBoxCount,
       Square,SuccessorBoxPos,SuccessorPushCount,SuccessorScore,Col,Row:Integer;
       OldPositionCount:Cardinal;
       LowWaterBoxTimeStamp,OldTimeStamp:TTimeStamp;
-      HasAllBoxesOnGoals,IsACombinedCorral:Boolean; Direction:TDirection;
+      HasAllBoxesOnGoals,IsAMultiRoomCorral:Boolean; Direction:TDirection;
       SuccessorPosition:PPosition;
       CorralMinPlayerPos:TBoxSquareSet;
+//    s:String;
 //    PrunedBoxSet:TBoxSet;
 //    PositionHashValue:THashValue;
 //    SortedBoxSquares:array[TBoxNo] of UInt16; // for test only; it will overflow the stack if it's left in the production version}
@@ -13577,13 +15490,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                    SetSokobanStatusText(TEXT_SOLUTION_INFO_1+IntToStr(Position__^.PushCount)+TEXT_SOLUTION_INFO_2);
                    OPENDropPositions(Solver.SearchLimits.DepthLimit);           {prune the open-queue and the transpostion-table; there is no need to search paths longer than or equal to the best found solution}
                    end;
-           if not CheckDeadlockSetCapacities then begin                         {use the solution position for a sanity check of the deadlock set capacity calculation}
-              Msg(TEXT_INTERNAL_ERROR+': Wrong deadlock set capacity calculation.',TEXT_APPLICATION_TITLE);
+           if not CheckDeadlockSetCapacities then begin                         {use the solution position for a sanity check of the deadlock-set capacity calculation}
+              Msg(TEXT_INTERNAL_ERROR+': Wrong deadlock-set capacity calculation.',TEXT_APPLICATION_TITLE);
               end;
            end;
       end; {Search.ForwardSearch.Search.UpdateBestSolution}
 
-      function  CalculateCorralSquares(InnerFloorSquare__:Integer; var HasAllBoxesOnGoals__:Boolean; var Corral__:TCorral):Integer; {caution: assumes 4 directions only}
+      function  CalculateCorralSquares(InnerFloorSquare__:Integer; var {io} HasAllBoxesOnGoals__:Boolean; var Corral__:TCorral):Integer; {caution: assumes 4 directions only}
       var {Index,}BoardSquareValue,Square,NeighborSquare,NeighborSquare2:Integer;
           Direction:TDirection;
           BoxSquaresTop,StackTop:^Integer; Stack:array[0..MAX_BOARD_SIZE] of Integer; {caution: 'BoxSquaresTop' relies on 'TBoxSquareSet.BoxSquares' being a zero-based vector of integers where element 0 is unused}
@@ -13594,10 +15507,11 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
           Inc(TimeStamp,2); {reachable empty floors = timestamp; reachable boxes = timestamp + 1}
 
           Result:=0; Calculated:=True; MinPlayerPos:=InnerFloorSquare__;
-          Corral__.HashValue:=0;
-          BoxSquaresTop:=Addr(Corral__.BoxSquares.Squares); //Corral.BoxSquares.Count:=0;
+          Corral__.HashValue:=0; 
+          BoxSquaresTop:=Addr(Corral__.BoxSquares.Squares); // Corral.BoxSquares.Count:=0;
 
           if InnerFloorSquare__<>0 then begin
+             if (Game.Board[InnerFloorSquare__] and GOAL)<>0 then HasAllBoxesOnGoals__:=False; {if there are inner goal squares, not occupied by boxes, then the corral needs to be opened at some time}
              Result:=1; StackTop:=Addr(Stack[1]); StackTop^:=InnerFloorSquare__;
              Squares[InnerFloorSquare__]:=TimeStamp;
              while StackTop<>Addr(Stack[0]) do begin
@@ -13621,19 +15535,19 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                          Corral__.HashValue:=Corral__.HashValue xor Positions.SquareHashValues[NeighborSquare];
                          //Inc(BoxSquares.Count);
                          //BoxSquares.BoxSquares[BoxSquares.Count]:=NeighborSquare;
-                         Inc(BoxSquaresTop); BoxSquaresTop^:=NeighborSquare; {use pointer addressing to collect the box squares in the hope that it's slightly faster than array indexing}
+                         Inc(BoxSquaresTop); BoxSquaresTop^:=NeighborSquare; {use pointer addressing to collect the box squares, hoping that it's slightly faster than array indexing}
 
                          NeighborSquare2:=NeighborSquare+Game.SquareOffsetForward[Direction]; {the next square after the neighbor square in this direction}
                          if ((Game    .Board[NeighborSquare2] and BOX)<>0) and
                             (Squares        [NeighborSquare2]<TimeStamp) then begin
-                            if (((Game.Board[NeighborSquare2+Game.SquareOffsetLeft  [Direction]] and WALL)<>0) and
+                            if (((Game.Board[NeighborSquare2+Game.SquareOffsetLeft  [Direction]] and WALL)<>0) and {caution: assumes 4 directions only}
                                 ((Game.Board[NeighborSquare +Game.SquareOffsetLeft  [Direction]] and (WALL+BOX))=0) and
                                 ((Game.Board[        Square +Game.SquareOffsetLeft  [Direction]] and (WALL+BOX))=0)
                                { $$< the right-most box has just been added to the corral; the direction is <--; the left-most box is added too because it may contribute to close the fence around the corral}
                                { #-- "-": empty floor squares}
                                )
                                or
-                               (((Game.Board[NeighborSquare2+Game.SquareOffsetRight [Direction]] and WALL)<>0) and
+                               (((Game.Board[NeighborSquare2+Game.SquareOffsetRight [Direction]] and WALL)<>0) and {caution: assumes 4 directions only}
                                ((Game .Board[NeighborSquare +Game.SquareOffsetRight [Direction]] and (WALL+BOX))=0) and
                                ((Game .Board[        Square +Game.SquareOffsetRight [Direction]] and (WALL+BOX))=0)
                                { >$$ the left-most box has just been added to the corral; the direction is -->; the right-most box is added too because it may contribute to close the fence around the corral}
@@ -13650,7 +15564,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                             (Squares[NeighborSquare]<TimeStamp) and
                             ((Game.Board[Square+Game.SquareOffsetLeft[Direction]] and (WALL+BOX))<>0) then begin
                             { $<  this box has just been added to the corral; the direction is <--}
-                            { $#  this outer box is added too because it may contribute to close the fence around the corral; the square depicted by a wall may either be a wall or a box - the only requirement is that it's a non-empty square}
+                            { $#  this outer box is added too because it may contribute to close the fence around the corral; the square depicted by a wall may be either a wall or a box - the only requirement is that it's a non-empty square}
                             Squares[NeighborSquare]:=Succ(TimeStamp);
                             Corral__.HashValue:=Corral__.HashValue xor Positions.SquareHashValues[NeighborSquare];
                             Inc(BoxSquaresTop); BoxSquaresTop^:=NeighborSquare;
@@ -13674,8 +15588,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
           {calculate the number of boxes belonging to the corral; 'BoxSquareTop' points to the last added box square}
           Corral__.BoxSquares.Count:=(Cardinal(BoxSquaresTop)-Cardinal(Addr(Corral__.BoxSquares.Squares))) div SizeOf(TBoxSquare); {vector element 0 is not used}
-          Corral__.MinPlayerPos    :=MinPlayerPos; {return the normalized top-left player position}
           Corral__.IsANewCorral    :=False; {initialize the 'is a new corral?' flag}
+          Corral__.MinPlayerPos    :=MinPlayerPos; {return the normalized top-left player position}
+          Corral__.TimeStamp       :=TimeStamp;
           end;
       end; {Search.ForwardSearch.Search.CalculateCorralSquares}
 
@@ -13693,14 +15608,14 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
         //Writeln(Game.DeadlockSets.Count);
 
-        with CorralPosition__^.Move do begin
+        if Assigned(CorralPosition__) then with CorralPosition__^.Move do begin
           {Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_VISITED_TAG);}
           if   Result then
                Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_DEADLOCK_TAG)
           else {the corral could not be proved to be a deadlock at creation}
                {time; the search may later hit a dead end with this corral on}
                {the board; at that time it's tested once again if the corral}
-               {now is a deadlock (new deadlock sets can help finding a proof);}
+               {now is a deadlock (new deadlock-sets can help finding a proof);}
                {to that end, the 'open' tag is added here to signal that the}
                {second attempt hasn't been performed yet}
                Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_OPEN_TAG);
@@ -13724,7 +15639,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              end;
         {$ENDIF}
 
-        TimeCheck; {calculating deadlock sets can be a time-consuming operation; call the time check frequently}
+        TimeCheck; {calculating deadlock-sets can be a time-consuming operation; call the time check frequently}
 
         if Game.SimpleLowerBound>=INFINITY then
            Msg(TEXT_INTERNAL_ERROR,'CalculateCorralDeadlockStatus');
@@ -13793,7 +15708,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                 else break; {quick-and-dirty exit 'for each box number' loop}
         end; {Search.ForwardSearch.Search.TTAddNoPushesDeadlock.CanABoxBePushed}
 
-      begin {'TTAddNoPushesDeadlock' tries to add a deadlock set based upon a game state having no legal pushes}
+      begin {TTAddNoPushesDeadlock; tries to add a deadlock-set based upon a game state having no legal pushes}
             {preconditions:
              1. the game position is a deadlock, i.e., there are no legal pushes in the currect game position;
              2. the player's reachable squares have been calculated for the current game state
@@ -13839,7 +15754,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                if  IsACorralDeadlock__ then Result:=False; {for a corral-type candidate, require that at least one interior box can be removed; otherwise the new candidate doesn't differ from the existing corral}
                for BoxNo:=1 to BoxCount do with Solver.SearchStates[MAX_HISTORY_BOX_MOVES].PlayersReachableSquares do begin
                    Square:=BoxPos[BoxNo];
-                   if Square<>0 then begin {'True': the box belongs to the candidate set (e.g., the corral)}
+                   if Square<>0 then begin {'True': the box belongs to the candidate-set (e.g., the corral)}
                       if   Squares[Square]<TimeStamp then begin {'True': the player cannot reach the box (e.g., it's an interior corral box)}
                            RemoveBoxFromBoard(BoxNo);
                            if   CanABoxBePushed(SuccessorPushCount) then {'True': the box couldn't be removed without breaking the 'no legal pushes' condition for the current game state}
@@ -13902,7 +15817,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                          end;
                       end;
 
-                  if (Floors.Count>0) and  {'True': there is at least one floor square inside the corral; the following deadlock set calculation requires that; in particular, 'CommitDeadlockSet' requires it for calculating flags and capacity}
+                  if (Floors.Count>0) and  {'True': there is at least one floor square inside the corral; the following deadlock-set calculation requires that; in particular, 'CommitDeadlockSet' requires it for calculating flags and capacity}
                      (SquaresOutsideFence.Count>0) then begin {'True': there are floor squares outside the corral}
                      CenterSquare             :=Floors.Squares[1]; {elevate one the floor squares inside the corral to center square}
                      Flags                    :=[dsfIsADeadlock,dsfPlayerMustBeOutsideSet,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence]; {'dsfIsADeadlock': the corral is a deadlock; no further analysis is necessary}
@@ -13954,14 +15869,14 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       function  TTAddSingleRoomCorral(Position__:PPosition; var Corral__:TCorral):Boolean;
       var BoxIndex{,MemoryBlockByteSize,MemoryBlockPositionCount}:Integer;
           CorralPosition:PPosition; DeadlockSetCandidate:TDeadlockSetCandidate;
-      begin {adds a 1-pocket corral (an area fenced-in by boxes) to the transposition table; returns 'True' if the corral is added and classified as a deadlock}
+      begin {adds a single-room corral (an area fenced-in by boxes) to the transposition table; returns 'True' if the corral is added and classified as a deadlock}
         Result:=False; //exit;
         Corral__.IsANotStoredDeadlock:=False;
 {
-        if  Corral__.HashValue=7040650081781527456 then begin
+        if  Corral__.HashValue=7341582810470213089 then begin
             ShowBoard;
             Write(Solver.PushCount,SPACE,Positions.Count);
-            Readln;
+            //Readln;
             Game.Board[MAX_BOARD_SIZE]:=FLOOR;
             end;
 }
@@ -14000,15 +15915,15 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
             with Positions.SearchStatistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count);  {update statistics}
 {
-//          if HashValue=6115705272791024053 then begin
-            if Solver.PushCount=4383191 then begin
+            if CorralPosition.HashValue=1374239095250729304 then begin
+//          if Solver.PushCount=4383191 then begin
 //          if True then begin
                ShowBoard;
                Writeln('Deadlock? ','  Pushes: ',Solver.PushCount,'  Positions: ',Positions.Count,' Corral boxes: ',DeadlockSetCandidate.Boxes.Count);
                for BoxIndex:=1 to DeadlockSetCandidate.Boxes.Count do
                    Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[BoxIndex]),SPACE);
                Writeln;
-               Readln;
+               //Readln;
                Game.Board[MAX_BOARD_SIZE]:=FLOOR;
                end;
 }
@@ -14025,7 +15940,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             Corral__.IsANewCorral:=True; {the corral has been added to the transposition table}
 
             if (not Result) and {the candidate isn't a new deadlock, or it hasn't been stored because of a table overflow}
-               (dsfIsADeadlockButTableOverflow in DeadlockSetCandidate.Flags) then begin {'True': the candidate is a new deadlock set but is hasn't been saved because of table overflow}
+               (dsfIsADeadlockButTableOverflow in DeadlockSetCandidate.Flags) then begin {'True': the candidate is a new deadlock-set but is hasn't been saved because of table overflow}
                //ShowBoard;
                //Write('Deadlock, but table overflow. Pushes: ',Solver.PushCount);
                //Readln;
@@ -14043,7 +15958,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                end;
       end; {Search.ForwardSearch.Search.TTAddSingleRoomCorral}
 
-      function  TTAddCombinedCorral(Position__:PPosition; IsACombinedCorral__,HasNoLegalPushes__:Boolean; LowWaterBoxTimeStamp__:TTimeStamp; var CorralMinPlayerPos__:TBoxSquareSet):Boolean;
+      function  TTAddMultiRoomCorral(Position__:PPosition; IsAMultiRoomCorral__,HasNoLegalPushes__:Boolean; LowWaterBoxTimeStamp__:TTimeStamp; var CorralMinPlayerPos__:TBoxSquareSet):Boolean;
       {precondition: 'CorralPruning' has been called for the current game position 'Position__'}
       var BoxNo,Index,NeighborSquare,NeighborWallsCount,
           NeigborCorralSquaresCount,Square:Integer;
@@ -14086,121 +16001,124 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                              end;
                           end;
                    end;
-        end; {Search.ForwardSearch.Search.TTAddCombinedCorral.AddNeighborCorral}
+        end; {Search.ForwardSearch.Search.TTAddMultiRoomCorral.AddNeighborCorral}
 
-      begin {'TTAddCombinedCorral'; returns 'True' if the corral, or one of its variants after pruning, is classified as a deadlock}
+      begin {TTAddMultiRoomCorral; returns 'True' if the corral, or one of its variants after pruning, is classified as a deadlock}
         Result:=False; //exit;
         with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do
           repeat
             {collect box squares in the set and calculate the hash value}
             CorralHashValue:=0;
             DeadlockSetCandidate.Boxes.Count:=0; DeadlockSetCandidate.Boxes.Squares[0]:=0;
-            for BoxNo:=1 to Game.BoxCount do begin
-                Square:=Game.BoxPos[BoxNo];
-                if Squares[Square]>=LowWaterBoxTimeStamp__ then with DeadlockSetCandidate.Boxes do begin
-                   Inc(Count); Squares[Count]:=Square;
-                   CorralHashValue:=CorralHashValue xor Positions.SquareHashValues[Square];
-                   end
-                else begin {look for neighboring boxes that might contribute to close the fence around the corral}
-                   NeigborCorralSquaresCount:=0; NeighborWallsCount:=0;
-                   for Direction:=Low(Direction) to High(Direction) do begin
-                       NeighborSquare:=Square+Game.SquareOffsetForward[Direction];
-                       if Squares[NeighborSquare]>=LowWaterBoxTimeStamp__ then  {'True': the neighbor square is either a wall or a square belonging to the (combined) corral}
-                          if   Game.Board[NeighborSquare]<>WALL then begin      {'True': the neighbor square contains a box belonging to the (combined) corral}
-                               Inc(NeigborCorralSquaresCount);
-                               if ((Game.Board[Square+Game.SquareOffsetLeft [Direction]] and WALL)<>0)
-                                  or                                            {caution: assumes 4 directions only}
-                                  ((Game.Board[Square+Game.SquareOffsetRight[Direction]] and WALL)<>0) then
-                                  Inc(NeighborWallsCount);
-                               end;
-                       end;
-                   if NeighborWallsCount<>0 then Inc(NeigborCorralSquaresCount); {'True': neighboring walls, if any, count as one single corral "neighbor" square}
-
-                   if NeigborCorralSquaresCount>=2 then with DeadlockSetCandidate.Boxes do begin {'True': the box has at least one neighbor box which belongs to the (combined) corral}
+            for BoxNo:=1 to Game.BoxCount do
+                if DeadlockSetCandidate.Boxes.Count<=Game.DeadlockSets.BoxLimitForDynamicSets then begin
+                   Square:=Game.BoxPos[BoxNo];
+                   if Squares[Square]>=LowWaterBoxTimeStamp__ then with DeadlockSetCandidate.Boxes do begin
                       Inc(Count); Squares[Count]:=Square;
-
                       CorralHashValue:=CorralHashValue xor Positions.SquareHashValues[Square];
-                      Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.Squares[Square]:=LowWaterBoxTimeStamp__;
+                      end
+                   else begin {look for neighboring boxes that might contribute to close the fence around the corral}
+                      NeigborCorralSquaresCount:=0; NeighborWallsCount:=0;
+                      for Direction:=Low(Direction) to High(Direction) do begin
+                          NeighborSquare:=Square+Game.SquareOffsetForward[Direction];
+                          if Squares[NeighborSquare]>=LowWaterBoxTimeStamp__ then  {'True': the neighbor square is either a wall or a square belonging to the (combined) corral}
+                             if   Game.Board[NeighborSquare]<>WALL then begin      {'True': the neighbor square contains a box belonging to the (combined) corral}
+                                  Inc(NeigborCorralSquaresCount);
+                                  if ((Game.Board[Square+Game.SquareOffsetLeft [Direction]] and WALL)<>0)
+                                     or                                            {caution: assumes 4 directions only}
+                                     ((Game.Board[Square+Game.SquareOffsetRight[Direction]] and WALL)<>0) then
+                                     Inc(NeighborWallsCount);
+                                  end;
+                          end;
+                      if NeighborWallsCount<>0 then Inc(NeigborCorralSquaresCount); {'True': neighboring walls, if any, count as one single corral "neighbor" square}
+
+                      if NeigborCorralSquaresCount>=2 then with DeadlockSetCandidate.Boxes do begin {'True': the box has at least one neighbor box which belongs to the (combined) corral}
+                         Inc(Count); Squares[Count]:=Square;
+
+                         CorralHashValue:=CorralHashValue xor Positions.SquareHashValues[Square];
+                         Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.Squares[Square]:=LowWaterBoxTimeStamp__;
+                         end;
                       end;
-                   end;
-                end;
+                   end
+                else break; {too many boxes; drop the test;}
 
-            {check if the corral is a new one; if it is then store it}
-            if //(DeadlockSetCandidate.Boxes.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) and
-               TTAdd(CorralHashValue,CorralMinPlayerPos__.Squares[0]+MAX_BOARD_SIZE,
-                     0,DEADLOCK_SCORE,0,dUp,nil,CorralPosition)                 {'True': this is a new corral and now it has been added to the transposition table}
-               or
-               ((CorralPosition<>nil)                                           {'True': the corral has been saved in the transposition table earlier}
-                and
-                ((Ord(CorralPosition^.Move.Direction) and POSITION_OPEN_TAG)<>0) {'True': the corral wasn't classified as a deadlock at the time it was saved in the transposition table}
-               )
-               then begin
-               {test if the new corral is a deadlock}
-               DeadlockSetCandidate.Floors.Count:=CorralMinPlayerPos__.Count;   {add the normalized player positions for each "pocket" in the combined corral; 'CalculateDeadlockSets' floodfills from this set}
-               for Index:=1 to CorralMinPlayerPos__.Count do
-                   DeadlockSetCandidate.Floors.Squares[Index]:=CorralMinPlayerPos__.Squares[Index];
-               Square:=Positions.StartPosition^.PlayerPos;
-               if   ((Game.Board[Square] and (WALL+BOX+FLOOR))=FLOOR) and
-                    (Squares[Square]>=Pred(LowWaterBoxTimeStamp__)) then        {if the player in the starting position is located inside the set at an empty floor, then use it as center square; 'CalculateDeadlockSets' depends on that}
-                    DeadlockSetCandidate.CenterSquare:=Square
-               else DeadlockSetCandidate.CenterSquare:=CorralMinPlayerPos__.Squares[0]; {use the normalized (top-left) player position as center square}
-
-               DeadlockSetCandidate.MaxBoxCount:=DeadlockSetCandidate.Boxes.Count;
-               DeadlockSetCandidate.EscapedBoxesCountDown:=DeadlockSetCandidate.Boxes.Count; {all boxes must escape the fenced-in area; otherwise it's a deadlock}
-               DeadlockSetCandidate.GoalCount:=0; {the number of goals is recalculated from scratch by 'CalculateDeadlockSets' when the candidate has a center square, but the number must be initialized with a proper value}
-               DeadlockSetCandidate.Flags:=[];
-
-               with Positions.SearchStatistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count); {update statistics}
-{
-               if Game.HashValue=1391017276032698857 then begin
-                  ShowBoard;
-                  Writeln(Game.HashValue);
-                  for Index:=1 to DeadlockSetCandidate.Boxes.Count do
-                      Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[Index]),SPACE,SPACE);
-                  Game.Board[MAX_BOARD_SIZE]:=FLOOR;
-                  end;
-}
-               Result:=CalculateCorralDeadlockStatus(Position__,CorralPosition,DeadlockSetCandidate);
-{
-               if not Result
-                  and
-                  (Game.HashValue=1391017276032698857)
+            {check if the corral is a new one; if it is, then store it}
+            if DeadlockSetCandidate.Boxes.Count<=Game.DeadlockSets.BoxLimitForDynamicSets then begin
+               if TTAdd(CorralHashValue,CorralMinPlayerPos__.Squares[0]+MAX_BOARD_SIZE,
+                        0,DEADLOCK_SCORE,0,dUp,nil,CorralPosition)              {'True': this is a new corral and now it has been added to the transposition table}
+                  or
+                  ((CorralPosition<>nil)                                        {'True': the corral has been saved in the transposition table earlier}
+                   and
+                   ((Ord(CorralPosition^.Move.Direction) and POSITION_OPEN_TAG)<>0) {'True': the corral wasn't classified as a deadlock at the time it was saved in the transposition table}
+                  )
                   then begin
-                  ShowBoard;
-                  Writeln(Game.HashValue);
-                  for Index:=1 to DeadlockSetCandidate.Boxes.Count do
-                      Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[Index]),SPACE,SPACE);
-                  Writeln;
-                  Write('Deadlock: ',Solver.PushCount,SPACE,Positions.Count);
-                  Readln;
-                  //Writeln;
-                  end;
-}
-               with CorralPosition^.Move do Direction:=TDirection(Ord(Direction) and (not POSITION_OPEN_TAG)); {remove the 'open' tag, if any; ('open' = not tested as a deadlocked dead end corral)}
-               end
-            else if (CorralPosition<>nil) and
-                    ((Ord(CorralPosition^.Move.Direction) and POSITION_DEADLOCK_TAG)<>0) then
-                    Result:=True; {the corral has been added before and classified as a deadlock}
+                  {test if the new corral is a deadlock}
+                  DeadlockSetCandidate.Floors.Count:=CorralMinPlayerPos__.Count; {add the normalized player positions for each "room" in the combined corral; 'CalculateDeadlockSets' floodfills from this set}
+                  for Index:=1 to CorralMinPlayerPos__.Count do
+                      DeadlockSetCandidate.Floors.Squares[Index]:=CorralMinPlayerPos__.Squares[Index];
+                  Square:=Positions.StartPosition^.PlayerPos;
+                  if   ((Game.Board[Square] and (WALL+BOX+FLOOR))=FLOOR) and
+                       (Squares[Square]>=Pred(LowWaterBoxTimeStamp__)) then     {if the player in the starting position is located inside the set at an empty floor, then use it as center square; 'CalculateDeadlockSets' depends on that}
+                       DeadlockSetCandidate.CenterSquare:=Square
+                  else DeadlockSetCandidate.CenterSquare:=CorralMinPlayerPos__.Squares[0]; {use the normalized (top-left) player position as center square}
 
-            if  HasNoLegalPushes__ and {'True': there are no legal pushes in the current game position}
-                (not Result) and {'True': the corral has not been classified as a deadlock}
-                (CorralPosition<>nil) and {'True': the corral has been stored in the transposition table}
-                ((Ord(CorralPosition^.Move.Direction) and POSITION_NO_LEGAL_PUSHES_TEST_TAG)=0) {'True': it hasn't been tested yet, whether a deadlock pattern can be found by simple pruning of the corral (i.e., removal of some interior boxes)}
-                then
-                Result:=TTAddNoPushesDeadlock(Position__,CorralPosition,True,PrunedCorralPosition);
+                  DeadlockSetCandidate.MaxBoxCount:=DeadlockSetCandidate.Boxes.Count;
+                  DeadlockSetCandidate.EscapedBoxesCountDown:=DeadlockSetCandidate.Boxes.Count; {all boxes must escape the fenced-in area; otherwise it's a deadlock}
+                  DeadlockSetCandidate.GoalCount:=0; {the number of goals is recalculated from scratch by 'CalculateDeadlockSets' when the candidate has a center square, but the number must be initialized with a proper value}
+                  DeadlockSetCandidate.Flags:=[];
+
+                  with Positions.SearchStatistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count); {update statistics}
+{
+                  if Game.HashValue=1391017276032698857 then begin
+                     ShowBoard;
+                     Writeln(Game.HashValue);
+                     for Index:=1 to DeadlockSetCandidate.Boxes.Count do
+                         Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[Index]),SPACE,SPACE);
+                     Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+                     end;
+}
+                  Result:=CalculateCorralDeadlockStatus(Position__,CorralPosition,DeadlockSetCandidate);
+{
+                  if not Result
+                     and
+                     (Game.HashValue=1391017276032698857)
+                     then begin
+                     ShowBoard;
+                     Writeln(Game.HashValue);
+                     for Index:=1 to DeadlockSetCandidate.Boxes.Count do
+                         Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[Index]),SPACE,SPACE);
+                     Writeln;
+                     Write('Deadlock: ',Solver.PushCount,SPACE,Positions.Count);
+                     Readln;
+                     //Writeln;
+                     end;
+}
+                  with CorralPosition^.Move do Direction:=TDirection(Ord(Direction) and (not POSITION_OPEN_TAG)); {remove the 'open' tag, if any; ('open' = not tested as a deadlocked dead end corral)}
+                  end
+               else if (CorralPosition<>nil) and
+                       ((Ord(CorralPosition^.Move.Direction) and POSITION_DEADLOCK_TAG)<>0) then
+                       Result:=True; {the corral has been added before and classified as a deadlock}
+
+               if  HasNoLegalPushes__ and {'True': there are no legal pushes in the current game position}
+                   (not Result) and {'True': the corral has not been classified as a deadlock}
+                   (CorralPosition<>nil) and {'True': the corral has been stored in the transposition table}
+                   ((Ord(CorralPosition^.Move.Direction) and POSITION_NO_LEGAL_PUSHES_TEST_TAG)=0) {'True': it hasn't been tested yet, whether a deadlock pattern can be found by simple pruning of the corral (e.g., by removal of some interior boxes)}
+                   then
+                   Result:=TTAddNoPushesDeadlock(Position__,CorralPosition,True,PrunedCorralPosition);
+               end
+            else IsAMultiRoomCorral__:=True;                                    {too many boxes; fake having found a multi-room corral to exit the loop}
 
           until Result or
-                IsACombinedCorral__ or {if it's a combined corral then any neighboring corrals are already a part of the corral}
-                Solver.Terminated or
-                (AddNeighborCorral(DeadlockSetCandidate,CorralMinPlayerPos__)<=0); {'AddNeighborCorral': when the input corral is a single-room corral, there is a chance that a bigger combined corral constitutes a deadlock}
-      end; {Search.ForwardSearch.Search.TTAddCombinedCorral}
+                IsAMultiRoomCorral__ or {if it's a multi-room corral then any neighboring corrals are already a part of the corral}
+                (Solver.SearchLimits.DepthLimit<0) or {'True': the search has been terminated}
+                (AddNeighborCorral(DeadlockSetCandidate,CorralMinPlayerPos__)<=0); {'AddNeighborCorral': when the input corral is a single-room corral, there is a chance that a bigger multi-room corral constitutes a deadlock}
+      end; {Search.ForwardSearch.Search.TTAddMultiRoomCorral}
 
       function  TTAddFrozenGoalsPattern(GamePosition__:PPosition):Boolean;
-      const FROZEN_GOALS_PATTERN_THRESHOLD=3;
       var   GoalNo,OldCount,Square:Integer; PatternHashValue:THashValue;
             PatternPosition:PPosition;
             DeadlockSetCandidate:TDeadlockSetCandidate;
-      begin {creates deadlock sets based on boxes freezing at goal squares}
+      begin {creates deadlock-sets based on boxes freezing at goal squares}
         Result:=False; //exit;
         with Game do begin
           PatternHashValue:=0;
@@ -14215,31 +16133,33 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
               end;
 
           if (DeadlockSetCandidate.Boxes.Count>=FROZEN_GOALS_PATTERN_THRESHOLD) and {'True': the number of frozen goals >= threshold; for speed, smaller patterns are ignored}
-             TTAdd(PatternHashValue,MAX_BOARD_SIZE+1,0,0,0,dUp,nil,PatternPosition) then begin {'True': this is a new frozen goals pattern and now it has been added to the transposition table}
+             TTAdd(PatternHashValue,MAX_BOARD_SIZE+2,0,0,0,dUp,nil,PatternPosition) then begin {'True': this is a new frozen goals pattern and now it has been added to the transposition table}
              //DeadlockSetCandidate.MaxBoxCount:=DeadlockSetCandidate.Boxes.Count;
              //DeadlockSetCandidate.EscapedBoxesCountDown:=DeadlockSetCandidate.Boxes.Count; {all boxes must escape the fenced-in area; otherwise it's a deadlock}
              //DeadlockSetCandidate.GoalCount:=DeadlockSetCandidate.Boxes.Count;
-             DeadlockSetCandidate.Flags:=[dsfTestFrozenGoalsSet];               {with this flag, 'Boxes' is the only used deadlock set candidate information, hence, the other fields don't need to be filled}
+             DeadlockSetCandidate.Flags:=[dsfTestFrozenGoalsSet];               {with this flag only, 'Boxes' is the only used deadlock-set candidate information, hence, the other fields don't need to be filled}
              //DeadlockSetCandidate.CenterSquare:=0;
              //DeadlockSetCandidate.Floors.Count:=0;
 
              OldCount:=DeadlockSets.Count;
              CalculateDeadlockSets(GamePosition__,DeadlockSetCandidate);
-             Result:=OldCount<>DeadlockSets.Count; {returns 'True' if the frozen goals pattern produced new deadlock sets}
+             Result:=OldCount<>DeadlockSets.Count; {returns 'True' if the frozen goals pattern produced new deadlock-sets}
              end;
           end;
       end; {Search.ForwardSearch.Search.TTAddFrozenGoalsPattern}
 
       function  TTAddNoProgressPattern( Position__ : PPosition ) : Boolean; {registers any new "no progress" deadlocks and starts a new "no progress" detection cycle}
-      var BoxNo,MinPlayerPos:Integer; BoxHashValue:THashValue;
+      var BoxNo,MinPlayerPos{,OldCount}:Integer; TimeMS:TTimeMS; BoxHashValue:THashValue;
           DeadlockSetCandidate:TDeadlockSetCandidate;
+          BoxSet:TBoxSetWithCount;
+          //s:String;
 
-        procedure CalculatePlayersReachableSquaresWithPushableBoxesRemovedFromTheBoard;
+        procedure CalculatePlayersReachableSquaresWithBoxesRemovedFromTheBoard(const BoxSet__:TBoxSetWithCount);
         var BoxNo:Integer;
         begin
           for BoxNo:=1 to Game.BoxCount do
-              if Solver.ProgressCheckPoint.PushedBoxes[BoxNo] then
-                 Game.Board[Game.BoxPos[BoxNo]]:=Game.Board[Game.BoxPos[BoxNo]] and (not BOX); {temporarily remove the boxes which has moved/can move}
+              if BoxNo in BoxSet__.BoxSet then
+                 Game.Board[Game.BoxPos[BoxNo]]:=Game.Board[Game.BoxPos[BoxNo]] and (not BOX); {temporarily remove the boxes from the board}
 
           CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_SCRATCHPAD_1); {calculate the player's reachable squares in order to obtain the normalized (top-left) player position with only the not-pushed boxes on the board}
 {
@@ -14248,165 +16168,123 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
           Readln;
 }
           for BoxNo:=1 to Game.BoxCount do
-              if Solver.ProgressCheckPoint.PushedBoxes[BoxNo] then
+              if BoxNo in BoxSet__.BoxSet then
                  Game.Board[Game.BoxPos[BoxNo]]:=Game.Board[Game.BoxPos[BoxNo]] or BOX; {put all boxes back on the board}
         end;
 
-        function  PruneNotPushedBoxes:Boolean;
-        var BoxNo,Square,NeighborSquare:Integer; More:Boolean;
-            Direction:TDirection;
-        begin
-          {prune the set of unpushed boxes by removing the ones that can be
-           pushed if the pushable ones weren't blocking the access to them;
-           in other words, all pushable boxes are removed from the board, and
-           then the remaining boxes are tested for being pushable; this test
-           continues until no more boxes can be pushed and pruned;
-          }
-          Result:=False;
-          repeat
-            More:=False;
-            CalculatePlayersReachableSquaresWithPushableBoxesRemovedFromTheBoard;
-
-            {search for more boxes that can be pushed}
-            for BoxNo:=1 to Game.BoxCount do with Solver.SearchStates[SEARCH_STATE_INDEX_SCRATCHPAD_1].PlayersReachableSquares do
-                if not Solver.ProgressCheckPoint.PushedBoxes[BoxNo] then begin
-                   Square:=Game.BoxPos[BoxNo];
-                   for Direction:=Low(Direction) to High(Direction) do begin
-                       NeighborSquare:=Square+Game.SquareOffsetForward[Direction];
-                       if {inline simple checks for legal moves}
-                          (Squares[Square-Game.SquareOffsetForward[Direction]]=TimeStamp){'=TimeStamp': the player can reach the neighbor-square}
-                          and
-                          ((Game.Board[NeighborSquare] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE))=0) {'=0' the square is legal and not blocked by a wall or another box}
-                          and
-                          {extended checks for legal moves;}
-                          {note that the check isn't accurate here because the}
-                          {deadlock set capacities haven't been updated for the}
-                          {boxes that have been removed from the board;}
-                          {this means that fewer boxes are pruned than a more}
-                          {accurate pruning could have done}
-                          IsALegalPush(BoxNo,Direction,-1) then begin
-                          More:=True; Result:=True;
-                          Solver.ProgressCheckPoint.PushedBoxes[BoxNo]:=True;
-                          break; {quick and dirty exit the 'for each direction' loop as soon as it's known that the box can be pushed in one of the directions}
-                          end;
-                       end;
-                   end;
-          until not More;
-
-          if Result then begin
-             Result:=False;
-             for BoxNo:=1 to Game.BoxCount do
-                 if not Solver.ProgressCheckPoint.PushedBoxes[BoxNo] then Result:=True; {'True': the pruned set isn't empty}
-             end;
-        end; {PruneNotPushedBoxes}
-
-        function  MakeDeadlockSetCandidateWithNotPushedBoxes(var BoxHashValue__:THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__:TDeadlockSetCandidate):Boolean;
+        function  MakeDeadlockSetCandidateWithBoxSet(const BoxSet__:TBoxSetWithCount; var BoxHashValue__:THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__:TDeadlockSetCandidate):Boolean;
         var BoxNo,Square:Integer;
         begin
           with DeadlockSetCandidate__ do begin
             BoxHashValue__:=0; Boxes.Count:=0; GoalCount:=0; CenterSquare:=0; Flags := [dsfIsANoProgressDeadlockCandidate];
 
             for BoxNo:=1 to Game.BoxCount do
-                if not Solver.ProgressCheckPoint.PushedBoxes[BoxNo] then begin
+                if BoxNo in BoxSet__.BoxSet then begin
                    Square:=Game.BoxPos[BoxNo];
                    Inc(Boxes.Count); Boxes.Squares[Boxes.Count]:=Square;
                    BoxHashValue__:=BoxHashValue__ xor Positions.SquareHashValues[Square];
                    if (Game.Board[Square] and GOAL)<>0 then Inc(GoalCount);
                    end;
 
-            CalculatePlayersReachableSquaresWithPushableBoxesRemovedFromTheBoard; {calculates player's reachable squares and normalized (top-left) player position}
+            CalculatePlayersReachableSquaresWithBoxesRemovedFromTheBoard(BoxSet__); {calculates player's reachable squares and normalized (top-left) player position}
             MinPlayerPos__ := Solver.SearchStates[ SEARCH_STATE_INDEX_SCRATCHPAD_1 ].PlayersReachableSquares.MinPlayerPos;
 
             Result:=(Boxes.Count>=MIN_NO_PROGRESS_DEADLOCK_SET_CANDIDATE_BOX_COUNT) and (Boxes.Count>GoalCount);
             end;
-        end; {MakeDeadlockSetCandidateWithNotPushedBoxes}
+        end; {MakeDeadlockSetCandidateWithBoxSet}
 
-        function  MakeDeadlocklockSetCandidateWithInactiveBoxes( var BoxHashValue__ : THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
+        function  MakeDeadlockSetCandidateWithInactiveBoxes( var BoxHashValue__ : THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
         const ACTIVE_BOX_THRESHOLD = 200 * ONE_KIBI;
         var BoxNo, NeigborCorralSquaresCount, OppositeAxisBlockCount, OldPlayerPos, Square : Integer;
             ActiveBoxThreshold : Cardinal;
             Direction : TDirection;
+            BoxSet:TBoxSetWithCount;
         begin
           Result := False;
           if   Positions.Count    >  ACTIVE_BOX_THRESHOLD then
                ActiveBoxThreshold := Positions.Count - ACTIVE_BOX_THRESHOLD
           else ActiveBoxThreshold := 0;
-          {find a box which hasn't moved in a long time; and which is part of
+          FillChar(BoxSet,SizeOf(BoxSet),0);
+          {find a box which hasn't moved for a long time; and which is part of a
            corral with the player currently on the outside}
           Square := 0;
+          CalculatePlayersReachableSquares( SEARCH_STATE_INDEX_SCRATCHPAD_1 );
           for BoxNo := 1 to Game.BoxCount do with Solver.ProgressCheckPoint do begin
-              if Square = 0 then begin {'True': no corral with inactive boxes found yet}
-                 if ( BoxTimeStamps[ BoxNo ] < ActiveBoxThreshold ) and
+              if Square = 0 then begin {'True': no corral consisting of inactive boxes found yet}
+                 if ( BoxTimeStamps[ BoxNo ] < ActiveBoxThreshold ) and {'True'; the box hasn't moved for a long time}
                     ( not IsAGoalSquare( Game.BoxPos[ BoxNo ] ) ) then
                     for Direction := Low( Direction ) to High( Direction ) do
                         if Square = 0 then begin {find an empty floor square next to the inactive box}
                            Square := Game.BoxPos[ BoxNo ] + Game.SquareOffsetForward[ Direction ];
-                           if IsAnEmptyFloorSquare( Square ) then begin
-                              OldPlayerPos := Game.PlayerPos;
-                              MovePlayer( Square );
-                              CalculatePlayersReachableSquares( SEARCH_STATE_INDEX_SCRATCHPAD_1 );
-                              MovePlayer( OldPlayerPos );
-                              with Solver.SearchStates[ SEARCH_STATE_INDEX_SCRATCHPAD_1 ].PlayersReachableSquares do
-                                if Squares[ Game.PlayerPos ] = TimeStamp then {'True': it's the player's current access area; continue search for a different access area}
-                                   Square := 0;
-                              end
-                           else Square := 0; {try next direction}
+                           with Solver.SearchStates[ SEARCH_STATE_INDEX_SCRATCHPAD_1 ].PlayersReachableSquares do
+                             if IsAnEmptyFloorSquare( Square ) and
+                                (Squares[ Square ] <> TimeStamp ) then begin {'True': an empty floor square which the player cannot reach}
+                                {exit loop now that a square inside a corral consisting of inactive boxes has been found}
+                                end
+                             else Square := 0; {try next direction}
                            end
-                        else break; {quick-and-dirty: exit loop when a corral with inactive boxes has been found}
+                        else break; {quick-and-dirty: exit loop when a corral consisting of inactive boxes has been found}
                  end
-              else break; {quick-and-dirty: exit loop when a corral with inactive boxes has been found}
+              else break; {quick-and-dirty: exit loop when a corral consisting of inactive boxes has been found}
               end;
 
-          if  Square <> 0 then with Solver.SearchStates[ SEARCH_STATE_INDEX_SCRATCHPAD_1 ].PlayersReachableSquares do begin
+          if  Square <> 0 then with Solver.SearchStates[ SEARCH_STATE_INDEX_SCRATCHPAD_1 ].PlayersReachableSquares do begin {'True': found a corral with the player currently on the outside}
+              OldPlayerPos := Game.PlayerPos;
+              MovePlayer( Square );
+              CalculatePlayersReachableSquares( SEARCH_STATE_INDEX_SCRATCHPAD_1 ); {mark boxes which belong to the corral}
+              MovePlayer( OldPlayerPos );
+
               DeadlockSetCandidate__.Boxes.Count := 0;
               DeadlockSetCandidate__.GoalCount := 0;
-              DeadlockSetCandidate__.CenterSquare := Square;
+              DeadlockSetCandidate__.CenterSquare := MinPlayerPos; {normalized (top-left) floor square inside the corral}
               DeadlockSetCandidate__.Flags := []; {'[]': normal treatment; processing the corral as a "no progress" deadlock candidate doesn't work; it produces false deadlocks when the search explores variations of the base deadlock candidate}
 
               BoxHashValue__:=0;
               for BoxNo := 1 to Game.BoxCount do begin
                   Square := Game.BoxPos[ BoxNo ];
-                  if   Squares[ Square ] < TimeStamp then begin
-                       {the box isn't a part of the corral; include it in the
-                        corral anyway if the box might contribute to close the
-                        fence around the corral;
-                       }
-                       NeigborCorralSquaresCount := 0;
-                       OppositeAxisBlockCount := 0;
-                       for Direction := Low( Direction ) to High( Direction ) do begin
-                           NeighborSquare := Square + Game.SquareOffsetForward[ Direction ];
-                           if Squares[ NeighborSquare ] = Succ( TimeStamp ) then   {'True': the neighbor square is either a wall or a square belonging to the corral}
-                              if   Game.Board[ NeighborSquare ] <> WALL then begin {'True': the neighbor square contains a box belonging to the corral}
-                                   Inc( NeigborCorralSquaresCount );
-                                   if ((Game.Board[ Square + Game.SquareOffsetLeft [ Direction ] ] and WALL ) <> 0 )
-                                      or                                           {caution: assumes 4 directions only}
-                                      ((Game.Board[ Square + Game.SquareOffsetRight[ Direction ] ] and WALL ) <> 0 )
-                                      or
-                                      (Squares[     Square + Game.SquareOffsetLeft [ Direction ] ]            =  Succ( TimeStamp ) )
-                                      or                                           {caution: assumes 4 directions only}
-                                      (Squares[     Square + Game.SquareOffsetRight[ Direction ] ]            =  Succ( TimeStamp ) )
-                                      then
-                                      Inc( OppositeAxisBlockCount );
-                                   end;
-                           end;
-                       if  OppositeAxisBlockCount <> 0 then                     {'True': there are wall and corral boxes blocking the other axis }
-                           Inc( NeigborCorralSquaresCount );                    {'True': walls and corral boxes blocking the other axis count as one single corral "neighbor" square}
-                       if  NeigborCorralSquaresCount >= 2 then                  {'True': the box has at least one neighbor box which belongs to the corral}
-                           Squares[ Square ] := TimeStamp;                      {'TimeStamp', not 'Succ( TimeStamp )' which here is reserved for the original members of the corral}
-                       end;
+                  if Squares[ Square ] < TimeStamp then begin
+                     {the box isn't a part of the corral; include it in the
+                      corral anyway if it looks like the box may contribute
+                      to close the fence around the corral;
+                     }
+                     NeigborCorralSquaresCount := 0;
+                     OppositeAxisBlockCount := 0;
+                     for Direction := Low( Direction ) to High( Direction ) do begin
+                         NeighborSquare := Square + Game.SquareOffsetForward[ Direction ];
+                         if Squares[ NeighborSquare ] = Succ( TimeStamp ) then   {'True': the neighbor square is either a wall or a square belonging to the corral}
+                            if   Game.Board[ NeighborSquare ] <> WALL then begin {'True': the neighbor square contains a box belonging to the corral}
+                                 Inc( NeigborCorralSquaresCount );
+                                 if ((Game.Board[ Square + Game.SquareOffsetLeft [ Direction ] ] and WALL ) <> 0 )
+                                    or                                           {caution: assumes 4 directions only}
+                                    ((Game.Board[ Square + Game.SquareOffsetRight[ Direction ] ] and WALL ) <> 0 )
+                                    or
+                                    (Squares[     Square + Game.SquareOffsetLeft [ Direction ] ]            =  Succ( TimeStamp ) )
+                                    or                                           {caution: assumes 4 directions only}
+                                    (Squares[     Square + Game.SquareOffsetRight[ Direction ] ]            =  Succ( TimeStamp ) )
+                                    then
+                                    Inc( OppositeAxisBlockCount );
+                                 end;
+                         end;
+                     if  OppositeAxisBlockCount <> 0 then                       {'True': there are wall and corral boxes blocking the other axis }
+                         Inc( NeigborCorralSquaresCount );                      {'True': walls and corral boxes blocking the other axis count as one single corral "neighbor" square}
+                     if  NeigborCorralSquaresCount >= 2 then                    {'True': the box has at least one neighbor box which belongs to the corral}
+                         Squares[ Square ] := TimeStamp;                        {'TimeStamp', not 'Succ( TimeStamp )' which here is reserved for the original members of the corral}
+                     end;
 
-                  if   Squares[ Square ] >= TimeStamp then begin                {'True': a corral box}
-                       Inc( DeadlockSetCandidate__.Boxes.Count );
-                       DeadlockSetCandidate__.Boxes.Squares[ DeadlockSetCandidate__.Boxes.Count ] := Square;
-                       BoxHashValue__ := BoxHashValue__ xor Positions.SquareHashValues[ Square ];
-                       if ( Game.Board[ Square ] and GOAL) <>0 then Inc( DeadlockSetCandidate__.GoalCount );
-                       Solver.ProgressCheckPoint.PushedBoxes[BoxNo] := False;
-                       end
-                  else Solver.ProgressCheckPoint.PushedBoxes[BoxNo] := True;
+                  if Squares[ Square ] >= TimeStamp then begin                  {'True': a corral box}
+                     Inc( DeadlockSetCandidate__.Boxes.Count );
+                     DeadlockSetCandidate__.Boxes.Squares[ DeadlockSetCandidate__.Boxes.Count ] := Square;
+                     BoxHashValue__ := BoxHashValue__ xor Positions.SquareHashValues[ Square ];
+                     if ( Game.Board[ Square ] and GOAL) <>0 then Inc( DeadlockSetCandidate__.GoalCount );
+                     end
+                  else begin {collect the set of non-corral boxes}
+                     Include(BoxSet.BoxSet,BoxNo);
+                     Inc(BoxSet.Count);
+                     end;
                   end;
 
-              CalculatePlayersReachableSquaresWithPushableBoxesRemovedFromTheBoard; {calculates player's reachable squares and normalized (top-left) player position}
-              MinPlayerPos__ := MinPlayerPos;
+              CalculatePlayersReachableSquaresWithBoxesRemovedFromTheBoard(BoxSet); {calculates player's reachable squares and normalized (top-left) player position with the non-corral boxes removed from the board}
+              MinPlayerPos__ := MinPlayerPos; {return the normalized (top-left) player position}
 
               Result:=( DeadlockSetCandidate__.Boxes.Count >= MIN_NO_PROGRESS_DEADLOCK_SET_CANDIDATE_BOX_COUNT ) and
                       ( DeadlockSetCandidate__.Boxes.Count >  DeadlockSetCandidate__.GoalCount );
@@ -14421,20 +16299,42 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                  end;
 }
               end;
-        end;
+        end; {MakeDeadlockSetCandidateWithInactiveBoxes}
+
+        function  MakeDeadlockSetCandidateWithCurrentPosition( var BoxHashValue__ : THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
+        var BoxNo,Square:Integer;
+        begin
+          with DeadlockSetCandidate__ do begin
+            BoxHashValue__:=0; Boxes.Count:=0; GoalCount:=0; CenterSquare:=0;
+            Flags := [dsfIsANoProgressDeadlockCandidate,dsIsAGameStateDeadlockCandidate,dsfPeelOffNonCorralBoxes]; {make the deadlock analysis peel off boxes which the player can push back and forth}
+            for BoxNo:=1 to Game.BoxCount do begin
+                Square:=Game.BoxPos[BoxNo];
+                Inc(Boxes.Count); Boxes.Squares[Boxes.Count]:=Square;
+                BoxHashValue__:=BoxHashValue__ xor Positions.SquareHashValues[Square];
+                if (Game.Board[Square] and GOAL)<>0 then Inc(GoalCount);
+                end;
+            CalculatePlayersReachableSquares( SEARCH_STATE_INDEX_SCRATCHPAD_1 );
+            MinPlayerPos__ := Solver.SearchStates[ SEARCH_STATE_INDEX_SCRATCHPAD_1 ].PlayersReachableSquares.MinPlayerPos;
+            Result:=(Boxes.Count>=MIN_NO_PROGRESS_DEADLOCK_SET_CANDIDATE_BOX_COUNT) and (Boxes.Count>GoalCount);
+            end;
+        end; {MakeDeadlockSetCandidateWithCurrentPosition}
 
         function CheckDeadlockSetCandidate( Position__ : PPosition; BoxHashValue__ : THashValue; MinPlayerPos__ : Integer; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
-        var //BoxNo : Integer;
+        var //BoxNo, OldCount : Integer;
             DeadlockPosition : PPosition;
+        //  OriginalBoard:TBoard;
         begin
           Result := False;
-          {check if the deadlock set candidate is a new pattern; if it is, then store it in the transposition table}
-          if //(DeadlockSetCandidate.Boxes.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) and
-             TTAdd(//UnpushedBoxesHashValue,MinPlayerPos+2*MAX_BOARD_SIZE,   {'2*MAX_BOARD_SIZE': separates unpushed-boxes patterns from normal game positions and from deadlocks stored in the transposition table}
-                   BoxHashValue__,MinPlayerPos__+MAX_BOARD_SIZE,             {'MAX_BOARD_SIZE': differentiates deadlock set candidates from normal game positions in the transposition table}
-                   0,0,0,dUp,nil,DeadlockPosition)                           {'True': the deadlock set candidate is a new pattern, and now it has been added to the transposition table}
+          DeadlockPosition:=nil;
+          {check if the deadlock-set candidate is a new pattern; if it is, then store it in the transposition table}
+          if (dsIsAGameStateDeadlockCandidate in DeadlockSetCandidate__.Flags)  {'True': the deadlock-set candidate is the current game state; don't create and save a new deadlock pattern in the transposition table}
              or
-             ((DeadlockPosition<>nil)                                        {'True': the pattern has been saved in the transposition table earlier}
+             //(DeadlockSetCandidate.Boxes.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) and
+             TTAdd(//UnpushedBoxesHashValue,MinPlayerPos+2*MAX_BOARD_SIZE,      {'2*MAX_BOARD_SIZE': separates unpushed-boxes patterns from normal game positions and from deadlocks stored in the transposition table}
+                   BoxHashValue__,MinPlayerPos__+MAX_BOARD_SIZE,                {'MAX_BOARD_SIZE': differentiates deadlock-set candidates from normal game positions in the transposition table}
+                   0,0,0,dUp,nil,DeadlockPosition)                              {'True': the deadlock-set candidate is a new pattern, and now it has been added to the transposition table}
+             or
+             ((DeadlockPosition<>nil)                                           {'True': the pattern has been saved in the transposition table earlier}
               and
               ((Ord(DeadlockPosition^.Move.Direction) and POSITION_OPEN_TAG)<>0) {'True': the pattern wasn't classified as a deadlock at the time it was saved in the transposition table}
              )
@@ -14448,102 +16348,154 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              DeadlockSetCandidate__.SquareOutsideFence:=0;
              DeadlockSetCandidate__.SquaresOutsideFence.Count:=0;
 {
+             Writeln;
+             ShowBoard;
+             OriginalBoard:=Game.Board;
+             Game.Board[Game.PlayerPos]:=Game.Board[Game.PlayerPos] and (not PLAYER);
+             for BoxNo:=1 to Game.BoxCount do Game.Board[Game.BoxPos[BoxNo]]:=Game.Board[Game.BoxPos[BoxNo]] and (not BOX);
+             for BoxNo:=1 to DeadlockSetCandidate__.Boxes.Count do with DeadlockSetCandidate do
+                 Game.Board[Boxes.Squares[BoxNo]]:=Game.Board[Boxes.Squares[BoxNo]] or BOX;
+
              ShowBoard;
              Writeln(Game.HashValue);
-
              for BoxNo:=1 to DeadlockSetCandidate__.Boxes.Count do
                  Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[BoxNo]),SPACE,SPACE);
+             if DeadlockSetCandidate__.CenterSquare<>0 then
+                Write(' Center: ',SquareToColRowAsText(DeadlockSetCandidate__.CenterSquare),' Player: ',SquareToColRowAsText(Game.PlayerPos));
              Writeln;
              Write('Check no progress deadlock: ',Game.DeadlockSets.Count,SPACE,Solver.PushCount,SPACE,Positions.Count);
              Readln;
+             Game.Board:=OriginalBoard;
 }
+             //OldCount:=Game.DeadlockSets.Count;
+
              Result:=CalculateCorralDeadlockStatus(Position__,DeadlockPosition,DeadlockSetCandidate__);
-
-             if Result then begin
-                DeadlockPosition^.Score:=DEADLOCK_SCORE;
 {
-                ShowBoard;
-                Writeln(Game.HashValue);
-
-                for BoxNo:=1 to DeadlockSetCandidate__.Boxes.Count do
-                    Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[BoxNo]),SPACE,SPACE);
-                Writeln;
-                Write('No progress deadlock: ',Game.DeadlockSets.Count,SPACE,Solver.PushCount,SPACE,Positions.Count);
+             if OldCount<>Game.DeadlockSets.Count then begin
+                while OldCount<Game.DeadlockSets.Count do begin
+                      Inc(OldCount);
+                      Game.ShowDeadlockSetsEnabled:=True;
+                      ShowDeadlockSet(OldCount,Game.DeadlockSets.CenterSquare[OldCount]);
+                      Game.ShowDeadlockSetsEnabled:=False;
+                      Writeln(Game.DeadlockSets.NoProgressDeadlockCheckTimeMS,SPACE,Solver.PushCount,':');
+                      end;
                 Readln;
-                //Writeln;
-
-                Game.ShowDeadlockSetsEnabled:=True;
-                ShowDeadlockSet(Game.DeadlockSets.Count,Game.DeadlockSets.CenterSquare[Game.DeadlockSets.Count]);
-                Game.ShowDeadlockSetsEnabled:=False;
-                Readln;
-}
                 end;
+}
+             if Assigned(DeadlockPosition) then begin
+                if Result then begin
+                   DeadlockPosition^.Score:=DEADLOCK_SCORE;
+{
+                   ShowBoard;
+                   Writeln(Game.HashValue);
 
-             with DeadlockPosition^.Move do Direction:=TDirection(Ord(Direction) and (not POSITION_OPEN_TAG)); {remove the 'open' tag, if any; ('open' = not tested as a deadlocked dead end corral)}
+                   for BoxNo:=1 to DeadlockSetCandidate__.Boxes.Count do
+                       Write(SquareToColRowAsText(DeadlockSetCandidate.Boxes.Squares[BoxNo]),SPACE,SPACE);
+                   Writeln;
+                   Write('No progress deadlock: ',Game.DeadlockSets.Count,SPACE,Solver.PushCount,SPACE,Positions.Count);
+                   Readln;
+                   //Writeln;
+
+                   Game.ShowDeadlockSetsEnabled:=True;
+                   ShowDeadlockSet(Game.DeadlockSets.Count,Game.DeadlockSets.CenterSquare[Game.DeadlockSets.Count]);
+                   Game.ShowDeadlockSetsEnabled:=False;
+                   Readln;
+}
+                   end;
+
+                with DeadlockPosition^.Move do Direction:=TDirection(Ord(Direction) and (not POSITION_OPEN_TAG)); {remove the 'open' tag, if any; ('open' = not tested as a deadlocked dead end corral)}
+                end;
              end;
-        end; {Search.ForwardsSearch.Search.TTAddNoProgressPattern.CheckDeadlockSetCandidate}
+        end; {Search.ForwardSearch.Search.TTAddNoProgressPattern.CheckDeadlockSetCandidate}
 
-      begin {'TTAddNoProgressPattern'}
+      begin {TTAddNoProgressPattern}
         Result:=False;
 
-        for BoxNo := 1 to Game.BoxCount do {update "last-pushed" timestamps for the boxes}
-            if Solver.ProgressCheckPoint.PushedBoxes[ BoxNo ] then
-               Solver.ProgressCheckPoint.BoxTimeStamps[ BoxNo ] := Positions.Count;
+        TimeMS:=GetTimeMS;
 
-        if MakeDeadlockSetCandidateWithNotPushedBoxes(BoxHashValue,MinPlayerPos,DeadlockSetCandidate) then
+        for BoxNo := 1 to Game.BoxCount do
+            if Solver.ProgressCheckPoint.BoxPushCounts[BoxNo]>0 then
+               Solver.ProgressCheckPoint.BoxTimeStamps[ BoxNo ] := Positions.Count; {update "last-pushed" timestamp for the box}
+
+        MakeProgressCheckPoint( Position__^.Score, Position__^.PackingOrder.SetNo); {start a new progress checkpoint interval}
+
+        FillChar(BoxSet,SizeOf(BoxSet),0);
+        for BoxNo:=1 to Solver.ProgressCheckPoint.SortedBoxes.Count do begin {'SortedBoxes.Count' contains the number of infrequently pushed boxes}
+            Inc(BoxSet.Count);
+            Include(BoxSet.BoxSet,BoxNo);
+            end;
+
+        if MakeDeadlockSetCandidateWithBoxSet(BoxSet,BoxHashValue,MinPlayerPos,DeadlockSetCandidate) then
            Result := CheckDeadlockSetCandidate( Position__, BoxHashValue, MinPlayerPos, DeadlockSetCandidate );
 
-        if ( not Result ) and ( Solver.PackingOrder.SetCount > 0 ) and {'>0': only try to make inactivity patterns, which aren't necessarily deadlocks, with packing order search, which already has dropped search completeness}
-           MakeDeadlocklockSetCandidateWithInactiveBoxes( BoxHashValue, MinPlayerPos, DeadlockSetCandidate) then begin
+        if ( not Result ) and ( Solver.PackingOrder.SetCount > 0 ) and {'>0': it's a packing order search; it's not a complete search so it's all right to make inactivity patterns, which aren't necessarily deadlocks}
+           MakeDeadlockSetCandidateWithInactiveBoxes( BoxHashValue, MinPlayerPos, DeadlockSetCandidate ) then begin
            Result := CheckDeadlockSetCandidate( Position__, BoxHashValue, MinPlayerPos, DeadlockSetCandidate );
+           end;
 
-           if False and
-              ( not Result ) and
-              {the deadlock detection module couldn't prove that the inactive
-               boxes are deadlocked; use the box configuration as a deadlock
-               anyway; (this is disabled because tests show that it loses more
-               solutions than it wins)
-              }
-              MakeDeadlocklockSetCandidateWithInactiveBoxes( BoxHashValue, MinPlayerPos, DeadlockSetCandidate ) then begin
-              DeadlockSetCandidate.Boxes.Squares[0]:=0;
-              DeadlockSetCandidate.Floors.Count:=0;
-              DeadlockSetCandidate.MaxBoxCount:=DeadlockSetCandidate.Boxes.Count;
-              DeadlockSetCandidate.EscapedBoxesCountDown:=DeadlockSetCandidate.Boxes.Count; {all boxes must escape the fenced-in area; otherwise it's a deadlock}
-              DeadlockSetCandidate.Flags:=[ dsfIsADeadlock, dsfIsANoProgressDeadlockCandidate, dsfIsANoProgressPattern ];
-              DeadlockSetCandidate.Capacity:=-1;
-              CalculateDeadlockSets( Position__, DeadlockSetCandidate );
+        if ( not Result ) and
+           MakeDeadlockSetCandidateWithCurrentPosition( BoxHashValue, MinPlayerPos, DeadlockSetCandidate ) then begin
+           if      (Solver.ProgressCheckPoint.NoProgressCount and 3)=0 then begin
+                   {try to find a deadlock including almost all the boxes, just peeling off the boxes which the player immediately can push back and forth}
+                   end
+           else if (Solver.ProgressCheckPoint.NoProgressCount and 15)=0 then begin
+                   {try to find a deadlock including all the boxes; the deadlock candidate analysis still goes through the path for peeling off boxes, but it doesn't peel off any boxes when the limit is 0}
+                   end;
+{
+           if Solver.PushCount>=1 then begin
+              ShowBoard;
+              Write('No progress position  Pushes:', Solver.PushCount, ' Deadlock Sets: ',Game.DeadlockSets.SequenceNo,SLASH,Game.DeadlockSets.Count);
+              Writeln;
+              Readln(s);
+              //s:='';
+              if s<>'' then
+                 if   (Game.Board[MAX_BOARD_SIZE] and FLOOR)=0 then
+                      Game.Board[MAX_BOARD_SIZE]:=FLOOR
+                 else Game.Board[MAX_BOARD_SIZE]:=WALL;
               end;
+}
+           //OldCount:=Game.DeadlockSets.Count;
+           Result := CheckDeadlockSetCandidate( Position__, BoxHashValue, MinPlayerPos, DeadlockSetCandidate );
+//
+{
+           Game.Board[MAX_BOARD_SIZE]:=WALL;
+           if OldCount<Game.DeadlockSets.Count then begin
+              while OldCount<Game.DeadlockSets.Count do begin
+                    Inc(OldCount);
+                    Game.ShowDeadlockSetsEnabled:=True;
+                    ShowDeadlockSet(OldCount,Game.DeadlockSets.CenterSquare[OldCount]);
+                    Game.ShowDeadlockSetsEnabled:=False;
+                    Writeln(Game.DeadlockSets.NoProgressDeadlockCheckTimeMS,SPACE,Solver.PushCount,':');
+                    end;
+              //Readln;
+              end;
+}
            end;
 
-        Inc(Solver.ProgressCheckPoint.NoProgressCount);
-        if Solver.ProgressCheckPoint.NoProgressCount>1 then begin
-           {$IFDEF CONSOLE_APPLICATION}
-              //Writeln('No progress: ', Solver.ProgressCheckPoint.NoProgressCount);
-           {$ENDIF}
-           {toggle room pruning for the next "no progresss" detection cycle}
-           Game.Rooms.Count := -Game.Rooms.Count;
-           end;
-        InitializeProgressCheckPoint( Position__^.Score, False ); {start a new "no progress" detection cycle}
-      end; {Search.ForwardsSearch.Search.TTAddNoProgressPattern}
+        Inc(Game.DeadlockSets.NoProgressDeadlockCheckTimeMS,CalculateElapsedTimeMS(TimeMS,GetTimeMS));
+      end; {Search.ForwardSearch.Search.TTAddNoProgressPattern}
 
-      //const DebugThreshold:Cardinal=1;
+      ///const DebugThreshold:Cardinal=1;
 
-      ///{///$DEFINE DEBUG_CORRALS}
+      {///$DEFINE DEBUG_CORRALS}
 
       function  CorralPruning(Position__:PPosition;
                               SearchDepth__,FloorSquare__,RecursionDepth__:Integer;
                               LowWaterBoxTimeStamp__                      :TTimeStamp;
                               NeighborCorral__                            :PCorral;
                               var HasAllBoxesOnGoals__                    :Boolean;
-                              var IsACombinedCorral__                     :Boolean;
-                              var CorralMinPlayerPos__                    :TBoxSquareSet; {normalized (top-left) player position for each "pocket" or "room" in the combined corral}
+                              var IsAMultiRoomCorral__                    :Boolean;
+                              var CorralMinPlayerPos__                    :TBoxSquareSet; {normalized (top-left) player position for each "room" in the combined corral}
                               var PruningTimeStamp__                      :TTimeStamp):Boolean;
+      const
+        MAX_CORRAL_SEARCH_DEPTH = 8; {guard against stack overflow}
       var
         BoxNo,//Index,//Col,Row,
         NeighborSquare,OppositeNeighborSquare,Square:Integer;
-        BoxTimeStamp,NeighborSquareTimeStamp,OppositeNeighborSquareTimeStamp:TTimeStamp;
+        BoxTimeStamp,LowWaterTimeStamp,NeighborSquareTimeStamp,OppositeNeighborSquareTimeStamp:TTimeStamp;
+        IsANewMultiRoomCorral,
         NeighborCorralHasAllBoxesOnGoals,
-        NeighborCorralIsACombinedCorral:Boolean;
+        NeighborCorralIsAMultiRoomCorral:Boolean;
         Direction:TDirection;
         Corral:TCorral;
 
@@ -14597,7 +16549,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             end;
         end; {Search.ForwardSearch.Search.CorralPruning.AddConnectedBoxesToCorral}
 
-        function  BoxCanMoveIndependentlyOfCorralBoxes(Square__: Integer; Direction__:TDirection; LowWaterBoxTimeStamp__,BoxTimeStamp__:TTimeStamp; var IsACombinedCorral__:Boolean):Boolean;
+        function  BoxCanMoveIndependentlyOfCorralBoxes(Square__: Integer; Direction__:TDirection; LowWaterBoxTimeStamp__,BoxTimeStamp__:TTimeStamp; var IsAMultiRoomCorral__:Boolean):Boolean;
         var NeighborSquare,NeighborSquareValue,
             OppositeNeighborSquare,OppositeNeighborSquareValue:Integer;
         begin
@@ -14618,7 +16570,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                     ) then begin
                     Result:=False;
                     if Squares[NeighborSquare] <> BoxTimeStamp__ then           // 'True': the box isn't in a part of the currently investigated corral
-                       IsACombinedCorral__:=True;                               // the current corral depends on the combined corral
+                       IsAMultiRoomCorral__:=True;                              // the current corral depends on the combined corral
                     end
             else if (((OppositeNeighborSquareValue and BOX) <> 0)
                      and
@@ -14626,7 +16578,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                     ) then begin
                     Result:=False;
                     if Squares[OppositeNeighborSquare] <> BoxTimeStamp__ then   // True': the box isn't in a part of the currently investigated corral
-                       IsACombinedCorral__:=True;                               // the current corral depends on the combined corral
+                       IsAMultiRoomCorral__:=True;                              // the current corral depends on the combined corral
                     end
             else if (((NeighborSquareValue         and FLAG_BOX_REACHABLE_SQUARE) = 0)
                      and                                                        // blocked along this axis
@@ -14639,20 +16591,20 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
         function  IsAFreezingMoveConsideringCorralBoxesOnly ( FromSquareNo__ , ToSquareNo__ : Integer;
                                                               LowWaterBoxTimeStamp__ , BoxTimeStamp__: TTimeStamp;
-                                                              var IsACombinedCorral__ : Boolean ) : Boolean;
+                                                              var IsAMultiRoomCorral__ : Boolean ) : Boolean;
         var OriginalFromSquareValue : Integer;
-            ABoxIsBlockedOnANonGoalSquare , OriginalIsACombinedCorral__ : Boolean;
+            ABoxIsBlockedOnANonGoalSquare , OriginalIsAMultiRoomCorral__ : Boolean;
 
           function  BoxIsBlockedAlongOneAxis ( SquareNo__                : Integer;
                                                Direction__               : TDirection;
                                                {RecursionDepthCountDown__ : Integer;} {the recursion guard has been substituted by timestamping one axis per square}
                                                var ABoxIsBlockedOnANonGoalSquare__ : Boolean ):Boolean;
           var Neighbor1 , Neighbor2 , Neighbor1Position , Neighbor2Position : Integer;
-              OriginalACombinedCorral__ : Boolean;
+              OriginalAMultiRoomCorral__ : Boolean;
           begin
             {if RecursionDepthCountDown__ > 0 then}
                with Solver.SearchStates [ SEARCH_STATE_INDEX_CORRAL_PRUNING ].PlayersReachableSquares do begin
-                 OriginalACombinedCorral__    := IsACombinedCorral__;
+                 OriginalAMultiRoomCorral__   := IsAMultiRoomCorral__;
 
                  if   Direction__              = Low(Direction__) then          {flip horizontal/vertical direction}
                       Direction__             := Succ ( Low ( Direction__ ) )   {caution: 'Succ(Low...'): assumes 4 directions only}
@@ -14692,7 +16644,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                        then begin
                        Result := True;
                        if Squares [ Neighbor1Position ] <> BoxTimeStamp__ then
-                          IsACombinedCorral__ := True;
+                          IsAMultiRoomCorral__ := True;
                        end;
 
                     if (not ( Result and ABoxIsBlockedOnANonGoalSquare__ ))     {it's not enough to know whether a box is blocked; it's also necessary to know whether a box is blocked on a non-goal square}
@@ -14705,7 +16657,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                        then begin
                        Result:=True;
                        if Squares [ Neighbor2Position ] <> BoxTimeStamp__ then
-                          IsACombinedCorral__ := True;
+                          IsAMultiRoomCorral__ := True;
                        end;
 
                     Dec ( Game.Board [ SquareNo__ ] , WALL );                   {remove the wall again}
@@ -14715,7 +16667,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                       if ( ( Game.Board [ SquareNo__ ] and GOAL ) = 0 ) then    {and it's not a goal-square}
                          ABoxIsBlockedOnANonGoalSquare__ := True                {then set the flag}
                       else
-                 else IsACombinedCorral__  := OriginalACombinedCorral__;        {restore the original value}
+                 else IsAMultiRoomCorral__  := OriginalAMultiRoomCorral__;      {restore the original value}
 
                  if   Direction__ = Low ( Direction__ ) then with Game.FreezeTestTimeStamps do  {reduce the exponential growth by storing the results for one axis}
                       Squares [ SquareNo__ ] := TimeStamp + TTimeStamp ( Ord ( Result ) ); {relies on Ord ( False , True ) = (0 , 1)}
@@ -14732,7 +16684,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                end;
 
           ABoxIsBlockedOnANonGoalSquare := False;
-          OriginalIsACombinedCorral__ := IsACombinedCorral__;
+          OriginalIsAMultiRoomCorral__ := IsAMultiRoomCorral__;
           OriginalFromSquareValue := Game.Board [ FromSquareNo__ ];
           Game.Board [FromSquareNo__] := Game.Board [ FromSquareNo__ ] and (not BOX);   {remove box, if any ('FromSquareNo__' is optional), from its current position}
 
@@ -14747,33 +16699,31 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                     );
 
           Game.Board [FromSquareNo__] := OriginalFromSquareValue;               {put box, if any, back on the board}
-          if not Result then IsACombinedCorral__ := OriginalIsACombinedCorral__;{restore original value; the first call of 'BoxIsBlockedAlongOneAxis' may have updated it}
+          if not Result then IsAMultiRoomCorral__ := OriginalIsAMultiRoomCorral__;{restore original value; the first call of 'BoxIsBlockedAlongOneAxis' may have updated it}
         end; {Search.ForwardSearch.Search.CorralPruning.IsAFreezingMoveConsideringCorralBoxesOnly}
 
       begin {Search.ForwardSearch.Search.CorralPruning}
         with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do begin
           Inc(Solver.CorralCount);
-          IsACombinedCorral__:=False; HasAllBoxesOnGoals__:=True;
+          IsAMultiRoomCorral__:=False; HasAllBoxesOnGoals__:=True;
           Corral.NextCorral:=NeighborCorral__;
-          if RecursionDepth__=0 then with CorralMinPlayerPos__ do begin         // initialize the number of "pockets" or "rooms" in the combined corral which 'CorralPruning' may return
-             Count:=0; Squares[0]:=MAX_BOARD_SIZE+1;                            // vector element 0 contains the minimum of the normalized (top-left) player position for each "pocket" in the combined corral
-             //if TimeStamp>=PLAYERS_REACHABLE_SQUARES_TIMESTAMP_UPPER_BOUND-2*MAX_BOARD_SIZE-2 then // ensure that the timestamp cannot wrap around while the "pockets" inside a combined corral are visited by recursive calls to this function
+          if RecursionDepth__=0 then with CorralMinPlayerPos__ do begin         // initialize the number of "rooms" in the combined corral which 'CorralPruning' may return
+             Count:=0; Squares[0]:=MAX_BOARD_SIZE+1;                            // vector element 0 contains the minimum of the normalized (top-left) player position for each "room" in the combined corral
+             //if TimeStamp>=PLAYERS_REACHABLE_SQUARES_TIMESTAMP_UPPER_BOUND-2*MAX_BOARD_SIZE-2 then // ensure that the timestamp cannot wrap around while the "rooms" inside a combined corral are visited by recursive calls to this function
              //   ClearPlayersReachableSquares(SEARCH_STATE_INDEX_CORRAL_PRUNING);                   // this is commented out because the 'if TimeStamp>2' statement below makes this extra initialization unnecessary
              end;
 
           // find:
-          // 1. floor squares in the "pocket" that the player cannot reach, and
-          // 2. inner boxes and boxes surrounding the "pocket";
+          // 1. floor squares in the "room" which the player cannot reach, and
+          // 2. inner boxes and boxes surrounding the "room";
           // this is accomplished by calling a specialized version of the
           // 'CalculatePlayersReachableSquares' function with the
-          // player inside the "pocket", or "corral"
+          // player inside the "room", or "corral"
           CalculateCorralSquares(FloorSquare__,HasAllBoxesOnGoals__,Corral);
           BoxTimeStamp:=Succ(TimeStamp);                                        // 'Succ': boxes belonging to the corral are marked with this value
 
-          if //True and
-             {(Squares[Game.BoxPos[Position__^.Move.BoxNo]]=Succ(TimeStamp)) and} {'True': the last pushed box particated in the making of this corral; contrary to what one might think, it doesn't help to use this guard, hence, it's disabled}
-             (Corral.BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) then {'True': store the corral in the transposition table}
-             if TTAddSingleRoomCorral(Position__,Corral) then begin             {'True': the corral is a new one and it is a deadlock, or more correct: at least one new deadlock set could be constructed based on this corral}
+          if (Corral.BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) then {'True': store the corral in the transposition table}
+             if TTAddSingleRoomCorral(Position__,Corral) then begin             {'True': the corral is a new one and it is a deadlock, or more correct: at least one new deadlock-set could be constructed based on this corral}
                 end
              else if Corral.IsANotStoredDeadlock and                            {'True': the single-room corral is a deadlock, unless there is a hash-key collision}
                      (Solver.PackingOrder.SetCount>0) then begin                {'True': it's a packing order search which isn't a complete search anyway; therefore, it's OK to ignore hash-key collisions and assume that the corral is a deadlock}
@@ -14788,7 +16738,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             {$IFDEF CONSOLE_APPLICATION}
               if BoxTimeStamp>=DebugThreshold then begin
                  SquareToColRow(FloorSquare__,Col,Row); Writeln('Test corral [',Col,':',Row,']');
-                 Writeln(Solver.SearchStates[SEARCH_STATE_CORRAL_PRUNING].PlayersReachableSquares.Squares[FloorSquare__],SPACE,LowWaterBoxTimeStamp__);
+                 Writeln(Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.Squares[FloorSquare__],SPACE,LowWaterBoxTimeStamp__);
                  ShowCorral(SEARCH_STATE_INDEX_CORRAL_PRUNING,TimeStamp);
                  end;
             {$ENDIF}
@@ -14798,55 +16748,51 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
           // and that all these pushes are possible in the current position
 
           if (TimeStamp>2) and                                                  {'True': no timestamp wrap around; corral pruning fails if the timestamp wraps around}
-             (CorralMinPlayerPos__.Count<High(CorralMinPlayerPos__.Squares)) then begin {'True': the number of "pockets" or "rooms" in the combined corral does not exceed the vector size}
-             with CorralMinPlayerPos__ do begin
+             (RecursionDepth__<=MAX_CORRAL_SEARCH_DEPTH) and                    {'True': no violation of the stack overflow guard}
+             (CorralMinPlayerPos__.Count<High(CorralMinPlayerPos__.Squares)) then begin {'True': the number of "rooms" in the combined corral does not exceed the vector size}
+             with CorralMinPlayerPos__ do begin                                 {vector with the normalized (top-left) player position for each "room" in the combined corral}
                Inc(Count); Squares[Count]:=MinPlayerPos;
-               if MinPlayerPos<Squares[0] then Squares[0]:=MinPlayerPos;        {vector element 0 contains the minimum of the normalized (top-left) player position for each "pocket" in the combined corral}
+               if MinPlayerPos<Squares[0] then Squares[0]:=MinPlayerPos;        {vector element 0 contains the minimum of the normalized (top-left) player position for each "room" in the combined corral}
                end;
 
-             {check 2-pocket corrals for being deadlocks; this can be expensive
-              in terms of computation time, but it catches so many deadlock
-              situations that it seems worth it;
-             }
+             {check multi-room corrals for being deadlocks; this can be
+              expensive in terms of computation time; insisting on that one of
+              the single-room corrals must be a new one saves time, but it also
+              makes the corral deadlock detection less accurate;}
              if (NeighborCorral__<>nil) and
-                (NeighborCorral__^.NextCorral=nil) and { 'True': the current combined corral consists of exactly two neighboring corrals}
-                (Corral.IsANewCorral or NeighborCorral__^.IsANewCorral) and
-                {insisting on that one of the corrals must be a new one
-                 saves time, but it also sacrifices finding some solutions;
-                }
-                (NeighborCorral__^.BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) and
-                (Corral           .BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) then begin
-                if TTAddCombinedCorral(Position__,True,False,BoxTimeStamp-2,CorralMinPlayerPos__) then begin // '-2': boxes belonging to the caller's corral have this timestamp
+                (NeighborCorral__^.BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) and        {'<=': a heuristic}
+                (Corral           .BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) then begin {'<=': a heuristic}
+                IsANewMultiRoomCorral:=False;
+                LowWaterTimeStamp:=TimeStamp;
+                while (NeighborCorral__<>nil) and
+                      (NeighborCorral__^.TimeStamp=LowWaterTimeStamp-2) do begin
+                  IsANewMultiRoomCorral:=IsANewMultiRoomCorral or NeighborCorral__^.IsANewCorral;
+                  Dec(LowWaterTimeStamp,2);
+                  NeighborCorral__:=NeighborCorral__^.NextCorral;
+                  end;
+                if IsANewMultiRoomCorral
+                   or
+                   (((Solver.ProgressCheckPoint.NoProgressCount and 15)=0)      {'True': it's a long time since the search made progress}
+                    and
+                    (LowWaterTimeStamp<>TimeStamp)                              {otherwise, it's a single-room corral}
+                   ) then begin
+                   if TTAddMultiRoomCorral(Position__,True,False,Succ(LowWaterTimeStamp),CorralMinPlayerPos__) then begin // 'Succ(LowWaterTimeStamp)': this is the low water timestamp for the boxes which belong to the selected multi-room corral
 {
-                   Game.ShowDeadlockSetsEnabled:=True;
-                   ShowDeadlockSet(Game.DeadlockSets.Count,Game.DeadlockSets.CenterSquare[Game.DeadlockSets.Count]);
-                   Game.ShowDeadlockSetsEnabled:=False;
-                   ShowBoard;
-                   Write('New 2-corral deadlock ');
-                   Write(Game.DeadlockSets.Count,'; Positions: ',Positions.Count,' Pushes: ',Solver.PushCount,'  ',Position__^.HashValue);
-                   Readln;
-}
-                   end;
-{
-                if (NeighborCorral__^.NextCorral<>nil) and
-                   (NeighborCorral__^.NextCorral^.BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) then
-                   if TTAddCombinedCorral(Position__,True,False,BoxTimeStamp-4,CorralMinPlayerPos__) then begin // '-4': boxes belonging to the caller's caller's corral have this timestamp
                       Game.ShowDeadlockSetsEnabled:=True;
                       ShowDeadlockSet(Game.DeadlockSets.Count,Game.DeadlockSets.CenterSquare[Game.DeadlockSets.Count]);
                       Game.ShowDeadlockSetsEnabled:=False;
-                      ShowBoard;
-                      Write('New 3-corral deadlock ');
-                      Write(Game.DeadlockSets.Count,'; Positions: ',Positions.Count,' Pushes: ',Solver.PushCount,'  ',Position__^.HashValue);
-                      Readln;
-                      end;
+                      //ShowBoard;
+                      Write('New multi-room deadlock ');
+                      Write(Game.DeadlockSets.Count,' Positions: ',Positions.Count,' Pushes: ',Solver.PushCount,SPACE,Position__^.HashValue);
+                      Writeln; Readln;
 }
+                      end;
+                   end;
                 end;
 
              BoxNo:=0;
-//           while BoxNo<Game.BoxCount do begin
              while BoxNo<Corral.BoxSquares.Count do begin
                Inc(BoxNo);
-//             Square:=Game.BoxPos[BoxNo];
                Square:=Corral.BoxSquares.Squares[BoxNo];
                if Squares[Square]=BoxTimeStamp then begin {the box is a part of this corral and it hasn't been investigated by a recursive call}
                   if (Game.DistanceToNearestGoal[Square]<>0) then HasAllBoxesOnGoals__:=False;
@@ -14862,7 +16808,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                          and
                          ((NeighborSquareTimeStamp or 1)       <>  BoxTimeStamp) // the floor square (possibly with a box) is outside the current corral (it may be a part of the combined corral) ('or 1': to check both floor-members and box-members)
                          //and
-                         //(not IsAFreezingMoveConsideringCorralBoxesOnly(Square,OppositeNeighborSquare,LowWaterBoxTimeStamp__,BoxTimeStamp,IsACombinedCorral__))
+                         //(not IsAFreezingMoveConsideringCorralBoxesOnly(Square,OppositeNeighborSquare,LowWaterBoxTimeStamp__,BoxTimeStamp,IsAMultiRoomCorral__))
                          then begin
                          OppositeNeighborSquareTimeStamp:=Squares[OppositeNeighborSquare];
                          if   OppositeNeighborSquareTimeStamp>LowWaterBoxTimeStamp__ then // the empty floor square is inside the (combined) corral
@@ -14872,7 +16818,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                    then begin
                                    // OK; the outer floor square 'NeighborSquare' is empty and in the player's access area
                                    if      (OppositeNeighborSquareTimeStamp or 1)<>BoxTimeStamp then // 'True': the empty floor is a part of the combined corral but not in the current area, hence, the current corral depends on the combined corral
-                                           IsACombinedCorral__:=True;
+                                           IsAMultiRoomCorral__:=True;
                                    end
                               else // the outer floor, 'NeighborSquare', isn't in the player's access area
                                    if      NeighborSquareTimeStamp>LowWaterBoxTimeStamp__ then // 'True': 'NeigborSquare' is a part of the combined corral
@@ -14881,7 +16827,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                            //
                                            // likewise, when 'NeighborSquare' contains a box that is a member of the combined corral,
                                            // then it's OK that the player cannot reach the square
-                                           IsACombinedCorral__:=True
+                                           IsAMultiRoomCorral__:=True
                                    else // 'NeighborSquare' is a floor (possibly with a box) outside the combined corral
                                         if (Game.Board[NeighborSquare] and BOX)=0 then // 'True': 'NeighborSquare' is an empty floor
                                            if CorralPruning(Position__,
@@ -14889,19 +16835,19 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                                             LowWaterBoxTimeStamp__,
                                                             PCorral(Addr(Corral)),
                                                             NeighborCorralHasAllBoxesOnGoals,
-                                                            NeighborCorralIsACombinedCorral,
+                                                            NeighborCorralIsAMultiRoomCorral,
                                                             CorralMinPlayerPos__,
                                                             PruningTimeStamp__) then begin
                                               // adding the corral around the empty floor 'NeighborSquare' succeeded;
                                               // now check if it contributes to the combined corral, or if it's a stand-alone corral
-                                              if NeighborCorralIsACombinedCorral then begin
+                                              if NeighborCorralIsAMultiRoomCorral then begin
                                                  HasAllBoxesOnGoals__        :=HasAllBoxesOnGoals__ and NeighborCorralHasAllBoxesOnGoals;
-                                                 IsACombinedCorral__         :=True;
+                                                 IsAMultiRoomCorral__        :=True;
                                                  end
                                               else with CorralMinPlayerPos__ do begin
                                                  // use the found stand-alone corral for pruning the expansion of the current position
-                                                 HasAllBoxesOnGoals__        :=False; // this follows from the fact that ('NeighborCorralIsACombinedCorral' = False) => ('NeighborCorralHasAllBoxesOnGoals' = False)
-                                                 IsACombinedCorral__         :=False;
+                                                 HasAllBoxesOnGoals__        :=False; // this follows from the fact that ('NeighborCorralIsAMultiRoomCorral' = False) => ('NeighborCorralHasAllBoxesOnGoals' = False)
+                                                 IsAMultiRoomCorral__        :=False;
                                                  Squares[1]                  :=Squares[Count];
                                                  Squares[0]                  :=Squares[1];
                                                  Count                       :=1;
@@ -14916,11 +16862,11 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                               end
                                         else
                                            // the box at the outside floor 'NeighborSquare' blocks the player's access to the square
-                                           if IsAFreezingMoveConsideringCorralBoxesOnly(Square,OppositeNeighborSquare,LowWaterBoxTimeStamp__,BoxTimeStamp,IsACombinedCorral__) then begin
+                                           if IsAFreezingMoveConsideringCorralBoxesOnly(Square,OppositeNeighborSquare,LowWaterBoxTimeStamp__,BoxTimeStamp,IsAMultiRoomCorral__) then begin
                                               // OK; pushing the box inwards to 'OppositeNeighborSquare' cannot be the first push in an attempt to open the corral
                                               end
                                            else
-                                              if BoxCanMoveIndependentlyOfCorralBoxes(NeighborSquare,Direction,LowWaterBoxTimeStamp__,BoxTimeStamp,IsACombinedCorral__) then
+                                              if BoxCanMoveIndependentlyOfCorralBoxes(NeighborSquare,Direction,LowWaterBoxTimeStamp__,BoxTimeStamp,IsAMultiRoomCorral__) then
                                                  // extend the corral with this box and its neighbors and continue the analysis
                                                  AddConnectedBoxesToCorral(NeighborSquare,BoxTimeStamp,LowWaterBoxTimeStamp__,Corral,BoxNo)
                                               else begin
@@ -14948,19 +16894,19 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                                          LowWaterBoxTimeStamp__,
                                                          PCorral(Addr(Corral)),
                                                          NeighborCorralHasAllBoxesOnGoals,
-                                                         NeighborCorralIsACombinedCorral,
+                                                         NeighborCorralIsAMultiRoomCorral,
                                                          CorralMinPlayerPos__,
                                                          PruningTimeStamp__) then begin
                                            // adding the corral around the empty floor 'OppositeNeighborSquare' succeeded;
                                            // now check if it contributes to the combined corral, or if it's a stand-alone corral
-                                           if NeighborCorralIsACombinedCorral then begin
+                                           if NeighborCorralIsAMultiRoomCorral then begin
                                               HasAllBoxesOnGoals__           :=HasAllBoxesOnGoals__ and NeighborCorralHasAllBoxesOnGoals;
-                                              IsACombinedCorral__            :=True;
+                                              IsAMultiRoomCorral__            :=True;
                                               end
                                            else with CorralMinPlayerPos__ do begin
                                               // use the found stand-alone corral for pruning the expansion of the current position
-                                              HasAllBoxesOnGoals__           :=False;         // this follows from the fact that ('NeighborCorralIsACombinedCorral' = False) => ('NeighborCorralHasAllBoxesOnGoals' = False)
-                                              IsACombinedCorral__            :=False;
+                                              HasAllBoxesOnGoals__           :=False;         // this follows from the fact that ('NeighborCorralIsAMultiRoomCorral' = False) => ('NeighborCorralHasAllBoxesOnGoals' = False)
+                                              IsAMultiRoomCorral__           :=False;
                                               Squares[1]                     :=Squares[Count];
                                               Squares[0]                     :=Squares[1];
                                               Count                          :=1;
@@ -14977,26 +16923,26 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                    else // the player cannot reach the empty floor 'NeighborSquare'
                                         if   NeighborSquareTimeStamp>LowWaterBoxTimeStamp__ then
                                              // the empty floor is inside one of the corrals currently under investigation
-                                             IsACombinedCorral__:=True
+                                             IsAMultiRoomCorral__:=True
                                         else // the empty floor 'NeighborSquare' is outside the combined corral;
                                              if CorralPruning(Position__,
                                                               SearchDepth__,NeighborSquare,Succ(RecursionDepth__),
                                                               LowWaterBoxTimeStamp__,
                                                               PCorral(Addr(Corral)),
                                                               NeighborCorralHasAllBoxesOnGoals,
-                                                              NeighborCorralIsACombinedCorral,
+                                                              NeighborCorralIsAMultiRoomCorral,
                                                               CorralMinPlayerPos__,
                                                               PruningTimeStamp__) then begin
                                                 // adding the corral around the empty floor 'NeighborSquare' succeeded;
                                                 // now check if it contributes to the combined corral, or if it's a stand-alone corral
-                                                if NeighborCorralIsACombinedCorral then begin
+                                                if NeighborCorralIsAMultiRoomCorral then begin
                                                    HasAllBoxesOnGoals__      :=HasAllBoxesOnGoals__ and NeighborCorralHasAllBoxesOnGoals;
-                                                   IsACombinedCorral__       :=True;
+                                                   IsAMultiRoomCorral__      :=True;
                                                    end
                                                 else with CorralMinPlayerPos__ do begin
                                                    // use the found stand-alone corral for pruning the expansion of the current position
-                                                   HasAllBoxesOnGoals__      :=False;         // this follows from the fact that ('NeighborCorralIsACombinedCorral' = False) => ('NeighborCorralHasAllBoxesOnGoals' = False)
-                                                   IsACombinedCorral__       :=False;
+                                                   HasAllBoxesOnGoals__      :=False;         // this follows from the fact that ('NeighborCorralIsAMultiRoomCorral' = False) => ('NeighborCorralHasAllBoxesOnGoals' = False)
+                                                   IsAMultiRoomCorral__      :=False;
                                                    Squares[1]                :=Squares[Count];
                                                    Squares[0]                :=Squares[1];
                                                    Count                     :=1;
@@ -15011,7 +16957,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                                 end
                               else if   NeighborSquareTimeStamp<=LowWaterBoxTimeStamp__ then
                                         // the box at the outside floor 'NeighborSquare' blocks the player's access to the square;
-                                        if BoxCanMoveIndependentlyOfCorralBoxes(NeighborSquare,Direction,LowWaterBoxTimeStamp__,BoxTimeStamp,IsACombinedCorral__) then
+                                        if BoxCanMoveIndependentlyOfCorralBoxes(NeighborSquare,Direction,LowWaterBoxTimeStamp__,BoxTimeStamp,IsAMultiRoomCorral__) then
                                            // extend the corral with this box and its neighbors and continue the analysis
                                            AddConnectedBoxesToCorral(NeighborSquare,BoxTimeStamp,LowWaterBoxTimeStamp__,Corral,BoxNo)
                                         else begin
@@ -15019,7 +16965,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                            // Squares[NeighborSquare]:=Pred(LowWaterBoxTimeStamp__); // mark the box as a neighbor of the corral
                                            end
                                    else // the blocking box belongs to another sub-corral, hence, this corral depends on the combined corral
-                                        IsACombinedCorral__:=True;
+                                        IsAMultiRoomCorral__:=True;
                          end
                       else begin
                          // at this point 'OppositeNeighborSquare' may contain
@@ -15035,19 +16981,19 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                end
              end
           else
-             BoxNo:=MAX_BOX_COUNT+1;                                            // corral pruning failed, i.e., after a timestamp wrap around
+             BoxNo:=MAX_BOX_COUNT+1;                                            // corral pruning failed, e.g., after a timestamp wrap around
 
           Result:=BoxNo<=Game.BoxCount;
           if Result then begin
              if   RecursionDepth__=0 then                                       // 'True': this is the call from the outside
                   if   HasAllBoxesOnGoals__ then
-                       Result:=False                                            // the corral isn't a candidate for pruning when all boxes are lcoated at goals
+                       Result:=False                                            // the corral isn't a candidate for pruning when all boxes are located at goals
                   else if   PruningTimeStamp__< BoxTimeStamp then               // 'True' no other single-room corral was selected as pruning candidate
                             PruningTimeStamp__:=BoxTimeStamp                    // return pruning threshold
                        else
              else if   HasAllBoxesOnGoals__ then
-                       IsACombinedCorral__:=True // even though the corral only can be opened using inwards pushes, it cannot stand alone when all boxes are on goals
-                  else if   not IsACombinedCorral__ then                        // 'True': a single-room corral has been selected as stand-alone pruning candidate (not necessarily the current corral)
+                       IsAMultiRoomCorral__:=True                               // even though the corral can only be opened using inwards pushes, it cannot stand alone when all boxes are at goals
+                  else if   not IsAMultiRoomCorral__ then                       // 'True': a single-room corral has been selected as a stand-alone pruning candidate (not necessarily the current corral)
                             if  PruningTimeStamp__< BoxTimeStamp then begin     // 'True': no other single-room corral was selected as pruning candidate, hence, it's the current corral which is the pruning candidate
                                 PruningTimeStamp__:=BoxTimeStamp;               // return pruning threshold
                                 {$IFDEF DEBUG_CORRALS}
@@ -15065,689 +17011,28 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              or                                                                 {'True': store the corral in the transposition table}
              (Corral.BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets)
              then
-             if TTAddSingleRoomCorral(Position__,Corral) then begin             {'True': the corral is a new one and it is a deadlock, or more correct: at least one new deadlock set could be constructeed based on this corral}
+             if TTAddSingleRoomCorral(Position__,Corral) then begin             {'True': the corral is a new one and it is a deadlock, or more correct: at least one new deadlock-set could be constructeed based on this corral}
                 end;
 *)
           {$IFDEF DEBUG_CORRALS}
             {$IFDEF CONSOLE_APPLICATION}
-              if BoxTimeStamp>=DebugThreshold then
+              if BoxTimeStamp>=DebugThreshold then begin
                  if Result then begin
-                    Write('OK ',Pred(BoxTimeStamp)); Readln;
+                    Write('OK');
                     end
                  else begin
-                    Write('Fail ',Pred(BoxTimeStamp)); Readln;
+                    Write('Fail');
                     end;
+                 Write(SPACE,Pred(BoxTimeStamp));
+                 if HasAllBoxesOnGoals__ then Write(' h');
+                 if IsAMultiRoomCorral__ then Write(' c');
+                 Readln;
+                 end;
             {$ENDIF}
           {$ENDIF}
           end;
       end; {Search.ForwardSearch.Search.CorralPruning}
 
-      function  HasPushCreatedANewCorralDeadlock(Position__:PPosition):Boolean;
-      var BoxSquare:Integer; HasAllBoxesOnGoals:Boolean; Direction:TDirection;
-          LowWaterTimeStamp:TTimeStamp; Corral:TCorral;
-      begin {preconditions: 'Position__' matches the current game state; the player's reachable squares have been calculated for the search depth, i.e., 'Position__^.PushCount'}
-        Result:=False;
-        BoxSquare:=Game.BoxPos[Position__^.Move.BoxNo];
-        LowWaterTimeStamp:=Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.TimeStamp;
-        with Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares do
-          for Direction:=Low(Direction) to High(Direction) do begin
-              NeighborSquare:=BoxSquare+Game.SquareOffsetForward[Direction];
-              if ((Game.Board[NeighborSquare] and (BOX+WALL))=0)                {'True': and empty floor}
-                 and
-                 (Squares[NeighborSquare]<>TimeStamp)                           {'True': the floor isn't in the player's current access area}
-                 and
-                 (Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.Squares[NeighborSquare]<=LowWaterTimeStamp) {'True': the square hasn't been explored from another direction (except for a timestamp wrap around)}
-                 and
-                 (CalculateCorralSquares(NeighborSquare,HasAllBoxesOnGoals,Corral)>0)
-                 and
-                 (not HasAllBoxesOnGoals)
-                 and
-                 (Corral.BoxSquares.Count<=Game.DeadlockSets.BoxLimitForDynamicSets) {'True': store the corral in the transposition table}
-                 and
-                 TTAddSingleRoomCorral(Position__,Corral{,Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.MinPlayerPos}) then begin {'True': the corral is a new one and it is a deadlock}
-                 Result:=False;
-                 end;
-             end;
-      end;
-
-(*
-      function  PackingOrderSearch(Position__:PPosition; GoalNo__,PackingOrderSetNo__,RelativeDepth__:Integer):Integer;
-      {precondition: player's reachable squares have been calculated for this depth, that is, 'Position__^.PushCount'}
-      var //Index,
-          BoxToSquare,PositionScore,SuccessorPushCount,SuccessorScore,Square:Integer;
-          Direction:TDirection; SuccessorPosition:PPosition;
-      begin {Search.ForwardSearch.Search.PackingOrderSearch}
-{
-//      if Game.HashValue=2544286736954669252 then begin
-        if (Solver.PushCount>=3201) and (RelativeDepth__<>0) then begin
-           ShowBoard;
-           Write('PO Depth: ',Position__^.PushCount,' Score: ',Position__^.Score,' Positions: ',Positions.Count,' Pushes: ',Solver.PushCount,' Open: ',Positions.OpenPositions.Count);
-           //Writeln;
-           Readln;
-           end;
-}
-{
-         for Index:=1 to High(Game.SolutionPathHashValues) do // testing original solution...
-             if Game.SolutionPathHashValues[Index]=0 then
-                break
-             else if Game.HashValue=Game.SolutionPathHashValues[Index] then begin
-                     if Index >= 1 then begin
-                        ShowBoard;
-                        Write('PO: Solution path ',Index,SLASH,Position__^.PushCount,' Pushes: ',Solver.PushCount);
-                        Readln;
-                        //Writeln;
-                        end;
-                     break;
-                     end;
-}
-        Position__^.PackingOrder.SetNo:=PackingOrderSetNo__;
-
-        if Game.BoxPos[Position__^.Move.BoxNo]<>Game.GoalPos[GoalNo__] then begin
-           Result:=0;
-           PositionScore:=Position__^.Score;
-           if (Position__^.PushCount+Game.SimpleLowerBound<Solver.SearchLimits.DepthLimit) and
-              (PositionScore<=High(Positions.OpenPositions.Buckets)) then
-              with Position__^ do with Solver.SearchStates[PushCount].PlayersReachableSquares do
-                with Solver.PackingOrder do begin
-                  Inc(UInt8(Move.Direction),POSITION_PATH_TAG);                 {mark the position as a member of the currently investigated path}
-                  SuccessorPushCount:=Succ(PushCount);
-
-                  //Game.History.Moves[PushCount].Move.BoxNo:=BoxNo;            {update game history}
-                  Square:=Game.BoxPos[Move.BoxNo];
-
-                  for Direction:=Low(Direction) to High(Direction) do begin
-                      BoxToSquare:=Square+Game.SquareOffsetForward[Direction];
-
-                      if (SquareGoalDistance[Square,GoalNo__] >                 {'True': moving the box in this direction brings it closer to the goal}
-                          SquareGoalDistance[BoxToSquare,GoalNo__])
-                         and
-                         {inline simple checks for legal moves}
-                         (Squares[Square-Game.SquareOffsetForward[Direction]]=TimeStamp){'= TimeStamp': the player can reach the neighbor-square}
-                         and
-                         ((Game.Board[BoxToSquare] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE))=0) {'=0' the square is legal and not blocked by a wall or another box}
-                         and
-                         {extended checks for legal moves}
-                         IsALegalPush(Move.BoxNo,Direction,SuccessorPushCount) then
-
-                         if Solver.PushCount<Solver.SearchLimits.PushCountLimit then begin   {limit not exceeded}
-
-                            //Game.History.Moves[PushCount].Direction:=Direction; {update game history}
-                            DoPush(Move.BoxNo,Direction,SuccessorPushCount);    {do the move, i.e., update the board}
-
-(
-                            {successor score := (parent score) + (1 push) - (1 point for getting closer to the designated goal) + (difference between the lower bound for the new position and the parent position)}
-                            SuccessorScore   :=PositionScore //Succ(PositionScore)
-                                               +Game.DistanceToNearestGoal[BoxToSquare]
-                                               -Game.DistanceToNearestGoal[Square];
-                            if SuccessorScore<PositionScore then
-                               SuccessorScore:=PositionScore;
-)
-
-                            SuccessorScore:= SuccessorPushCount                 {'SuccessorPushCount + Game.SimpleLowerBound' is the normal score for a position}
-                                            +Game.SimpleLowerBound
-                                            -Game.DistanceToNearestGoal[Game.BoxPos[Move.BoxNo]] {subtract the normal contribution to 'Game.SimpleLowerBound' for this box}
-                                            +SquareGoalDistance[BoxToSquare,GoalNo__] {the distance to the designated goal}
-                                            -Game.PackingOrderPushCount;        {packing-order pushes on current path; by subtracting them it only counts as a single push to bring the box closer to the designated goal}
-                                            //-RelativeDepth__;                 {prefer positions where the box is closer to the designated goal square}
-(
-                            if   (Game.Board[Square        ] shr GOAL_BIT_SHIFT_COUNT)
-                                 >=                                               {'>=': the calculated packing order, if any, doesn't indicate that this brings the box closer to a square that should be filled first}
-                                 (Game.Board[BoxToSquare   ] shr GOAL_BIT_SHIFT_COUNT) then
-                                 SuccessorScore:=     SuccessorPushCount +Game.SimpleLowerBound-Game.PackingOrderPushCount
-                            else {'<': the box moves to a square that according to the calculated packing order should be filled first}
-                                 SuccessorScore:=Pred(SuccessorPushCount)+Game.SimpleLowerBound-Game.PackingOrderPushCount;
-)
-                            Inc(Solver.PushCount);                              {update statistics}
-
-//                          WriteBoardToLogFile('PO '+IntToStr(Solver.PushCount)+SPACE+IntToStr(Positions.Count)+' Score: '+IntToStr(SuccessorScore));
-
-                            if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
-                               {$IFDEF CONSOLE_APPLICATION}
-                                 Write(Reader.LevelCount,': Depth: ',Position__^.PushCount);
-                                 if SuccessorScore<INFINITY then Write(' Score: ',SuccessorScore);
-                                 Write(' Pushes: ',Solver.PushCount div ONE_MILLION,' million');
-                                 if   Positions.SearchStatistics.ReuseCount=0 then
-                                      Write(' Positions: ',Positions.Count)
-                                 else Write(' Reused positions: ',Positions.SearchStatistics.ReuseCount);
-                                 {Write(' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000);}
-                                 Writeln;
-                               {$ENDIF}
-
-                               TimeCheck;
-                               end;
-
-                            if (SuccessorScore<=Solver.SearchLimits.DepthLimit) and
-                               (SuccessorPushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) then begin
-                               UsePlayersReachableSquaresFromPredecessor:=
-                                 (Solver.SearchStates[Pred(SuccessorPushCount)].PlayersReachableSquares.Squares[BoxToSquare]
-                                  <> // '<>': in the position 'Position__' (before the move [Move.BoxNo, Direction]), the player cannot reach the other side of the box
-                                  Solver.SearchStates[Pred(SuccessorPushCount)].PlayersReachableSquares.TimeStamp
-                                 )
-                                 or
-                                 (((Game.Board[BoxToSquare+Game.SquareOffsetRight[TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK)]] and (WALL+BOX))<>0)
-                                  and
-                                  ((Game.Board[BoxToSquare+Game.SquareOffsetLeft [TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK)]] and (WALL+BOX))<>0)
-                                 );
-                               Inc(Solver.ReusePlayersReachableSquaresFromPredecessorCount[UsePlayersReachableSquaresFromPredecessor]);
-
-                               if not Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated then
-                                  CalculatePlayersReachableSquares(SuccessorPushCount); {find the player's reachable squares}
-
-                               {SuccessorPosition:=nil;}                        {not necessary, 'TTAdd' sets it to 'nil'}
-
-                               {try to add the successor position to the transposition table;}
-                               {if it already is in the table, then 'TTAdd' returns}
-                               {'False' and the existing position in 'SuccessorPosition'}
-                               if TTAdd(Game.HashValue,                         {hash signature for this position}
-                                        //Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.MinPlayerPos, {normalized (top-left) player position}
-                                        Game.PlayerPos,                         {player position; note that this isn't the normalized (top-left) player position; 'SetPosition' depends on having the true player position after the push}
-                                        SuccessorPushCount,                     {pushes = depth}
-                                        SuccessorScore,                         {pushes + heuristic estimate}
-                                        Move.BoxNo,                             {moved box}
-                                        Direction,                              {box direction}
-                                        Position__,                             {parent node}
-                                        SuccessorPosition) then begin           {'SuccessorPosition' is the new saved position}
-
-//                                WritelnToLogFile('New '+IntToStr(Positions.Count));
-
-                                  SuccessorScore:=SuccessorPosition^.Score;     {'Score' is 0 for perimeter-nodes from a search in the opposite direction, hence, retrieve the actually saved score for the position}
-{
-                                  if       Game.HashValue=1652664153217381026 then begin
-                                           Positions.DebugPosition:=SuccessorPosition;
-                                           ShowBoard;
-                                           Writeln('PO Debug position: ',Positions.Count,SPACE,Solver.PushCount,' Pushes: ',SuccessorPushCount,' Score: ',SuccessorScore,SPACE,Game.SimpleLowerBound,SPACE,Game.PackingOrderPushCount,SPACE,Solver.PushCount);
-                                           Readln;
-                                           end;
-}
-                                  if       (Game.SimpleLowerBound<>0) and (SuccessorScore<>0) then begin {'True': not a solution}
-                                           if not Game.DeadlockSets.NewDynamicDeadlockSets then {'True':  no new deadlock sets have been created after the main search loop retracted a node from the open-list}
-                                              Result:=PackingOrderSearch(SuccessorPosition,GoalNo__,PackingOrderSetNo__,Succ(RelativeDepth__));
-                                           if False {Result=0} then with SuccessorPosition^ do begin {'Result=0': the box didn't make it all the way to the designated goal square}
-                                              SuccessorScore:=SuccessorPushCount+Game.SimpleLowerBound-Game.PackingOrderPushCount; {the normal evaluation heuristic when packing order isn't considered}
-                                              if SuccessorScore<Score then begin
-                                                 if   (Ord(Move.Direction) and POSITION_OPEN_TAG)<>0 then begin
-                                                      OPENRemove(SuccessorPosition);
-                                                      Score:=SuccessorScore;
-                                                      OPENAdd(SuccessorPosition);
-                                                      end
-                                                 else Score:=SuccessorScore;
-                                                 end;
-                                              end;
-                                           end
-                                  else  if Game.SimpleLowerBound<>0 then begin  {'True': a perimeter-position from a search in the opposite direction}
-                                           SuccessorScore:=SuccessorPushCount+  {'PathLengthToSolution' contains distance to the goal-position}
-                                                           SuccessorPosition^.PathLengthToSolution;
-                                           if (Positions.SolutionPosition=nil)
-                                              or
-                                              (Cardinal(SuccessorScore) <
-                                               (Positions.SolutionPosition^.PushCount+
-                                                Positions.SolutionPosition^.PathLengthToSolution))
-                                              or
-                                              (SuccessorPosition=Positions.SolutionPosition) {'=': new cheaper path to the already found perimeter-position}
-                                              then begin {new or first found solution}
-                                              Positions.SolutionPosition:=SuccessorPosition;
-                                              Solver.SearchLimits.DepthLimit:=SuccessorScore;
-                                              Solver.SokobanStatusPointer^.Flags:=SOKOBAN_PLUGIN_FLAG_SOLUTION;
-                                              SetSokobanStatusText(TEXT_SOLUTION_INFO_1+IntToStr(SuccessorScore)+TEXT_SOLUTION_INFO_2);
-                                              OPENDropPositions(Solver.SearchLimits.DepthLimit);{prune the open-queue and the transpostion-table; there is no need to search paths longer than or equal to the best found solution}
-                                              //TerminateSearch; //testing
-                                              end;
-                                           end
-                                  else  begin                                   {lower bound = 0, i.e., it's the goal position}
-                                          Positions.SolutionPosition:=SuccessorPosition;
-                                          TerminateSearch;
-                                          //Positions.OpenPositions.Count:=0;   {'0': signals an exhaustive search, i.e., an optimal solution}
-                                        end;
-                                  end
-                               else                                             {the position wasn't added to the transposition table}
-                                  if SuccessorPosition<>nil then begin          {'True': the position already exists in the transposition table}
-                                     if Game.SimpleLowerBound<>0 then begin     {'True': not a solution}
-                                        end
-                                     else with SuccessorPosition^ do begin      {start-position = goal-position, or a shorter path to an existing position}
-                                        {if this is the start-position then modify it so it contains this last move leading to the solution}
-                                        PushCount        :=SuccessorPushCount;
-                                        Score            :=SuccessorPushCount;
-                                        Parent           :=Position__;          {handle with care: if this is the start-position, then the solution is now a circular list}
-                                        Move.BoxNo       :=Position__^.Move.BoxNo;
-                                        Move.Direction   :=Direction;
-                                        Positions.SolutionPosition:=SuccessorPosition;
-
-                                        TerminateSearch;
-                                        //Positions.OpenPositions.Count:=0;     {'0': signals an exhaustive search, i.e., an optimal solution}
-                                       end
-                                     end
-                                  else                                          {the transposition table is full}
-                                     if Solver.ReuseNodesEnabled then begin
-                                        if SuccessorScore<Position__^.BestForgottenScore then
-                                           Position__^.BestForgottenScore:=SuccessorScore; {the successor-position wasn't stored; remember the best forgotten score}
-                                        end
-                                     else TerminateSearch;                      {stop searching when the transposition table is full}
-                               end
-                            else begin                                          {search depth limit exceeded}
-                               if (Solver.SearchLimits.DepthLimit>=0) and                    {'>=0': the search hasn't been terminated}
-                                  (SuccessorPushCount+Game.SimpleLowerBound>OriginalDepthLimit) then {'>OriginalDepthLimit': 'Solver.SearchLimits.DepthLimit' may have been lowered after finding a solution}
-                                  Inc(Solver.LimitExceededPushCount);
-                              end;
-
-                            UndoPush(Move.BoxNo,Direction);                     {take back the move, i.e., update the board}
-                            end
-                         else begin                                             {push count limit exceeded}
-                            if Solver.SearchLimits.DepthLimit>=0 then           {'>=0': the search hasn't been terminated}
-                               Inc(Solver.LimitExceededPushCount);
-                            end;
-                      end;
-                  Dec(UInt8(Move.Direction),POSITION_PATH_TAG);                 {remove the 'current path' tag}
-                  end;
-           end
-        else with Position__^ do begin                                          {the box arrived at its target square}
-           if Game.SimpleLowerBound<>0 then begin                               {'<>': not a solution}
-              if   RelativeDepth__<Score then
-                   Score:=Score-RelativeDepth__                                 {all the pushes leading to the target square are packing order pushes; subtract them from the score to give the position a substantial bonus}
-              else Score:=1;
-              end;
-           Result:=RelativeDepth__;
-{
-           if Solver.PushCount>=0 then begin
-//         if Positions.Count>=1+0*ONE_MILLION then begin
-              ShowBoard;
-              Write('PO!: Depth: ',PushCount,' Score: ',Score,'  Pushes: ',Solver.PushCount,'  Positions: ',Positions.Count);
-              Readln;
-              end;
-}
-           end;
-
-        if (RelativeDepth__<>0) and                                             {'<>': this isn't the base position which is handled by the caller, i.e., either added to the open-list or expanded at once}
-           (Position__^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
-//         (Position__^.Score>=Low (Positions.OpenPositions.Buckets)) and
-           (Position__^.Score<=High(Positions.OpenPositions.Buckets)) then with Position__^ do begin
-           {if (Ord(Move.Direction) and POSITION_OPEN_TAG=0) then} OPENAdd(Position__); {put the position on the open-queue}
-           Inc(Positions.SearchStatistics.Enqueue1Count);
-           PackingOrder.SetNo:=PackingOrderSetNo__;
-           Inc(UInt8(Move.Direction),POSITION_PACKING_ORDER_TAG);
-           end;
-      end; {Search.ForwardSearch.Search.PackingOrderSearch}
-*)
-(*
-      function  PackingOrderSearch(Position__:PPosition; PackingOrderSetNo__,RelativeDepth__,PlayersReachableSquaresIndex__,FirstSetMemberIndex__,LastSetMemberIndex__:Integer):Integer;
-      {precondition: player's reachable squares have been calculated for this depth, which is 'PlayersReachableSquaresIndex__'; it may differ from 'Position__^.PushCount'}
-      var //Index,
-          BoxToSquare,PlayerFromSquare,GoalNo,i,Index,j,PositionScore,//Col,Row,
-          SuccessorPlayersReachableSquaresIndex,SuccessorPushCount,SuccessorScore,Square:Integer;
-          Direction:TDirection; SuccessorPosition:PPosition;
-      begin {Search.ForwardSearch.Search.PackingOrderSearch}
-//{
-//      if Game.HashValue=4317490461407458846 then begin
-//      if Positions.Count>=33650 then begin
-        if (Solver.PushCount>=0) then begin //and (RelativeDepth__<>0) then begin
-//      if xyz and (RelativeDepth__<>0) then begin
-           ShowBoard;
-           Writeln(Cardinal(Position__),SPACE,Game.HashValue);
-           Write('PO Depth: ',Position__^.PushCount,' Score: ',Position__^.Score,' Positions: ',Positions.Count,' Pushes: ',Solver.PushCount,' Open: ',Positions.OpenPositions.Count);
-           //Writeln;
-           if   HasPushCreatedANewCorralDeadlock(Position__) then
-                Write(' Deadlock')
-           else Write(' OK');
-           Readln;
-           end;
-//}
-{
-        for Index:=1 to High(Game.SolutionPathHashValues) do // testing original solution...
-            if Game.SolutionPathHashValues[Index]=0 then
-               break
-            else if Game.HashValue=Game.SolutionPathHashValues[Index] then begin
-                    if Index >= 0 then begin
-                       ShowBoard;
-                       Write('PO: Solution path ',Index,SLASH,Position__^.PushCount,' Pushes: ',Solver.PushCount,' Score: ',Position__^.Score);
-                       //if   Index=141 then
-                       //     Readln
-                       //else Writeln;
-                       Readln;
-                       Positions.DebugPosition:=Position__;
-                       end;
-                    break;
-                    end;
-}
-        Position__^.PackingOrder.SetNo:=PackingOrderSetNo__;
-        Square:=Game.BoxPos[Position__^.Move.BoxNo];
-
-        if Integer(Game.Board[Square] shr GOAL_BIT_SHIFT_COUNT)<>PackingOrderSetNo__ then begin {'True': the box hasn't reached one of the target squares in the current packing order goal set}
-           Result:=0;
-           PositionScore:=Position__^.Score;
-           if (Position__^.PushCount+Game.SimpleLowerBound<Solver.SearchLimits.DepthLimit) and
-              (PositionScore<=High(Positions.OpenPositions.Buckets)) and
-              (PlayersReachableSquaresIndex__<MAX_HISTORY_BOX_MOVES) then
-              with Position__^ do with Solver.SearchStates[PlayersReachableSquaresIndex__].PlayersReachableSquares do begin
-                  Inc(UInt8(Move.Direction),POSITION_PATH_TAG);                 {mark the position as a member of the currently investigated path}
-                  SuccessorPushCount:=Succ(PushCount);
-                  SuccessorPlayersReachableSquaresIndex:=Succ(PlayersReachableSquaresIndex__);
-
-                  //Game.History.Moves[PushCount].Move.BoxNo:=BoxNo__;          {update game history}
-
-                  for Direction:=Low(Direction) to High(Direction) do begin
-                      PlayerFromSquare:=Square-Game.SquareOffsetForward[Direction];
-                      BoxToSquare     :=Square+Game.SquareOffsetForward[Direction];
-                      if (Result=0) {'True': no path to a target square has been found yet}
-                         and
-                         {inline simple checks for legal moves}
-                         (Squares[PlayerFromSquare]=TimeStamp){'= TimeStamp': the player can reach the neighbor-square}
-                         and
-                         ((Game.Board[BoxToSquare] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE))=0) then begin {'=0' the square is legal and not blocked by a wall or another box}
-
-                         GoalNo:=0;
-
-                         Index:=FirstSetMemberIndex__;
-                         while Index<=LastSetMemberIndex__ do begin
-                           GoalNo:=Solver.PackingOrder.SetMembers[Index];
-                           if   (Game.Board[Game.GoalPos[GoalNo]] and BOX)=0 then begin {'True': the goal/parking square doesn't contain a box}
-                                i         :=Solver.PackingOrder.SquareGoalDistance[Square           ,GoalNo];   {distance from the box position to the target square}
-                                j         :=Solver.PackingOrder.SquareGoalDistance[BoxToSquare      ,GoalNo]-i; {difference between the new and old distance to the target square}
-                                if        j<0 then {'True': moving the box in this direction brings it closer to the goal}
-                                          break {quick-and-dirty exit the 'while' loop when a goal candidate has been found}
-                                else if   j=1 then begin {'True': moving the box in this direction brings it 1 square farther away from the goal}
-                                          j:=Solver.PackingOrder.SquareGoalDistance[PlayerFromSquare,GoalNo];
-                                          if   (j-i>1)
-                                               and
-                                               (j<High(Solver.PackingOrder.SquareGoalDistance[PlayerFromSquare,GoalNo])) then begin {'<High': there is a box path from the 'playerFromSquare' to the goal/parking square}
-                                               {moving the box in this direction (probably) brings
-                                                it closer to the target square, even though the push
-                                                numerically brings the box farther away;
-
-                                                the scenario can be like this excerpt from
-                                                the level "Original 35" by "Thinking Rabbit":
-
-                                                #-#p#### 'p': player
-                                                #-gb---# 'g': goal/parking square
-                                                #-#-##-# 'b': box
-                                                #-#----#
-                                                #-#---##
-                                                -#-#---# game state: before the push
-                                                -#-##### push direction: down
-
-                                                the distances to the target square 'g':
-                                                #-#4#### '4': player square
-                                                #-01---# '0': goal/parking square
-                                                #-#2##-# '2': box 'to' square
-                                                #-#----# '1': box 'from' square
-                                                #-#---##
-                                                -#-#---# game state: before the push
-                                                -#-##### push direction: down
-
-                                                the facts that...
-                                                * the squares '2' - '1' = 1, and
-                                                * the squares '4' - '1' > 1
-                                                indicates that the push (probably)
-                                                brings the box closer to the target square;
-                                               }
-                                               break; {quick-and-dirty exit the 'while' loop when a goal candidate has been found}
-                                               end
-                                          else GoalNo:=0;
-                                          end
-                                     else GoalNo:=0;
-                                end
-                           else GoalNo:=0;
-                           Inc(Index);
-                           end;
-{{
-                         Distance:=INFINITY;
-                         for Index:=FirstSetMemberIndex__ to LastSetMemberIndex__ do begin
-                             GoalNo:=Solver.PackingOrder.SetMembers[Index];
-                             if (Game.Board[Game.GoalPos[GoalNo]] and BOX)=0 then begin {'True': the goal square doesn't contain a box}
-                                i:=Solver.PackingOrder.SquareGoalDistance[BoxToSquare,GoalNo];
-                                if (i<Distance) and
-                                   (i<=Solver.PackingOrder.SquareGoalDistance[Square,GoalNo]) then
-                                   Distance:=i;
-                                end;
-                             end;
-
-                         if (Distance<>INFINITY)                                {'True': pushing the box in the current direction brings it closer to one of the goals in the goal set that should be filled next according to the packing order}
-}}
-                         if (GoalNo<>0)                                         {'True': pushing the box in the current direction brings it closer to the goal 'GoalNo'}
-                            and
-                            {extended checks for legal moves}
-                            IsALegalPush(Move.BoxNo,Direction,SuccessorPlayersReachableSquaresIndex) then
-
-                            if Solver.PushCount<Solver.SearchLimits.PushCountLimit then begin {limit not exceeded}
-
-                               //Game.History.Moves[PushCount].Direction:=Direction; {update game history}
-                               DoPush(Move.BoxNo,Direction,SuccessorPlayersReachableSquaresIndex); {do the move, i.e., update the board}
-{{
-                               SuccessorScore:= SuccessorPushCount              {'SuccessorPushCount + Game.SimpleLowerBound' is the normal score for a position}
-                                                +Game.SimpleLowerBound
-                                                -Game.DistanceToNearestGoal[BoxToSquare] {subtract the normal contribution to 'Game.SimpleLowerBound' for this box}
-                                                +Solver.PackingOrder.SquareGoalDistance[BoxToSquare,GoalNo] {the distance to the designated goal}
-                                                -Game.PackingOrderPushCount;    {packing-order pushes on current path; by subtracting them it only counts as a single push to bring the box closer to the designated goal}
-                                                //-RelativeDepth__;             {prefer positions where the box is closer to the designated goal square}
-
-}}
-                               SuccessorScore:=PositionScore
-                                               +Game.DistanceToNearestGoal[BoxToSquare]
-                                               -Game.DistanceToNearestGoal[Square];
-                               if SuccessorScore<PositionScore then SuccessorScore:=PositionScore;
-
-{{
-                               {successor score := (parent score) + (1 push) - (1 point for getting closer to the designated goal) + (difference between the lower bound for the new position and the parent position)}
-                               SuccessorScore   :=PositionScore //Succ(PositionScore)
-                                                  +Game.DistanceToNearestGoal[BoxToSquare]
-                                                  -Game.DistanceToNearestGoal[Square];
-                               if SuccessorScore<PositionScore then
-                                  SuccessorScore:=PositionScore;
-}}
-
-{{
-                               if   (Game.Board[Square        ] shr GOAL_BIT_SHIFT_COUNT)
-                                    >=                                               {'>=': the calculated packing order, if any, doesn't indicate that this brings the box closer to a square that should be filled first}
-                                    (Game.Board[BoxToSquare   ] shr GOAL_BIT_SHIFT_COUNT) then
-                                    SuccessorScore:=     SuccessorPushCount +Game.SimpleLowerBound-Game.PackingOrderPushCount
-                               else {'<': the box moves to a square that according to the calculated packing order should be filled first}
-                                    SuccessorScore:=Pred(SuccessorPushCount)+Game.SimpleLowerBound-Game.PackingOrderPushCount;
-}}
-{{
-                               SuccessorScore:=((SuccessorPushCount              {'SuccessorPushCount + Game.SimpleLowerBound' is the normal score for a position}
-                                                 -Game.PackingOrderPushCount    {packing-order pushes on current path; by subtracting them it only counts as a single push to bring the box closer to the designated goal}
-                                                )
-                                                div
-                                                2
-                                               )
-                                                +Game.SimpleLowerBound
-                                                -Game.DistanceToNearestGoal[BoxToSquare] {subtract the normal contribution to 'Game.SimpleLowerBound' for this box}
-                                                +Solver.PackingOrder.SquareGoalDistance[BoxToSquare,GoalNo] {the distance to the designated goal}
-
-                                                //-RelativeDepth__;             {prefer positions where the box is closer to the designated goal square}
-                                                ;
-}}
-                               Inc(Solver.PushCount);                              {update statistics}
-
-//                             WriteBoardToLogFile('PO '+IntToStr(Solver.PushCount)+SPACE+IntToStr(Positions.Count)+' Score: '+IntToStr(SuccessorScore));
-
-                               if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
-                                  {$IFDEF CONSOLE_APPLICATION}
-                                    Write(Reader.LevelCount,': Depth: ',Position__^.PushCount);
-                                    Write(' Score: ',Position__^.Score);
-                                    Write(' Pushes: ',Solver.PushCount div ONE_MILLION,' million');
-                                    if   Positions.SearchStatistics.ReuseCount=0 then
-                                         Write(' Positions: ',Positions.Count)
-                                    else Write(' Reused positions: ',Positions.SearchStatistics.ReuseCount);
-                                    {Write(' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000);}
-                                    Writeln;
-                                  {$ENDIF}
-
-                                  TimeCheck;
-                                  end;
-
-                               if (SuccessorScore<=Solver.SearchLimits.DepthLimit) and
-                                  (SuccessorPushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) then begin
-                                  UsePlayersReachableSquaresFromPredecessor:=
-                                    (Solver.SearchStates[PlayersReachableSquaresIndex__].PlayersReachableSquares.Squares[BoxToSquare]
-                                     <> // '<>': in the position 'Position__' (before the move [Move.BoxNo, Direction]), the player cannot reach the other side of the box
-                                     Solver.SearchStates[PlayersReachableSquaresIndex__].PlayersReachableSquares.TimeStamp
-                                    )
-                                    or
-                                    (((Game.Board[BoxToSquare+Game.SquareOffsetRight[Direction]] and (WALL+BOX))<>0)
-                                     and
-                                     ((Game.Board[BoxToSquare+Game.SquareOffsetLeft [Direction]] and (WALL+BOX))<>0)
-                                    );
-                                  Inc(Solver.ReusePlayersReachableSquaresFromPredecessorCount[UsePlayersReachableSquaresFromPredecessor]);
-
-                                  if not Solver.SearchStates[SuccessorPlayersReachableSquaresIndex].PlayersReachableSquares.Calculated then
-                                     CalculatePlayersReachableSquares(SuccessorPlayersReachableSquaresIndex); {find the player's reachable squares}
-
-                                  {SuccessorPosition:=nil;}                     {not necessary, 'TTAdd' sets it to 'nil'}
-
-                                  {try to add the successor position to the transposition table;}
-                                  {if it already is in the table, then 'TTAdd' returns}
-                                  {'False' and the existing position in 'SuccessorPosition'}
-                                  if TTAdd(Game.HashValue,                      {hash signature for this position}
-                                           //Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.MinPlayerPos, {normalized (top-left) player position}
-                                           Game.PlayerPos,                      {player position; note that this isn't the normalized (top-left) player position; 'SetPosition' depends on having the true player position after the push}
-                                           SuccessorPushCount,                  {pushes = depth}
-                                           SuccessorScore,                      {pushes + heuristic estimate}
-                                           Move.BoxNo,                          {moved box}
-                                           Direction,                           {box direction}
-                                           Position__,                          {parent node}
-                                           SuccessorPosition) then begin        {'SuccessorPosition' is the new saved position}
-
-//                                   WritelnToLogFile('New '+IntToStr(Positions.Count));
-
-                                     SuccessorScore:=SuccessorPosition^.Score;  {'Score' is 0 for perimeter-nodes from a search in the opposite direction, hence, retrieve the actually saved score for the position}
-{
-                                     if       Game.HashValue=1652664153217381026 then begin
-                                              Positions.DebugPosition:=SuccessorPosition;
-                                              ShowBoard;
-                                              Writeln('PO Debug: ',Positions.Count,SPACE,Solver.PushCount,' Pushes: ',SuccessorPushCount,' Score: ',SuccessorScore,SPACE,Game.SimpleLowerBound,SPACE,Game.PackingOrderPushCount,SPACE,Solver.PushCount);
-                                              Readln;
-                                              end;
-}
-                                     if       (Game.SimpleLowerBound<>0) and (SuccessorScore<>0) then begin {'True': not a solution}
-                                              if not Game.DeadlockSets.NewDynamicDeadlockSets then {'True':  no new deadlock sets have been created after the main search loop retracted a node from the open-list}
-                                                 Result:=PackingOrderSearch(SuccessorPosition,PackingOrderSetNo__,Succ(RelativeDepth__),SuccessorPlayersReachableSquaresIndex,FirstSetMemberIndex__,LastSetMemberIndex__);
-{
-                                              if Result=0 then with SuccessorPosition^ do begin // 'Result=0': the box didn't make it all the way to one of the designated goal squares
-                                                 SuccessorScore:=SuccessorPushCount+Game.SimpleLowerBound-Game.PackingOrderPushCount; // the normal evaluation heuristic when packing order isn't considered
-                                                 if SuccessorScore<Score then begin
-                                                   if   (Ord(Move.Direction) and POSITION_OPEN_TAG)<>0 then begin
-                                                        OPENRemove(SuccessorPosition);
-                                                        Score:=SuccessorScore;
-                                                        OPENAdd(SuccessorPosition);
-                                                        end
-                                                   else Score:=SuccessorScore;
-                                                   end;
-                                                 end;
-}
-                                              end
-                                     else  if Game.SimpleLowerBound<>0 then begin  {'True': a perimeter-position from a search in the opposite direction}
-                                              SuccessorScore:=SuccessorPushCount+  {'PathLengthToSolution' contains distance to the goal-position}
-                                                              SuccessorPosition^.PathLengthToSolution;
-                                              if (Positions.SolutionPosition=nil)
-                                                 or
-                                                 (Cardinal(SuccessorScore) <
-                                                  (Positions.SolutionPosition^.PushCount+
-                                                   Positions.SolutionPosition^.PathLengthToSolution))
-                                                 or
-                                                 (SuccessorPosition=Positions.SolutionPosition) {'=': new cheaper path to the already found perimeter-position}
-                                                 then begin {new or first found solution}
-                                                 Positions.SolutionPosition:=SuccessorPosition;
-                                                 Solver.SearchLimits.DepthLimit:=SuccessorScore;
-                                                 Solver.SokobanStatusPointer^.Flags:=SOKOBAN_PLUGIN_FLAG_SOLUTION;
-                                                 SetSokobanStatusText(TEXT_SOLUTION_INFO_1+IntToStr(SuccessorScore)+TEXT_SOLUTION_INFO_2);
-                                                 OPENDropPositions(Solver.SearchLimits.DepthLimit);{prune the open-queue and the transpostion-table; there is no need to search paths longer than or equal to the best found solution}
-                                                 //TerminateSearch; //testing
-                                                 end;
-                                              end
-                                     else  begin                                {lower bound = 0, i.e., it's the goal position}
-                                             Positions.SolutionPosition:=SuccessorPosition;
-                                             TerminateSearch;
-                                             //Positions.OpenPositions.Count:=0;   {'0': signals an exhaustive search, i.e., an optimal solution}
-                                           end;
-                                     end
-                                  else                                          {the position wasn't added to the transposition table}
-                                     if SuccessorPosition<>nil then with SuccessorPosition^ do begin {'True': the position already exists in the transposition table}
-                                        if Game.SimpleLowerBound<>0 then begin  {'True': not a solution}
-                                           if (SuccessorPushCount<=PushCount) and
-                                              ((Ord(Move.Direction) and (POSITION_OPEN_TAG+POSITION_PATH_TAG+POSITION_PACKING_ORDER_TAG))=0) and
-                                              (not Game.DeadlockSets.NewDynamicDeadlockSets) then begin {'True': no new deadlock sets have been created after the main search loop retracted a node from the open-list}
-                                              Result:=PackingOrderSearch(SuccessorPosition,PackingOrderSetNo__,Succ(RelativeDepth__),SuccessorPlayersReachableSquaresIndex,FirstSetMemberIndex__,LastSetMemberIndex__);
-                                              end;
-                                           end
-                                        else begin                              {start-position = goal-position, or a shorter path to an existing position}
-                                           {if this is the start-position then modify it so it contains this last move leading to the solution}
-                                           PushCount        :=SuccessorPushCount;
-                                           Score            :=SuccessorPushCount;
-                                           Parent           :=Position__;       {handle with care: if this is the start-position, then the solution is now a circular list}
-                                           Move.BoxNo       :=Position__^.Move.BoxNo;
-                                           Move.Direction   :=Direction;
-                                           Positions.SolutionPosition:=SuccessorPosition;
-
-                                           TerminateSearch;
-                                           //Positions.OpenPositions.Count:=0;  {'0': signals an exhaustive search, i.e., an optimal solution}
-                                           end
-                                        end
-                                     else                                       {the transposition table is full}
-                                        if Solver.ReuseNodesEnabled then begin
-                                           if SuccessorScore<Position__^.BestForgottenScore then
-                                              Position__^.BestForgottenScore:=SuccessorScore; {the successor-position wasn't stored; remember the best forgotten score}
-                                           end
-                                        else TerminateSearch;                   {stop searching when the transposition table is full}
-                                  end
-                               else begin                                       {search depth limit exceeded}
-                                  if (Solver.SearchLimits.DepthLimit>=0) and                 {'>=0': the search hasn't been terminated}
-                                     (SuccessorPushCount+Game.SimpleLowerBound>OriginalDepthLimit) then {'>OriginalDepthLimit': 'Solver.SearchLimits.DepthLimit' may have been lowered after finding a solution}
-                                     Inc(Solver.LimitExceededPushCount);
-                                  end;
-
-                               UndoPush(Move.BoxNo,Direction);                  {take back the move, i.e., update the board}
-                               end
-                            else begin                                          {push count limit exceeded}
-                               if Solver.SearchLimits.DepthLimit>=0 then        {'>=0': the search hasn't been terminated}
-                                  Inc(Solver.LimitExceededPushCount);
-                               end;
-                         end;
-                      end;
-
-                  Dec(UInt8(Move.Direction),POSITION_PATH_TAG);                 {remove the 'current path' tag}
-                  end;
-           end
-        else with Position__^ do begin                                          {the box arrived at a target square}
-           if Game.SimpleLowerBound<>0 then begin                               {'<>': not a solution}
-              if   RelativeDepth__<Score then
-                   Score:=Score-RelativeDepth__                                 {all the pushes leading to the target square are packing order pushes; subtract them from the score to give the position a substantial bonus}
-              else Score:=1;
-
-              if ((Game.Board[Square] and GOAL)<>0) and                         {'True': the box is pushed to a goal square}
-                 IsAFreezingMove(0,Square,True) then                            {'True': the box freezes at the goal square}
-                 TTAddFrozenGoalsPattern(Position__);                           {collect frozen goals patterns and check for deadlocks}
-              end;
-           Result:=RelativeDepth__;
-{
-//         if Game.HashValue=6863522399279464882 then begin
-           if Solver.PushCount>=0 then begin
-//         if Positions.DebugPosition<>nil then begin
-//         if Position__^.PushCount>=0 then begin
-//         if Positions.Count>1*ONE_MILLION then begin
-
-              ShowBoard;
-              Writeln(Cardinal(Position__),SPACE,Game.HashValue);
-              SquareToColRow(Square,Col,Row);
-              Writeln('Square: ',Square,' = [',Col,COMMA,Row,']');
-              Write('PO!: Depth: ',PushCount,' Score: ',Score,'  Pushes: ',Solver.PushCount,'  Positions: ',Positions.Count,' Packing order: ',PackingOrderSetNo__);
-              Readln;
-              //Positions.DebugPosition:=Position__;
-              end;
-}
-           end;
-
-        if (RelativeDepth__<>0) and                                             {'<>': this isn't the base position which is handled by the caller, i.e., either added to the open-list or expanded at once}
-           (Position__^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
-//         (Position__^.Score>=Low (Positions.OpenPositions.Buckets)) and
-           (Position__^.Score<=High(Positions.OpenPositions.Buckets)) and
-           ((Ord(Position__^.Move.Direction) and (POSITION_OPEN_TAG+POSITION_PATH_TAG+POSITION_PACKING_ORDER_TAG))=0) then
-           with Position__^ do begin
-             {if (Ord(Move.Direction) and POSITION_OPEN_TAG=0) then} OPENAdd(Position__); {put the position on the open-queue}
-             Inc(Positions.SearchStatistics.Enqueue1Count);
-             PackingOrder.SetNo:=PackingOrderSetNo__;
-             Inc(UInt8(Move.Direction),POSITION_PACKING_ORDER_TAG);
-             end;
-      end; {Search.ForwardSearch.Search.PackingOrderSearch}
-*)
     function MinimumDistanceToGamePhaseTargetSquares( Position__ : PPosition ) : Integer;
     var Index:Integer;
     begin
@@ -15760,30 +17045,43 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          Result := -1;
     end;
 
-    procedure CalculatePackingOrderPhaseAndScore(Position__:PPosition; FromSquare__,ToSquare__:Integer);
+    function  CalculatePackingOrderPhaseAndScore(Position__:PPosition; FromSquare__,ToSquare__,BoxNo__:Integer):Boolean;
     {preconditions:
      1. 'Position__' is the result of pushing a box from 'FromSquare__' to 'ToSquare__';
      2. 'Position__^.PackingOrder.SetNo' contains the game phase before the push;
     }
-    var Distance,EmptySquaresCount,FilledSquaresCount,GamePhase,GoalNo,
-        i,Index,LastSetMemberIndex,Score,SetMemberSquare,SquarePhase:Integer;
-    begin
+    const END_GAME_PHASE_LIMIT=2; {near the end of the game, be less strict about obeying the calculated packing order}
+    var   Distance,EmptySquaresCount,FilledSquaresCount,FreezePenalty,GamePhase,GoalNo,
+          i,Index,LastSetMemberIndex,Score,SetMemberSquare,SetNo,Square,SquarePhase:Integer;
+    begin {CalculatePackingOrderPhaseAndScore}
+          {returns 'True' if the box reaches a target square for the game phase after the push}
       with Game do with Solver.PackingOrder do begin
+        Score:=0;
         GamePhase:=Position__^.PackingOrder.SetNo;                              {game phase before the push}
 
-        GoalNo:=Board[FromSquare__] shr GOAL_BIT_SHIFT_COUNT;                   {get the goal/parking place number, if any, for the 'from' square}
+        GoalNo:=Cardinal(Board[FromSquare__] shr GOAL_BIT_SHIFT_COUNT);         {get the goal/parking place number, if any, for the 'from' square}
         SquarePhase:=GoalSetNo[GoalNo];                                         {get the square phase number, if any; if the square is a target square in more than one phase, then the number in 'GoalSetNo[]' is the highest phase for the square}
-
+{
+        if SquarePhase=15 then begin
+           ShowBoard;
+           Writeln;
+           end;
+}
         if SquarePhase>=GamePhase then begin                                    {'True': the box is leaving a square which was filled in this game phase or an earlier game phase}
            if SquarePhase>GamePhase then                                        {'True': the box leaves a square which was filled in an earlier and already completed game phase}
-              repeat GoalNo      :=NextGoalAtSameSquare[GoalNo];                {find the lowest square-phase which is greater than or equal to the current game phase}
+              repeat GoalNo      :=NextGoalAtSameSquare[GoalNo];                {find the lowest square-phase greater than or equal to the current game phase; the first time through the loop wraps around from highest to lowest goal at the square}
                      SquarePhase :=GoalSetNo[GoalNo];
-              until  SquarePhase >=GamePhase;                                   {same-square targets are linked in ascending order by a circular list, and the highest valued goal number entered the loop first, so this terminating criteria will do}
+              until  SquarePhase >=GamePhase;                                   {same-square targets are linked in ascending order by a circular list, and the highest valued goal number entered the loop first, so this terminating criterion will do}
 
-           if   SquarePhase>GamePhase then                                      {'True': the box leaves a square which was filled in an earlier game phase}
-                if   ParkedBoxDestinationGoalSetNo[GoalNo]<GamePhase then       {'True': the box should stay at its current position until the game phase advances (decreases) to 'ParkedBoxDestinationGoalSetNo[GoalNo]'}
-                     GamePhase:=SquarePhase                                     {retreat (increase) to the most recent phase phase where the 'FromSquare__' square should be filled}
+           if   SquarePhase>GamePhase then begin                                {'True': the box leaves a square which was filled in an earlier game phase}
+                SetNo:=ParkedBoxDestinationGoalSetNo[GoalNo];
+                if   SetNo<GamePhase then begin                                 {'True': the box should preferably stay at its current position until the game phase advances (decreases) to 'ParkedBoxDestinationGoalSetNo[GoalNo]'}
+                     if (GoalNo<=GoalCount) or                                  {'True': the box comes from a goal square as opposed to a parking square}
+                        (GamePhase>END_GAME_PHASE_LIMIT) then                   {'True': it's not the end game yet; near the end of the game, be less strict about obeying the calculated packing order}
+                        GamePhase:=SquarePhase;                                 {retreat (increase game phase) to the most recent phase where the 'FromSquare__' square should be filled}
+                     end
                 else
+                end
            else {SquarePhase = GamePhase}                                       {the box leaves a square which should be filled in this game phase}
                 if GamePhase<Solver.PackingOrder.SetCount then                  {'True': this isn't the start (highest) game phase}
                    if   GoalSetNo[NextGoalAtSameSquare[GoalNo]]>GamePhase then  {'True': the square should be filled in an earlier (higher) phase}
@@ -15795,19 +17093,34 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
         LastSetMemberIndex:=Pred(FirstSetMemberIndex[Succ(GamePhase)]);         {the last goal/parking space member index for the current packing order phase}
 
-        Score:=0; Distance:=High(SquareGoalDistance[ToSquare__,GoalNo]);        {initialize 'Distance' to 'INFINITY' which in this case with the byte-sized SquareGoalDistance[,]' array is '255'}
+        Distance:=High(SquareGoalDistance[ToSquare__,GoalNo]);                  {initialize 'Distance' to 'INFINITY' which in this case with the byte-sized SquareGoalDistance[,]' array is '255'}
         FilledSquaresCount:=0; EmptySquaresCount:=0;                            {calculate empty and filled squares for the phase}
         for Index:=FirstSetMemberIndex[GamePhase] to LastSetMemberIndex do begin {for each target square for the current phase}
             GoalNo:=SetMembers[Index];                                          {get a target (goal or parking square) belonging to this phase}
             SetMemberSquare:=GoalPos[GoalNo];                                   {get the square number for the target}
-            if (Board[SetMemberSquare] and BOX)=0 then begin                    {'True': no box at this square}
+            if (Board[SetMemberSquare] and (WALL+BOX))=0 then begin             {'True': no box at this square; 'WALL': parking squares abandoned during the search are overwritten by '0' in the packing order, in effect designating a wall square}
                Inc(EmptySquaresCount);
 
                i  :=SquareGoalDistance[ToSquare__  ,DistancesBasedOnPackingOrder+GoalNo]; {the distance from the new box square to the target square}
                if i<Distance then Distance:=i;                                  {'True': this is a new/first closest target; remember its distance}
-               if i<SquareGoalDistance[FromSquare__,DistancesBasedOnPackingOrder+GoalNo] then Inc(Score); {'True': pushing the box in this direction brings it closer to this goal/parking square}
+               if i<SquareGoalDistance[FromSquare__,DistancesBasedOnPackingOrder+GoalNo] then Inc(Score,2); {'True': pushing the box in this direction brings it closer to this goal/parking square}
 
                Position__^.PackingOrder.SetMemberIndex:=Index;                  {update the 'last unfilled set member' index for the position}
+(*
+               if GoalNo>GoalCount then begin                                   {'True': a parking square as opposed to a final goal square}
+                  i:=FirstSetMemberIndex[ParkedBoxDestinationGoalSetNo[Index]];
+                  while i<Index do begin                                        {for each target square between the destination of the parked box (inclusive) and the parked box (exclusive), check if that target already is filled with a box}
+                    GoalNo:=SetMembers[i];                                      {a target square (goal or parking square)}
+                    SetMemberSquare:=GoalPos[GoalNo];                           {the square number for the target}
+                    if   (Board[SetMemberSquare] and (WALL+BOX))=0 then         {'True': no box at the target square}
+                         i:=MAX_BOX_COUNT+1                                     {exit loop}
+                    else Inc(i);                                                {advance to te next target square in the packing order}
+                    end;
+                  if i=Index then begin                                         {'True': the parking operation is unnecessary; the squares have already been filled}
+                     EmptySquaresCount:=0;
+                     end;
+                  end;
+*)
                end
             else begin
                Inc(FilledSquaresCount);
@@ -15818,25 +17131,30 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                end;
             end;
 
-        if  Score>0 then begin                                                  {'True': the push brought the box closer to one or more of the target squares which should be filled during the current packing order phase}
-            UInt8(Position__^.Move.Direction):=UInt8(Position__^.Move.Direction) or POSITION_PACKING_ORDER_TAG; {mark the position as the result of a packing order push; successive packing order pushes only count as 1 push}
+        Inc(Score,Solver.ProgressCheckPoint.BoxPushBonuses[BoxNo__]);           {give a bonus for pushing infrequently pushed boxes; if the solver doesn't make any progress, then the normal evaluation function isn't doing a good job}
+
+        if  Score>0 then begin                                                  {'True': the push brought the box closer to one or more of the target squares for the current packing order phase, or the box got a bonus for being pushed}
+            UInt8(Position__^.Move.Direction):=UInt8(Position__^.Move.Direction) or POSITION_PACKING_ORDER_TAG; {mark the position as the result of a packing order push; successive packing order pushes count as 1 push only}
             end;
 
         if  EmptySquaresCount=0 then begin                                      {'True': all target squares for the current game phase have been filled}
             if GamePhase>0 then begin
                Position__^.PackingOrder.SetNo:=Pred(GamePhase);                 {advance (decrease) to the next packing order phase}
-               CalculatePackingOrderPhaseAndScore(Position__,0,0);              {recurse; the next phase may already be complete; it not, the calculation of the score should take the new improved phase number into account}
+               CalculatePackingOrderPhaseAndScore(Position__,0,0,BoxNo__);      {recurse; the next phase may already be complete; it not, the calculation of the score should take the new improved phase number into account}
+               if Position__^.PackingOrder.SetNo<Solver.ProgressCheckPoint.BestGamePhase then
+                  MakeProgressCheckPoint(Position__^.Score,Position__^.PackingOrder.SetNo);
+               //if Position__^.Score> Position__^.Parent^.Score then
+               //   Position__^.Score:=Position__^.Parent^.Score;
                end;
             end
         else begin
             {update the score by taking the packing order phase into account}
-            Dec(Position__^.Score,                                              {give a bonus for the completed squares in this game phase}
+            Inc(Score,
                 (GoalAndParkingSquareCount-LastSetMemberIndex                   {the number of target squares for the completed phases (the squares are not necessarily filled anymore; parked boxes may have moved towards their goals)}
                  +FilledSquaresCount                                            {the number of filled target squares for the current game phase}
                 )
                 *
-                EMPTY_GOAL_PENALTY                                              {before this bonus is deducted, the score contains the penalty 'MAX_BOX_COUNT * EMPTY_GOAL_PENALTY'}
-               );
+                EMPTY_GOAL_PENALTY);                                            {before this bonus is deducted, the score contains the penalty 'MAX_BOX_COUNT * EMPTY_GOAL_PENALTY'}
 
             if Distance<High(SquareGoalDistance[ToSquare__,GoalNo]) then begin  {'True': the distance isn't 'INFINITY', where 'INFINITY' may just mean that the distance is too big to be recorded in the square->goal table with its byte-sized elements}
                {give a penalty for the distance to the nearest of the target
@@ -15849,71 +17167,479 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                 the 'Succ()', i.e., '+1' is there for winning over a
                 'SimpleLowerBound' bonus, also when 'Distance' = 0;
                }
-               Inc(Position__^.Score,2*Succ(Distance));
+               Dec(Score,2*Succ(Distance));
                end
             else begin
                {give a penalty for pushing a box which cannot reach any of the
                 target squares for this game phase;
                }
-               Inc(Position__^.Score,8);
+               Dec(Score,EMPTY_GOAL_PENALTY div 4);
                end;
-            if Score<=Position__^.Score then Dec(Position__^.Score,Score);      {give a bonus for getting closer to the target squares for this game phase}
+
+            if (Ord(Position__^.Move.Direction) and POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG)<>0 then begin {'True': the position may have boxes which have frozen prematurely at goal squares; check if this is true}
+               FreezePenalty:=0;
+               for Index:=1 to Pred(FirstSetMemberIndex[GamePhase]) do begin    {for each target (goal or parking square) which should be filled in a later game phase}
+                   GoalNo:=SetMembers[Index];                                   {a target (goal or parking square) which should be filled later}
+                   if (GoalNo<=Game.GoalCount) then begin                       {'True': a goal square as opposed to a parking square; parked boxes should never freeze;}
+                      Square:=GoalPos[GoalNo];
+                      if ((Game.Board[Square] and BOX)<>0) and
+                         IsAFreezingMove(0,Square,True) then                    {'True': a box is frozen at the goal square}
+                         Inc(FreezePenalty,Game.SimpleLowerBound);              {give a penalty which is proportional to the expected distance between the current game position and the solution; numeric overflow is ignored;}
+                      end;
+                   end;
+               if FreezePenalty<>0 then begin                                   {'True': one or more boxes are frozen at goal squares which should be filled later according to the calculated packing order}
+                  {decrease the bonus for getting closer to the target squares
+                   for this game phase; numeric overflow/underflow is ignored;
+                   if it happens it doesn't cause a crash; it just makes the
+                   estimated position score more inaccurate;}
+                  Dec(Score,FreezePenalty div 2);                               
+                  end
+               else Dec(UInt8(Position__^.Move.Direction),POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG); {no prematurely frozen boxes at goal squares; remove the flag}
+               end;
+
+            if   Score<=Position__^.Score then Dec(Position__^.Score,Score)     {give a bonus for getting closer to the target squares for this game phase}
+            else Position__^.Score:=1;                                          {this shouldn't happen}
 
             if Position__^.Score> High(Positions.OpenPositions.Buckets) then
                Position__^.Score:=High(Positions.OpenPositions.Buckets);        {clamp the score to fit the buckets in the OPEN table}
             end;
+
+        Result:=Distance=0;                                                     {return 'True' if the box reached a target square for this game phase}
+        end;
+    end; {Search.ForwardSearch.Search.CalculatePackingOrderPhaseAndScore}
+(*
+    function  TryToFillGoalsAndParkingspaces( Position__ : PPosition ) : Boolean;
+    var GamePhase, GoalNo, Index, SetMemberSquare : Integer;
+        //Col, Row : Integer;
+
+      function  PushBoxToSquare( Position__ : PPosition; BoxSquare__ : Integer ) : Integer;
+      type PQueueItem = ^TQueueItem;
+           TQueueItem = record BoxPos, PlayerPos : UInt16;
+                               Parent            : PQueueItem;
+                        end;
+      var  BoxNo,BoxPosition,BoxToSquare,
+           LastBoxPosition,NeighborSquare,
+           OldBoxSquareValue,OldPlayerPosition,PlayerToSquare:Integer;
+           Direction:TDirection;
+           QueueBottom,QueueTop,QueueItem:PQueueItem;
+           QueueItems:array[0..MAX_BOARD_SIZE*DIRECTION_COUNT] of TQueueItem;
+
+        procedure ShowPath( QueueItem__ : PQueueItem );
+        var Col, Row : Integer;
+        begin
+          while Assigned( QueueItem__ ) do begin
+            SquareToColRow( QueueItem__^.BoxPos, Col, Row );
+            Write( Col, COMMA, Row, SPACE, SPACE );
+            QueueItem__ := QueueItem__^.Parent;
+            end;
         end;
 
-    end; {Search.ForwardSearch.Search.CalculatePackingOrderPhaseAndScore}
-
-    begin {Search.ForwardSearch.Search}
+        function  AddPath( Position__  : PPosition;
+                           BoxNo__     : Integer;
+                           QueueItem__ : PQueueItem ) : Boolean;
+        var i, BoxSquare, FreezePenalty, NeighborSquare, PlayerSquare, SuccessorPushCount, SuccessorScore : Integer;
+            Direction : TDirection;
+            SuccessorPosition : PPosition;
+        begin {stores the positions along the path for pushing the box to the selected target square}
 {
-//   if (Game.HashValue=3563177739092011630) then begin
-//   if Positions.Count>=1*ONE_MILLION then begin
-//     if ( (Solver.PushCount mod (10*ONE_KIBI))=0 ) then begin
-//   if ( IsABoxSquare( 153 ) and IsABoxSquare( 194 ) and IsABoxSquare( 216 ) and IsABoxSquare( 218 ) ) then begin
-     if ((Solver.PushCount mod (25*ONE_THOUSAND))=0) //or (Positions.Count>=8165105)
-        //or ((Position__^.PackingOrder.SetNo<=10) and (Solver.PushCount>=00000))
-        then begin
-//   if (Solver.PushCount mod (100*ONE_THOUSAND))=0 then begin
-//   if (Solver.PushCount>=0) and ( ( Solver.PushCount mod 1 ) = 0 ) then begin
-         //Game.ShowDeadlockSetsEnabled:=True;
-         //with Game.DeadlockSets do ShowDeadlockSet(5,CenterSquare[5]);
-         //Game.ShowDeadlockSetsEnabled:=False;
-         ShowBoard;
-         Writeln(Cardinal(Position__),SPACE,Game.HashValue,
-                 SPACE,Positions.SearchStatistics.CalculateCorralDeadlockStatusCount,
-                 SPACE,Game.DeadlockSets.Count,
-                 SPACE,MinimumDistanceToGamePhaseTargetSquares( Position__ ),
-                 SPACE,Position__^.PackingOrder.SetNo);
-         Write('Forwards  ');
-         Write('Depth: ',Position__^.PushCount,SPACE,Position__^.PushCount-Positions.CurrentPosition^.PushCount,SPACE,Game.PackingOrderPushCount,
-                 ' Score: ',Position__^.Score,
-                 ' Positions: ',Positions.Count,
-                 ' Pushes: ',Solver.PushCount,
-                 ' Open: ',Positions.OpenPositions.Count,
-                 ': ',Positions.OpenPositions.MinValue
-//               ' Reused: ',Positions.SearchStatistics.ReuseCount
+          ShowBoard;
+          Write('Fill  ');
+          Write('Depth: ',Position__^.PushCount,SPACE,Position__^.PushCount-Positions.CurrentPosition^.PushCount,SPACE,Game.PackingOrderPushCount,
+                  ' Score: ',Position__^.Score,
+                  ' Positions: ',Positions.Count,
+                  ' Pushes: ',Solver.PushCount,
+                  ' Open: ',Positions.OpenPositions.Count,
+                  ': ',Positions.OpenPositions.MinValue
+                  //               ' Reused: ',Positions.SearchStatistics.ReuseCount
                );
-         Writeln;
-         //if (Positions.Count>=8165105) then Readln;
-         //if (Position__^.PackingOrder.SetNo<=10) and (Solver.PushCount>=00000) then
-         //   Readln;
-         end;
+          Writeln;
+          Readln;
 }
-{
-         for Index:=1 to High(Game.SolutionPathHashValues) do // testing original solution...
-             if Game.SolutionPathHashValues[Index]=0 then
-                break
-             else if Game.HashValue=Game.SolutionPathHashValues[Index] then begin
-                     if Index >= 0 then begin
-                        ShowBoard;
-                        Write('Solution path ',Index,SLASH,Position__^.PushCount,SPACE,Game.HashValue,' Pushes: ',Solver.PushCount);
-                        Writeln; Readln;
-                        Positions.DebugPosition:=Position__;
+          Result                   := ( not Assigned( QueueItem__^.Parent ))    {'True': end of path}
+                                      or
+                                      { don't go all the way; the last push which
+                                        brings the box to the target square should
+                                        preferably be generated by the primary
+                                        solver node expansion loop; when it pushes
+                                        the box to the target square, it will try
+                                        to fill the next target square according
+                                        to the packing order plan; this doesn't
+                                        happen if the push is generated here and
+                                        put on the open-queue for later expansion;
+                                      }
+                                      ( not Assigned( QueueItem__^.Parent^.Parent ) ); {'True': it's the push which brings the box to the target square}
+          if not Result then begin                                              {'True': more pushes on the path}
+             SuccessorPushCount    := Succ( Position__^.PushCount );
+             if SuccessorPushCount <= Solver.SearchLimits.DepthLimit then
+                with Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares do begin
+                  BoxSquare        := QueueItem__^.BoxPos;
+                  PlayerSquare     := QueueItem__^.PlayerPos;
+                  Direction        := OPPOSITE_DIRECTION[ NeighborSquareDirection( BoxSquare, PlayerSquare ) ];
+                  NeighborSquare   := BoxSquare + Game.SquareOffsetForward[ Direction ];
+
+                  if {inline simple checks for legal moves}
+                     (Squares[PlayerSquare]=TimeStamp)                          {'=TimeStamp': the player can reach the player-square for making this push}
+                     and
+                     ((Game.Board[NeighborSquare] and (BOX+WALL+FLAG_ILLEGAL_BOX_SQUARE))=0) {'=0' the square is legal and not blocked by a wall or another box}
+                     and
+                     {extended checks for legal moves}
+                     IsALegalPush(BoxNo__,Direction,SuccessorPushCount) then begin
+
+                     Inc(Solver.ProgressCheckPoint.BoxPushCounts[BoxNo__]);
+
+                     DoPush(BoxNo__,Direction,SuccessorPushCount);              {do the move, i.e., update the board}
+
+                     SuccessorScore:=SuccessorPushCount+Game.SimpleLowerBound   {normal heuristic score: number of pushes + simple lower bound}
+                                     -Game.PackingOrderPushCount                {a pushing-session which brings a box closer to a target square (goal or parking place) only counts as one single push}
+                                     +MAX_BOX_COUNT*EMPTY_GOAL_PENALTY;         {add a penalty now, so a bonus can be given later by 'CalculatePackingOrderPhaseAndScore()' for filling squares according to the packing order}
+
+                     Inc(Solver.PushCount);                                     {update statistics}
+
+                     if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
+                        {$IFDEF CONSOLE_APPLICATION}
+                          Write(Reader.LevelCount,': Depth: ',Position__^.PushCount);
+                          Write(' Score: ',Position__^.Score);
+                          Write(' Pushes: ',Solver.PushCount div ONE_MILLION,' million');
+                          if   Positions.SearchStatistics.ReuseCount=0 then
+                               Write(' Positions: ',Positions.Count)
+                          else Write(' Reused positions: ',Positions.SearchStatistics.ReuseCount);
+                          {Write(' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000);}
+                          Writeln;
+                          //ShowBoard;
+                          //Readln;
+                        {$ENDIF}
+                        TimeCheck;
                         end;
-                     break;
+
+                     if SuccessorPushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit then
+                        if TTAdd(Game.HashValue,                                {hash signature for this position}
+                                 //                                             Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.MinPlayerPos, {normalized (top-left) player position}
+                                 Game.PlayerPos,                                {player position; note that this isn't the normalized (top-left) player position; the normalized position may not have been calculated yet}
+                                 SuccessorPushCount,                            {pushes = depth}
+                                 SuccessorScore,                                {pushes + heuristic estimate}
+                                 BoxNo__,                                       {moved box}
+                                 Direction,                                     {box direction}
+                                 Position__,                                    {parent node}
+                                 SuccessorPosition)                             {'True': 'SuccessorPosition' is the new saved position when 'TTAdd()' succeeds}
+                           then begin
+                           if   (Ord(SuccessorPosition^.Move.Direction) and POSITION_OPEN_TAG)<>0 then
+                                OpenRemove( SuccessorPosition );             {remove the position from the open-queue while its original score still is available in its score field}
+                           if   not Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated then {'True': neither 'IsALegalPush' nor 'TTAdd' triggered the calculation; do it now}
+                                CalculatePlayersReachableSquares(SuccessorPushCount); {find the player's reachable squares}
+
+                           if   SuccessorPosition^.Score<>0 then                {'Score' is 0 for perimeter-nodes (leaf-nodes) from a search in the opposite direction}
+                                SuccessorPosition^.Score:=SuccessorScore        {ensure that the position contains the packing order maximum penalty before the score is reduced according to the game phase progress}
+                           else SuccessorScore:=SuccessorPosition^.Score;       {'Score' is 0 for perimeter-nodes (leaf-nodes) from a search in the opposite direction, hence, retrieve the actually saved score}
+
+                           if   (Game.SimpleLowerBound<>0) and (SuccessorScore<>0) then begin {'True': not a solution}
+                                SuccessorPosition^.PackingOrder.SetNo:=Position__^.PackingOrder.SetNo; {initially, inherit the packing order phase from the parent position}
+                                CalculatePackingOrderPhaseAndScore(SuccessorPosition,BoxSquare,NeighborSquare,BoxNo__); {calculate the packing order phase after the push; also calculate a new score for 'SuccessorPosition' taking the phase into account}
+                                SuccessorScore:=SuccessorPosition^.Score; {get the score calculated taking the game phase into account}
+                                if ((Game.Board[NeighborSquare] and GOAL)<>0) and     {'True': the box is pushed to a goal square}
+                                   IsAFreezingMove(0,NeighborSquare,True) then begin  {'True': the box freezes at the goal square}
+                                   i:=Solver.PackingOrder.GoalSetNo[Cardinal(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]; {get packing order phase for the destination square}
+                                   if i<SuccessorPosition^.PackingOrder.SetNo then with Solver.PackingOrder do begin
+                                      {the box freezes at a goal square which should not be filled in this packing order phase}
+                                      //FreezePenalty:=(FirstSetMemberIndex[Position__^.PackingOrder.SetNo]-FirstSetMemberIndex[i])*EMPTY_GOAL_PENALTY;
+                                      FreezePenalty:=Game.SimpleLowerBound; {choose a penalty for what may be a premature freezing push}
+                                      if SuccessorScore<DEAD_END_SCORE-FreezePenalty then {guard against overflow (it's probably impossible given the other limits; that's why the code doesn't bother to maximize 'SuccessorScore' on overflow)}
+                                         Inc(SuccessorScore,FreezePenalty); {penalize the push}
+                                      SuccessorPosition^.Score:=SuccessorScore;
+                                      end;
+
+                                   TTAddFrozenGoalsPattern(SuccessorPosition);  {collect frozen goals patterns and check for deadlocks}
+
+                                   //ShowBoard;
+                                   //Writeln(Solver.PushCount,SPACE,Positions.Count);
+                                   //Write('Premature frozen box?');
+                                   //Readln;
+                                   end;
+
+                           if   (SuccessorPosition^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
+                                ((Ord(SuccessorPosition^.Move.Direction) and POSITION_OPEN_TAG)=0) then begin {'0': the packing order search hasn't put the position on the open-queue}
+                                Inc(Positions.SearchStatistics.Enqueue1Count);
+                                OPENAdd(SuccessorPosition);                     {put the position on the open-queue}
+                                end;
+
+                           //if (Ord(SuccessorPosition^.Move.Direction) and POSITION_PACKING_ORDER_TAG)<>0 then {'True': it's a packing order push; update the packing order push count accordingly before the recursion}
+                              Inc(Game.PackingOrderPushCount);
+                           Result := AddPath( SuccessorPosition, BoxNo__, QueueItem__^.Parent );
+                           //if (Ord(SuccessorPosition^.Move.Direction) and POSITION_PACKING_ORDER_TAG)<>0 then {'True': it's a packing order push; update the packing order push count accordingly after  the recursion}
+                              Dec(Game.PackingOrderPushCount);
+                           end {position added to the transposition table}
+                        else
+                              {a solution has been found; either it's a goal position or a perimeter-position from a search in the opposite direction}
+                              if Game.SimpleLowerBound<>0 then begin            {'True': a perimeter-position from a search in the opposite direction}
+                                 //ShowBoard;
+                                 //Write('Depth: ',SuccessorPosition^.PushCount,' Score: ',SuccessorPosition^.Score,' Total pushes: ',Solver.PushCount,' Positions: ',Positions.Count,' P-order: ',Position__^.PackingOrder .SetNo);
+                                 //Readln;
+                                 SuccessorScore:=SuccessorPushCount+
+                                                 SuccessorPosition^.PathLengthToSolution;
+                                 if (Positions.SolutionPosition=nil)
+                                    or
+                                    (Cardinal(SuccessorScore) <
+                                     (Positions.SolutionPosition^.PushCount+
+                                      Positions.SolutionPosition^.PathLengthToSolution))
+                                    or
+                                    (SuccessorPosition=Positions.SolutionPosition) {'=': new cheaper path to the already found perimeter-position}
+                                    then begin                                  {new or first found solution}
+                                    Positions.SolutionPosition:=SuccessorPosition;
+                                    Solver.SearchLimits.DepthLimit:=SuccessorScore;
+                                    Solver.SokobanStatusPointer^.Flags:=SOKOBAN_PLUGIN_FLAG_SOLUTION;
+                                    OPENDropPositions(Solver.SearchLimits.DepthLimit); {prune the open-queue and the transpostion-table; there is no need to search paths longer than or equal to the best found solution}
+                                    if   Solver.StopWhenSolved then
+                                         TerminateSearch
+                                    else SetSokobanStatusText(TEXT_SOLUTION_INFO_1+IntToStr(SuccessorScore)+TEXT_SOLUTION_INFO_2);
+                                    end;
+                                 end
+                              else begin                                        {lower bound = 0, i.e., it's a goal position}
+                                  UpdateBestSolution(SuccessorPosition);
+                                  //ShowBoard; Write('Solution'); Readln;
+                                  //ShowPath(Positions.SolutionPosition);
+                                 end;
+                           end
+                        else                                                    {the current game state wasn't added to the transposition table}
+                          if Assigned(SuccessorPosition) then begin             {'True': the current game state matches the position represented by 'SuccessorPosition'}
+                             if (Game.SimpleLowerBound<>0) and (SuccessorPosition^.Score<>0) then begin {'True': not a solution}
+                                //if (Ord(SuccessorPosition^.Move.Direction) and POSITION_PACKING_ORDER_TAG)<>0 then {'True': it's a packing order push; update the packing order push count accordingly before the recursion}
+                                   Inc(Game.PackingOrderPushCount);
+                                Result := AddPath( SuccessorPosition, BoxNo__, QueueItem__^.Parent );
+                                //if (Ord(SuccessorPosition^.Move.Direction) and POSITION_PACKING_ORDER_TAG)<>0 then {'True': it's a packing order push; update the packing order push count accordingly after  the recursion}
+                                   Dec(Game.PackingOrderPushCount);
+                                end;
+                             end;
+
+                     UndoPush(BoxNo__,Direction);                               {take back the move, i.e., update the board}
                      end;
+                  end;
+             end
+          else begin
+{
+             ShowBoard;
+             Write('Fill  ');
+             Writeln( SquareToColRowAsText( Game.BoxPos[ Position__^.Move.BoxNo ] ) );
+             Write('Depth: ',Position__^.PushCount,SPACE,Position__^.PushCount-Positions.CurrentPosition^.PushCount,SPACE,Game.PackingOrderPushCount,
+                   ' Score: ',Position__^.Score,
+                   ' Positions: ',Positions.Count,
+                   ' Pushes: ',Solver.PushCount,
+                   ' Open: ',Positions.OpenPositions.Count,
+                   ': ',Positions.OpenPositions.MinValue
+                   //               ' Reused: ',Positions.SearchStatistics.ReuseCount
+                  );
+             Writeln;
+             //Readln;
+}             
+             end;
+        end; {AddPath}
+
+      begin {PushBoxToSquare}
+        Result := 0;
+        if Position__^.PushCount<=Solver.SearchLimits.DepthLimit then {'True': the search hasn't been terminated}
+           with Game do with Solver.PackingOrder do with Solver.SearchStates[SEARCH_STATE_INDEX_SCRATCHPAD_1] do begin
+             // save current game state information
+             OldPlayerPosition:=PlayerPos;
+             OldBoxSquareValue:=Board[BoxSquare__];
+             Board[BoxSquare__]:=Board[BoxSquare__] and (not BOX); {remove the box, if any, from the board}
+
+             // initialize 'Visited?' timestamps
+             if SquareDirectionTimestamp >= High( SquareDirectionTimestamp ) - MAX_BOARD_SIZE then begin
+                SquareDirectionTimestamp := 0;
+                FillChar( SquareDirectionTimestamps, SizeOf( SquareDirectionTimestamps ), 0 );
+                end;
+             Inc( SquareDirectionTimestamp );
+
+             // initialize pulls queue
+             LastBoxPosition:=0;
+             QueueBottom:=Addr(QueueItems[Low(QueueItems)]);
+             QueueTop:=QueueBottom;
+
+             // enqueue initial pulls away from the target square
+             for Direction := Low( Direction ) to High( Direction ) do begin
+                 NeighborSquare := BoxSquare__ + SquareOffsetForward[ Direction ];
+                 if ( Board[ NeighborSquare ] and (WALL+BOX+FLAG_ILLEGAL_BOX_SQUARE)) = 0 then begin
+                    Inc(QueueTop);
+                    QueueTop^.BoxPos   :=BoxSquare__;
+                    QueueTop^.PlayerPos:=NeighborSquare;
+                    QueueTop^.Parent   :=nil;
+                    SquareDirectionTimestamps[BoxSquare__,Direction]:=SquareDirectionTimestamp;
+                    end;
+                 end;
+
+             // pull the imaginary box around, trying to find paths to real boxes
+             // on the board
+             while QueueBottom<>QueueTop do begin {breadth-first search}
+               Inc(QueueBottom);
+               BoxPosition   :=QueueBottom^.BoxPos;
+               Game.PlayerPos:=QueueBottom^.PlayerPos;
+
+               Inc(Game.Board[BoxPosition],BOX); {put the box on the board}
+
+               if  (BoxPosition<>LastBoxPosition) or
+                   (PlayersReachableSquares.Squares[Game.PlayerPos]<>PlayersReachableSquares.TimeStamp) then begin
+                   {the current set of player's reachable squares isn't valid anymore; recalculate the set}
+                   LastBoxPosition:=BoxPosition;
+                   CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_SCRATCHPAD_1); {calculate player's reachable squares to see which sides of the box the player can reach}
+                   end;
+
+               for Direction:=Low(Direction) to High(Direction) do begin
+                   BoxToSquare   :=BoxPosition+Game.SquareOffsetForward[Direction];
+                   PlayerToSquare:=BoxToSquare+Game.SquareOffsetForward[Direction];
+
+                   if  (PlayersReachableSquares.Squares[BoxToSquare]=PlayersReachableSquares.TimeStamp) and
+                       (SquareDirectionTimestamps[BoxToSquare,Direction]<SquareDirectionTimestamp) and
+                       ((Game.Board[PlayerToSquare] and (WALL+BOX))=0) and
+                       ((Game.Board[BoxToSquare   ] and (WALL+BOX+FLAG_ILLEGAL_BOX_SQUARE))=0)
+                       then begin
+                       SquareDirectionTimestamps[BoxToSquare,Direction]:=SquareDirectionTimestamp;
+                       Inc(QueueTop);
+                       QueueTop^.BoxPos   :=BoxToSquare;
+                       QueueTop^.PlayerPos:=PlayerToSquare;
+                       QueueTop^.Parent   :=QueueBottom;
+                       end
+                   else if ((Game.Board[PlayerToSquare] and BOX )=BOX) and  {'True': the pull makes the player hit a box on then board}
+                           ((Game.Board[BoxToSquare   ] and (WALL+BOX+FLAG_ILLEGAL_BOX_SQUARE))=0) and {'True': there is no box or wall at the box neighbor square in this direction}
+                           (Solver.SearchLimits.DepthLimit>=0) then {'True': the search hasn't been terminated}
+                           with Solver.SearchStates[Position__^.PushCount] do begin
+                             if PlayersReachableSquares.Squares[PlayerToSquare+Game.SquareOffsetForward[Direction]]=PlayersReachableSquares.TimeStamp then begin {'True': in the position 'Position__', the player can reach this pull-to-square}
+                                {in the position 'Position__', the box preventing the player from making the pull in this direction can be pushed all the way to the targeted goal or parking square}
+                                Dec(Game.Board[BoxPosition],BOX); {remove the box on the board}
+                                Game.PlayerPos     := OldPlayerPosition; {restore player position for the original position}
+                                Inc(QueueTop);
+                                QueueTop^.BoxPos   :=BoxToSquare;
+                                QueueTop^.PlayerPos:=PlayerToSquare;
+                                QueueTop^.Parent   :=QueueBottom;
+                                {pull the imaginary box all the way to the current position of the box}
+                                QueueItem          := QueueTop;
+                                Inc(QueueTop);
+                                QueueTop^.BoxPos   :=PlayerToSquare;
+                                QueueTop^.PlayerPos:=PlayerToSquare+Game.SquareOffsetForward[Direction];
+                                QueueTop^.Parent   :=QueueItem;
+                                //if Solver.PushCount >= 1935634 then begin
+                                //   ShowBoard;
+                                //   ShowPath( QueueTop );
+                                //   Writeln;
+                                //   //Readln;
+                                //   end;
+                                BoxNo := 0; {find the number of the box which can be pushed to the target square}
+                                repeat Inc( BoxNo );
+                                until ( BoxNo > Game.BoxCount ) or ( Game.BoxPos[ BoxNo ] = PlayerToSquare );
+                                if BoxNo <= Game.BoxCount then {always 'True'}
+                                   if AddPath( Position__, BoxNo, QueueTop ) then {add the positions on the path to the transposition table and open list}
+                                      Inc( Result ); {statistics: count added paths}
+                                MovePlayer( OldPlayerPosition ); {update the board with the original player position}
+                                Game.PlayerPos     :=QueueBottom^.PlayerPos; {restore player position for the search}
+                                Inc(Game.Board[BoxPosition],BOX); {put the box on the board}
+                                Dec( QueueTop, 2 ); {return to breadth-first search by dropping the two pulls added for completing the path back to the original position}
+                                TimeCheck; {ensure that the time check is performed regularly, also if the solver spends a lot a time inside this loop}
+                                end;
+                             end;
+                   end;
+
+               Dec(Game.Board[BoxPosition],BOX); {remove the box from the board again}
+               end;
+
+             // restore game state information
+             Board[BoxSquare__]:=OldBoxSquareValue; {restore box square value}
+             PlayerPos:=OldPlayerPosition; {restore player position}
+             end;
+      end; {PushBoxToSquare}
+
+    begin {Search.ForwardSearch.TryToFillGoalsAndParkingspaces}
+      {precondition: the board game state matches the position 'Position__'}
+      Result := False;
+      GamePhase := Position__^.PackingOrder.SetNo;                              {game phase after the push}
+      if GamePhase > 0 then with Game do with Solver.PackingOrder do begin
+         CalculatePlayersReachableSquares( Position__^.PushCount );             {ensure that the player's reachable squares for the current position have been calculated}
+         for Index := FirstSetMemberIndex[ GamePhase ] to
+                      Pred( FirstSetMemberIndex[ Succ( GamePhase ) ] )          {for each target square for the current phase}
+             do begin
+             GoalNo := SetMembers[ Index ];                                     {get a target (goal or parking square) belonging to this phase}
+             SetMemberSquare := GoalPos[ GoalNo ];                              {get the square number for the target}
+             if ( Board[ SetMemberSquare ] and BOX ) = 0 then begin             {'True': no box at this square: try to push a box to this square}
+                PushBoxToSquare( Position__, SetMemberSquare );
+                end;
+             end;
+         end;
+    end; {Search.ForwardSearch.TryToFillGoalsAndParkingspaces}
+*)
+    begin {Search.ForwardSearch.Search}
+      {$IFDEF CONSOLE_APPLICATION} //......
+//      if (Positions.Count>8*ONE_MILLION) and ((Positions.Count mod 100000)=0) then WritelnToLogFile(IntTostr(Positions.Count));
+//      if Position__=Positions.DebugPosition then Solver.DisplayPushCountdown:=-1;
+//      if Game.HashValue=4767988369080262767 then Solver.DisplayPushCountdown:=-1;
+//      if Positions.Count>=1*ONE_MILLION then begin
+//      if Positions.Count>=107440 then Solver.DisplayPushCountdown:=-1;
+//      if ( (Solver.PushCount mod (10*ONE_KIBI))=0 ) then begin
+//      if Solver.PushCount>=1 then Solver.DisplayPushCountdown:=-1;
+//         Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+//      if ((Solver.PushCount mod (1*ONE_THOUSAND))=0) or (Game.Board[MAX_BOARD_SIZE]=FLOOR) //or (Positions.Count>=8165105)
+           //or ((Position__^.PackingOrder.SetNo<=10) and (Solver.PushCount>=00000))
+//      if (Solver.PushCount mod (100*ONE_THOUSAND))=0
+//      if Solver.PushCount>=0 then Solver.DisplayPushCountdown:=-1;
+//      if Position__^.PackingOrder.SetNo<=11 then Solver.DisplayPushCountdown:=-1;
+
+        Dec(Solver.DisplayPushCountdown);
+        if (Solver.DisplayPushCountdown<=0) //or (Solver.PushCount>=4175000)
+           then begin
+           //Solver.DisplayPushCountdown:=50*ONE_THOUSAND;
+           if Solver.DisplayPushCountdown>=-1 then
+              Solver.DisplayPushCountdown:=25*ONE_THOUSAND;
+
+           //Solver.DisplayPushCountdown:=0;
+           //if (Solver.PushCount>=2613700) then
+           //   Solver.DisplayPushCountdown:=0;
+           //Game.ShowDeadlockSetsEnabled:=True;
+           //with Game.DeadlockSets do ShowDeadlockSet(5,CenterSquare[5]);
+           //Game.ShowDeadlockSetsEnabled:=False;
+           if (Game.DeadlockSets.AdjacentOpenSquaresLimit>1) and
+              (not Game.ShowDeadlockSetsEnabled) then // 'True': force new line
+              Writeln;
+           ShowBoard;
+           Write(Reader.LevelCount,': Forward  ','Depth: ',Position__^.PushCount,SPACE,Position__^.PushCount-Positions.CurrentPosition^.PushCount,
+                   ' Score: ',Position__^.Score,
+                   ' Positions: ',Positions.Count,
+                   ' Pushes: ',Solver.PushCount,
+                   ' Open: ',Positions.OpenPositions.Count,
+                   ' Min: ',Positions.OpenPositions.MinValue
+//                 ' Reused: ',Positions.SearchStatistics.ReuseCount
+                 );
+           Write(SPACE,SPACE,Cardinal(Position__),SPACE,Game.HashValue,
+//               SPACE,Positions.SearchStatistics.CalculateCorralDeadlockStatusCount,
+                 SPACE,Game.DeadlockSets.Count,
+                 ' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS, GetTimeMS)+500) div ONE_THOUSAND
+//               SPACE,MinimumDistanceToGamePhaseTargetSquares( Position__ )
+                );
+           if Solver.PackingOrder.SetCount>0 then
+              Write(' Phase: ',Position__^.PackingOrder.SetNo);
+           Writeln;
+//         if (Positions.Count>=771) then begin
+//         if (Solver.PushCount>=133395) then begin
+           if Solver.DisplayPushCountdown<=0 then begin
+//           if (Position__^.PackingOrder.SetNo<=7) and (Solver.PushCount>=0) then begin
+//            Writeln;
+              Readln(s);
+//            if s='?' then
+//               if   Game.Board[MAX_BOARD_SIZE]<>FLOOR then
+//                    Game.Board[MAX_BOARD_SIZE]:=FLOOR
+//               else Game.Board[MAX_BOARD_SIZE]:=WALL;
+              //Solver.DisplayPushCountdown:=-1;
+              end;
+           end;
+      {$ENDIF}
+{
+      if Reader.LevelCount=20 then begin
+         for Index:=Positions.DebugHashValueIndex to High(Game.SolutionPathHashValues) do // testing original solution...
+             if Game.HashValue=Game.SolutionPathHashValues[Index] then begin
+                ShowBoard;
+                Write('A. Solution path ',Index,SLASH,Position__^.PushCount,SPACE,Position__^.Score,SPACE,Game.HashValue,' Pushes: ',Solver.PushCount);
+                Writeln;
+                if Index>=0 then
+                   Readln;
+                Positions.DebugPosition:=Position__;
+                Positions.DebugHashValueIndex:=Index;
+                break;
+                end;
+         end;
 }
 {
       // test that recursion doesn't overflow the stack;
@@ -15929,7 +17655,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          Readln;
          Halt;
          end;
-}
+//}
       if Position__^.PushCount>Solver.HighestSearchDepth then
          Solver.HighestSearchDepth:=Position__^.PushCount;
 
@@ -15944,6 +17670,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          PositionScore:=Position__^.Score;
 
          LastPushedBoxNo:=Position__^.Move.BoxNo;
+
+         SuccessorPushCount:=Succ(Position__^.PushCount);
 
          {set packing order, if any}
          with Position__^.PackingOrder do begin
@@ -15963,50 +17691,42 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         with Game do begin
            Square := BoxPos[LastPushedBoxNo];
            Direction := TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK);
-           {having 'SuccessorPushCount:=...' in both forks of the following}
-           {'if'-statement may look strange but the rationale is that since an}
-           {'if' cannot be avoided here, the normal case should at least "fall}
-           {through" in order to avoid cpu stalling; therefore, the assignment}
-           {has been put into the 'if' so there is something to do in both of}
-           {the branches}
-           if (Board[Square] and DIRECTION_TO_TUNNEL_FLAG[Direction])=0 then
-              SuccessorPushCount:=Succ(Position__^.PushCount)
-           else with Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares do begin
-              SuccessorPushCount:=Succ(Position__^.PushCount);
-
-              if ( ( Board[ Square ] shr GOAL_BIT_SHIFT_COUNT ) = 0 )
-                 or
-                 {for goal tunnel squares, pruning all other box pushes should
-                  only take place if the box physically can be pushed to the
-                  next square in the tunnel
-                 }
-                 ( ( ( Board[ Square + SquareOffsetForward[ Direction ] ] and ( BOX + WALL + FLAG_ILLEGAL_BOX_SQUARE ) ) = 0 )
-                   //and
-                   //IsALegalPush( LastPushedBoxNo, Direction, SEARCH_STATE_INDEX_CORRAL_PRUNING ) {this "IsALegalPush" test must *not* be applied; if the move is illegal, then it must be made anyway, so the search detects that it's on a deadlocked path}
-                 ) then begin;
-                 {the box left a tunnel square, and therefore it's unnecessary}
-                 {to generate moves for the other boxes; see 'CalculateTunnelSquares'}
-                 {for figures depicting the situation}
-                 for BoxNo:=1 to BoxCount do Squares[BoxPos[BoxNo]]:=0;         {mark all boxes as not being candidates for expansion in the current position}
-                 Squares[Square]:=Succ(TimeStamp);                              {mark the last pushed box as the only candidate for expansion in the current position}
-                 UInt8(Position__^.Move.Direction):=UInt8(Position__^.Move.Direction) or POSITION_REVISIT_TAG; {nodes marked for revisiting are not subject to box pruning, hence, setting the flag is one way to bypass the corral pruning below}
-                 //ShowBoard;
-                 //Write(DIRECTION_TO_TEXT[TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)]);
-                 //Readln;
-                 end;
-              end;
+           if ((Board[Square] and DIRECTION_TO_TUNNEL_FLAG[Direction])<>0) and
+              ((Ord(Position__^.Move.Direction) and POSITION_REVISIT_TAG)=0) then
+              with Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares do
+                if ( ( Board[ Square ] shr GOAL_BIT_SHIFT_COUNT ) = 0 )
+                   or
+                   {for goal tunnel squares, pruning all other box pushes should
+                    only take place if the box physically can be pushed to the
+                    next square in the tunnel
+                   }
+                   ( ( ( Board[ Square + SquareOffsetForward[ Direction ] ] and ( BOX + WALL + FLAG_ILLEGAL_BOX_SQUARE ) ) = 0 )
+                     //and
+                     //IsALegalPush( LastPushedBoxNo, Direction, SEARCH_STATE_INDEX_CORRAL_PRUNING ) {this "IsALegalPush" test must *not* be applied; if the move is illegal, then it must be made anyway, so the search detects that it's on a deadlock path}
+                   ) then begin;
+                   {the box left a tunnel square, and therefore it's unnecessary}
+                   {to generate moves for the other boxes; see 'CalculateTunnelSquares'}
+                   {for figures depicting the situation}
+                   for BoxNo:=1 to BoxCount do Squares[BoxPos[BoxNo]]:=0;         {mark all boxes as not being candidates for expansion of the current position}
+                   Squares[Square]:=Succ(TimeStamp);                              {mark the last pushed box as the only candidate for expansion of the current position}
+                   UInt8(Position__^.Move.Direction):=UInt8(Position__^.Move.Direction) or POSITION_REVISIT_TAG; {nodes marked for revisiting are not subject to box pruning, hence, setting the flag is one way to bypass the corral pruning below}
+                   RoomNo:=High(RoomNo);                                          {don't use corral pruning or room pruning for the expansion of the current position, and don't revisit the position is there are no legal successor pushes}
+                   //ShowBoard;
+                   //Write(DIRECTION_TO_TEXT[TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)]);
+                   //Readln;
+                   end;
            end;
 
-         {try corral pruning:}
+         {try corral pruning}
          {if there is a fenced-in area (a 'corral') on the board,}
-         {   and all the boxes in the fence only can be pushed inside the corral,}
+         {   and all the boxes in the fence can only be pushed inside the corral,}
          {   and all these pushes are possible in the current position}
-         {   (meaning the player's access to the boxes isn't blocked by other boxes),
-         {   and the corral boxes aren't all located at goal squares,}
+         {   (meaning the player's access to the corral boxes isn't blocked by}
+         {   other boxes) and the corral boxes aren't all located at goal squares,}
          {   then it suffices to generate these pushes because the corral boxes}
          {   must be pushed sooner or later anyway, and they don't influence the}
          {   program's ability to push the other boxes later}
-//(*
+
          //CorralBoxCount:=0;
          if (Ord(Position__^.Move.Direction) and POSITION_REVISIT_TAG)=0 then begin
             BoxNo:=0;
@@ -16031,13 +17751,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                           and
                           (Squares[NeighborSquare]<>TimeStamp)                  // 'True': the floor isn't in the player's current access area
                           and
-                          (OldTimeStamp>=Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.Squares[NeighborSquare]) // 'True': the floor isn't in a corral that already has been investigated
+                          (OldTimeStamp>=Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares.Squares[NeighborSquare]) // 'True': the floor isn't inside an already investigated corral
                           then begin
-                          // there is a 'corral' on the board, i.e., the boxes separate the empty floors on the board into different 'pockets'
+                          // there is a 'corral' on the board, i.e., the boxes separate the empty floors on the board into different "rooms"
                           with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do // 'CORRAL...STATE_INDEX': the 'CorralPruning' function uses this search-state array index to mark floors and boxes belonging to the corral
                             LowWaterBoxTimeStamp:=Succ(TimeStamp);              // 'Succ': the box timestamp, not the empty floor timestamp
                           //Writeln('Try direction ',DIRECTION_TO_CHAR[Direction]);
-                          if CorralPruning(Position__,Position__^.PushCount,NeighborSquare,0,LowWaterBoxTimeStamp,nil,HasAllBoxesOnGoals,IsACombinedCorral,CorralMinPlayerPos,LowWaterBoxTimeStamp) then begin
+                          if CorralPruning(Position__,Position__^.PushCount,NeighborSquare,0,LowWaterBoxTimeStamp,nil,HasAllBoxesOnGoals,IsAMultiRoomCorral,CorralMinPlayerPos,LowWaterBoxTimeStamp) then begin
                              // only generate pushes for boxes belonging to the corral
 
                              // note that 'LowWaterBoxTimeStamp' now has changed "<=" and ">=" logic;
@@ -16085,7 +17805,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                   begin //Writeln('Corral pruning:');
                                         //if Solver.PushCount>=1082153 then
                                         //   ShowCorral(SEARCH_STATE_INDEX_CORRAL_PRUNING,LowWaterBoxTimeStamp);
-                                        if CorralBoxCount=0 then RoomNo:=-1; {'True': the corral pruning found a deadlocked corral; don't try room-pruning}
+                                        if CorralBoxCount=0 then RoomNo:=-1; {'True': the corral pruning found a deadlocked corral; don't try room pruning}
                                         Inc(Solver.ExposedInwardsCorralCount1);
                                   end
                              else begin Inc(Solver.ExposedInwardsCorralCount2);
@@ -16121,7 +17841,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                              break;                                             {terminate the 'for'  direction loop}
                              end
                           else begin {corral pruning failed for this box}
-                             with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do // 'High': the 'CorralPruning' function uses this search-state to mark floors and boxes belonging to the corral
+                             with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do // the 'CorralPruning' function uses this search-state to mark floors and boxes belonging to the corral
                                if TimeStamp<OldTimeStamp then begin             {timestamp wrap around: cancel corral pruning for this position}
                                   BoxNo:=MAX_BOX_COUNT+1;                       {terminate the 'while' box loop}
                                   break;                                        {terminate the 'for'   direction loop}
@@ -16131,12 +17851,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                        end;
                 end;
 
-            {if corral pruning failed then try room pruning;}
+            {if corral pruning and tunnel pruning failed then try room pruning;}
             {room pruning makes the search incomplete, i.e., some legal pushes}
             {may not be explored}
-            if (CorralBoxCount=0) and                                           {'True': corral pruning failed, i.e., all pushes for all reachable boxes need to be generated}
-               (Position__^.PackingOrder.SetNo<>0) and                          {'True': packing order is enabled, it sacrifices solution push-optimality just like room pruning does; room pruning also sacrifices completeness}
-               (RoomNo=0) and                                                   {'True': corral pruning didn't find a deadlocked corral}
+            if //False and
+               (CorralBoxCount=0) and                                           {'True': tunnel pruning succeeded, or corral pruning found a deadlock or failed, in which case all pushes for all reachable boxes need to be generated}
+               (Position__^.PackingOrder.SetNo<>0) and                          {'True': packing order is enabled; it sacrifices solution push-optimality just like room pruning does; room pruning also sacrifices completeness}
+               (RoomNo=0) and                                                   {'True': tunnel pruning failed, and corral pruning didn't find a deadlock}
                (Game.Rooms.Count>0) then begin                                  {'True': room pruning is enabled}
                Direction     :=TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK); {get the direction of the push leading to the current position}
                Square        :=Game.BoxPos[LastPushedBoxNo];                    {get the box square for the push leading to the current position}
@@ -16180,7 +17901,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                   for BoxNo:=1 to Game.BoxCount do with Solver.SearchStates[Position__^.PushCount] do begin
                       Square:=Game.BoxPos[BoxNo];
                       if (PlayersReachableSquares.Squares[Square]>PlayersReachableSquares.TimeStamp) and {'True': the box is player-reachable}
-                         (Game.Rooms.Squares[Square].RoomNo<>RoomNo) then begin {'True': the box is outside the current room}
+                         (Game.Rooms.Squares[Square].RoomNo<>RoomNo) and        {'True': the box is outside the current room}
+                         (Solver.ProgressCheckPoint.BoxPushBonuses[BoxNo]=0)    {'True': the box isn't an infrequently pushed box which currently gets a bonus for being pushed at all}
+                         then begin
                          PlayersReachableSquares.Squares[Square]:=0;
                          Inc(RoomPruningBoxCount);
                          end;
@@ -16199,7 +17922,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                   end;
                end;
             end;
-//*)
+
          {decide which box to try first}
          if        LastPushedBoxNo<>0 then
                    BoxNo:=LastPushedBoxNo {starting with the last pushed box helps a little to make solutions look more natural}
@@ -16237,10 +17960,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                        {extended checks for legal moves}
                        IsALegalPush(BoxNo,Direction,SuccessorPushCount) then begin
 
-                       Solver.ProgressCheckPoint.PushedBoxes[BoxNo]:=True;
+                       //if solver.pushcount>=1999 then
+                       //   writeln(solver.pushcount);
+
+                       Inc(Solver.ProgressCheckPoint.BoxPushCounts[BoxNo]);
 
                        if Solver.PushCount<Solver.SearchLimits.PushCountLimit then begin {limit not exceeded}
-
 {
 //                        if (Solver.PushCount>=0) then begin
                           if Game.HashValue=3914083414399637035 then begin
@@ -16252,6 +17977,11 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 }
                           //Game.History.Moves[SuccessorPushCount].Direction:=Direction; {update game history}
                           DoPush(BoxNo,Direction,SuccessorPushCount);           {do the move, i.e., update the board}
+
+                          //if assigned(positions.debugposition) and (positions.debugposition.score<>positions.debugpositionscore) then begin
+                          //   writeln( positions.debugposition.score, space, positions.debugpositionscore);
+                          //   readln;
+                          //   end;
 
                           if   Position__^.PackingOrder.SetNo>0 then
                                SuccessorScore:=SuccessorPushCount+Game.SimpleLowerBound  {normal heuristic score: number of pushes + simple lower bound}
@@ -16267,9 +17997,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                              Inc(Solver.PushCount);                             {update statistics}
                              end;
 {
-                          if (Game.HashValue=1430312999849821417) or //then begin
-                             (Position__^.HashValue=1430312999849821417) then begin
-                          //if (Solver.PushCount>=4000000) then begin
+                          if (Game.HashValue=3642798413834538445) then begin
+//                        if Game.HashValue=Game.SolutionPathHashValues[18] then begin
+                          //   (Position__^.HashValue=1430312999849821417) then begin
+                          //if (Positions.Capacity-Cardinal(Succ(Positions.UninitializedItemCount))>=1494196) then begin
                              ShowBoard;
                              Write('Do push: ');
                              Write('Depth: ',Succ(Position__^.PushCount),SPACE,Succ(Position__^.PushCount-Positions.CurrentPosition^.PushCount),
@@ -16281,6 +18012,19 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                   );
                              Writeln;
                              Readln;
+
+                             Solver.DisplayPushCountdown:=-1;
+                             UndoPush(BoxNo,Direction);
+                             //ShowBoard;
+                             //Write('>');
+                             //Readln;
+                             while Assigned(Position__) and (Position__^.PushCount>0) do with Position__^ do begin
+                               ShowBoard;
+                               Write('Depth: ',Succ(Position__^.PushCount),SPACE, Position__^.HashValue);
+                               Readln;
+                               UndoPush(Move.BoxNo,Move.Direction);
+                               Position__:=Parent;
+                               end;
                              end;
 }
 
@@ -16345,40 +18089,54 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 //                              WritelnToLogFile('New '+IntToStr(Positions.Count));
 
 
-                                SuccessorScore:=SuccessorPosition^.Score;       {'Score' is 0 for perimeter-nodes from a search in the opposite direction, hence, retrieve the actually saved score for the position}
+                                SuccessorScore:=SuccessorPosition^.Score;       {'Score' is 0 for perimeter-nodes (leaf-nodes) from a search in the opposite direction, hence, retrieve the actually saved score for the position}
 
                                 if (Game.SimpleLowerBound<>0) and (SuccessorScore<>0) then begin {'True': not a solution}
 
-                                   FreezePenalty:=0;
                                    if    ((Game.Board[NeighborSquare] and GOAL)<>0) and     {'True': the box is pushed to a goal square}
                                          IsAFreezingMove(0,NeighborSquare,True) then begin  {'True': the box freezes at the goal square}
-                                         i:=Solver.PackingOrder.GoalSetNo[Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT]; {get packing order phase for the destination square}
+                                         i:=Solver.PackingOrder.GoalSetNo[Cardinal(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]; {get packing order phase for the destination square}
                                          if i<Position__^.PackingOrder.SetNo then with Solver.PackingOrder do begin
                                             {the box freezes at a goal square which should
                                              not be filled in this packing order phase;
+                                             mark the position as having boxes which freeze at goal squares prematurely, according to the calculated packing order
                                             }
-                                            //FreezePenalty:=(FirstSetMemberIndex[Position__^.PackingOrder.SetNo]-FirstSetMemberIndex[i])*EMPTY_GOAL_PENALTY;
-                                            FreezePenalty:=Game.SimpleLowerBound; {choose a penalty for what may be a premature freezing push}
-                                            if SuccessorScore<DEAD_END_SCORE-FreezePenalty then {guard against overflow (it's probably impossible given the other limits; that's why the code doesn't bother to maximize 'SuccessorScore' on overflow)}
-                                               Inc(SuccessorScore,FreezePenalty);    {penalize the push}
-                                            SuccessorPosition^.Score:=SuccessorScore;
+                                            UInt8(SuccessorPosition^.Move.Direction):=UInt8(SuccessorPosition^.Move.Direction) or POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG;
+                                            ////FreezePenalty:=(FirstSetMemberIndex[Position__^.PackingOrder.SetNo]-FirstSetMemberIndex[i])*EMPTY_GOAL_PENALTY;
+                                            //FreezePenalty:=Game.SimpleLowerBound; {choose a penalty for what may be a premature freezing push}
+                                            //if SuccessorScore<DEAD_END_SCORE-FreezePenalty then {guard against overflow (it's probably impossible given the other limits; that's why the code doesn't bother to maximize 'SuccessorScore' on overflow)}
+                                            //   Inc(SuccessorScore,FreezePenalty); {penalize the push}
+                                            //SuccessorPosition^.Score:=SuccessorScore;
                                             end;
 
-                                         TTAddFrozenGoalsPattern(Position__);   {collect frozen goals patterns and check for deadlocks}
-
                                          //ShowBoard;
+                                         //Writeln('Box freezing at a goal square');
                                          //Writeln(Solver.PushCount,SPACE,Positions.Count);
-                                         //Write('Premature frozen box?');
                                          //Readln;
+
+                                         TTAddFrozenGoalsPattern(Position__);   {collect frozen goals patterns and check for deadlocks}
                                          end;
 
                                    if    Position__^.PackingOrder.SetNo>0 then begin
-                                         SuccessorPosition^.PackingOrder.SetNo:=Position__^.PackingOrder.SetNo;
-                                         CalculatePackingOrderPhaseAndScore(SuccessorPosition,Square,NeighborSquare); {calculate the packing order phase after the push; also calculate a new score for 'SuccessorPosition' taking the phase into account}
+                                         SuccessorPosition^.PackingOrder.SetNo:=Position__^.PackingOrder.SetNo; {initially, inherit the packing order phase from the parent position}
+                                         UInt8(SuccessorPosition^.Move.Direction):=UInt8(SuccessorPosition^.Move.Direction) or {initially, inherit the flag for prematurely frozen boxes from the parent position}
+                                                                                   (Uint8(Position__^.Move.Direction) and POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG);
+                                         {calculate the packing order phase after the push, and calculate the score taking the phase into account}
+                                         if CalculatePackingOrderPhaseAndScore(SuccessorPosition,Square,NeighborSquare,BoxNo) then begin {'True': the box reached a target square for the current game phase}
+                                            //ShowBoard;
+                                            //Writeln( Solver.PushCount, SPACE, Positions.Count );
+                                            //Readln;
+                                            //if False then
+                                            //   TryToFillGoalsAndParkingspaces(SuccessorPosition);
+                                            end;
                                          if (CorralBoxCount=0) or
                                             (SuccessorPosition^.Score<=PositionScore) or
                                             (CorralBoxCount=Game.BoxCount) or
-                                            (FreezePenalty<>0) then begin
+                                            {a position on the open-queue cannot change score without first removing the position from the queue;
+                                             a position with boxes freezing prematurely at goal squares should keep their calculated penalty;
+                                            }
+                                            ((Ord(SuccessorPosition^.Move.Direction) and (POSITION_OPEN_TAG+POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG))<>0)
+                                            then begin
                                             SuccessorScore:=SuccessorPosition^.Score;
                                             if Cardinal(SuccessorScore)<Positions.BestScore then begin
                                                Positions.BestScore:=SuccessorScore;
@@ -16398,13 +18156,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                             end;
                                          end;
 
-                                   if    False and {'False': expanding corral box pushes recursively isn't helping; the search generates more positions and gets slower}
+                                   if    False and {'False': expanding corral box pushes recursively doesn't help; it makes the search generate more positions and it makes the search slower}
                                          (CorralBoxCount<>0) then with SuccessorPosition^ do begin
                                          {expand corral box pushes recursively}
                                          Inc(Uint8(Move.Direction),POSITION_PATH_TAG); {mark the successor position as a member of the currently investigated path}
                                          Inc(Positions.SearchStatistics.Enqueue2Count);
                                          SuccessorPosition^.PackingOrder.SetNo:=Position__^.PackingOrder.SetNo;
-
                                          if not Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated then {'True': 'TTAdd' didn't trigger the calculation; do it now}
                                             CalculatePlayersReachableSquares(SuccessorPushCount); {find the player's reachable squares}
 
@@ -16423,9 +18180,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                             or
                                             (SuccessorScore>Positions.OpenPositions.MinValue) {'True': the packing-order search has put at least one new position on the open-queue which is more promising than the current position}
                                             or
-                                            Game.DeadlockSets.NewDynamicDeadlockSets {'True':  new deadlock sets have been created after the main search loop retracted a node from the open-list}
+                                            Game.DeadlockSets.NewDynamicDeadlockSets {'True':  new deadlock-sets have been created after the main search loop retracted a node from the open-queue}
                                             then begin {put the successor position on the open-queue}
-                                            if SuccessorPosition^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit then begin
+                                            if (SuccessorPosition^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
+                                               ((Ord(SuccessorPosition^.Move.Direction) and POSITION_OPEN_TAG)=0) then begin {'0': the packing order search hasn't put the position on the open-queue}
                                                Inc(Positions.SearchStatistics.Enqueue1Count);
                                                OPENAdd(SuccessorPosition);      {put the position on the open-queue}
                                                end;
@@ -16454,11 +18212,14 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
                                             if (Ord(Move.Direction) and POSITION_PACKING_ORDER_TAG)<>0 then {'True': it's a packing order push; update the packing order push count accordingly before the recursion}
                                                Inc(Game.PackingOrderPushCount);
-                                            Score:=Search(SuccessorPosition);
+
+                                            SuccessorScore:=Search(SuccessorPosition); {explore the game state after the push}
+
+                                            if (Ord(Move.Direction) and POSITION_OPEN_TAG)=0 then {'True': the successor position isn't on the open-queue; if it is on the queue, then don't change its score}
+                                               Score:=SuccessorScore;
                                             if (Ord(Move.Direction) and POSITION_PACKING_ORDER_TAG)<>0 then {'True': it's a packing order push; update the packing order push count accordingly after  the recursion}
                                                Dec(Game.PackingOrderPushCount);
 
-                                            SuccessorScore:=Score;
                                             Dec(UInt8(Move.Direction),POSITION_PATH_TAG); {remove the 'current path' tag}
 
                                             //if (Positions.CurrentPosition<>nil) and
@@ -16467,7 +18228,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                                 which is more promising than position at the bottom of the recursion;
                                                 unwind the recursion to the top level so the best node can be expanded
                                                 as quickly as possible; one way to unwind the recursion is faking that
-                                                new deadlock sets have been made;
+                                                new deadlock-sets have been made;
                                                }
                                             //   Game.DeadlockSets.NewDynamicDeadlockSets:=True;
                                             {
@@ -16533,7 +18294,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 *)
                                                 SuccessorScore:=SuccessorPosition^.Score;
                                                 if SuccessorScore<>DEADLOCK_SCORE then
-                                                   CorralBoxCount:=-Abs(CorralBoxCount); {a negative corral count means that there were legal successor moves, i.e., the position isn't a candidate for a new dynamically calculated deadlock set}
+                                                   CorralBoxCount:=-Abs(CorralBoxCount); {a negative corral count means that there were legal successor moves, i.e., the position isn't a candidate for a new dynamically calculated deadlock-set}
                                                 end
                                            else begin                           {current path to 'SuccessorPosition' has the same score or a smaller score than the old path}
                                                 end;
@@ -16599,7 +18360,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                 else BoxNo:=Game.BoxCount;                                      {first time through the loop}
                 if   BoxNo= LastPushedBoxNo then Dec(BoxNo);                    {skip last pushed box when seeing it for the second time}
                 if BoxNo<=0 then
-                   BoxNo:=High(BoxNo);                             {'0': all boxes have been visited}
+                   BoxNo:=High(BoxNo);                                          {'0': all boxes have been visited}
                 end;
 
              //if   BoxNo<>LastPushedBoxNo then Inc(BoxNo)
@@ -16608,14 +18369,14 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              end;
 
          with Position__^ do
-           if RoomNo<=0 then begin                                              {'True': no room pruning took place; all boxes have been candidates for node expansion, or only corral pruning and tunnel pruning have limited the box candidates}
+           if RoomNo<=0 then begin                                              {'True': no room pruning and no tunnel pruning; all boxes have been candidates for node expansion, or only corral pruning has pruned the box candidates}
               if (BestForgottenScore<DEAD_END_SCORE) and                        {'True': the position is not a dead-end, and one or more successors have been deleted from the tranposition table}
                  (SuccessorCount=0) and                                         {'True': the position has no successors stored in the transposition table}
                  (Score<>0) and                                                 {'True': the position is not a perimeter node from a search in the opposite direction}
                  ((Ord(Move.Direction) and POSITION_OPEN_TAG)=0) then begin     {'True': the position is not on the open-queue}
-
-                 {'Position__' had successors but none of them were saved,}
-                 {hence, put 'Position__' back on the open-queue}
+                 {'Position__' had successors but none of them were saved in}
+                 {the transposition table;}
+                 {put 'Position__' back on the open-queue}
                  if Position__=Positions.CurrentPosition then
                     if   Parent<>nil then SetPosition(Parent)
                     else Positions.CurrentPosition:=nil;
@@ -16625,14 +18386,14 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                  if Parent<>nil then Position__^.PackingOrder.SetNo:=Parent^.PackingOrder.SetNo;
                  Result:=Score;
                  end;
-              end
-           else {only pushes for the boxes in the current room have been expanded}
+              end 
+           else {only pushes for the boxes in the current room or tunnel have been generated}
               if (Ord(Move.Direction) and POSITION_OPEN_TAG)=0 then begin       {'True': the position isn't on the open-queue; put it on the list for further expansion later in case no solution is found in the room-pruned part of the game graph}
-                 Result:=PositionScore; {ensure that the position keeps its original score; otherwise optimality cannot be guaranteed}
+                 Result:=PositionScore;                                         {ensure that the position keeps its original score; otherwise optimality cannot be guaranteed}
                  UInt8(Move.Direction):=UInt8(Move.Direction) or POSITION_REVISIT_TAG; {generate all legal pushes the next time this position is expanded}
                  if   (OldPositionCount<>Positions.Count)                       {'True': new successor positions have been generated}
                       and
-                      (PackingOrder.SetNo>0) {'True': packing order search is enabled for this position; only then can 'TTAdd()' guarantee that an attempt to add an identical position doesn't result in an update of the existing one}
+                      (PackingOrder.SetNo>0) {'True': packing order search is enabled for this position; only then can 'TTAdd()' guarantee that an attempt to add an identical position doesn't update the existing position instead}
                       then begin                                                {put the position on the list of partially expanded positions}
                       NextPartiallyExpandedPosition:=Positions.PartiallyExpandedPositionsList;
                       Positions.PartiallyExpandedPositionsList:=Position__;
@@ -16652,25 +18413,32 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                       Inc(Position__^.SuccessorCount);
                       end
                  else {no successor positions have been generated, or the search
-                       doesn't support a list of partially expanded positions;
-                       process the position again, this time expanding pushes
-                       for all boxes on the board;
-                      }
-                      OPENAdd(Position__);
+                       doesn't support a list of partially expanded positions}
+                      if RoomNo<>High(RoomNo) then begin
+                         {process the position again, this time expanding pushes
+                          for all boxes on the board}
+                         OPENAdd(Position__);
+                         end
+                      else begin
+                         {no successor positions have been generated; the last
+                          pushed box was at a tunnel square, and it could not be
+                          pushed further ahead in its current direction}
+                         end;
                  end;
          end
       else begin                                                                {depth limit exceeded}
          Result:=DEAD_END_SCORE;
          end;
 
-      Position__^.Score:=Result;
+      if   (Ord(Position__.Move.Direction) and POSITION_OPEN_TAG)=0 then        {'True': the expanded position isn't on the open-queue; if it is on the queue, then don't change its score}
+           Position__^.Score:=Result;
 
       if   Position__^.Score>=Solver.ProgressCheckPoint.Score then begin
            Dec(Solver.ProgressCheckPoint.PushCountDown);
            if Solver.ProgressCheckPoint.PushCountDown<=0 then
               TTAddNoProgressPattern(Position__);
            end
-      else InitializeProgressCheckPoint(Position__.Score,False);                {new best score; create a new progress check point}
+      else MakeProgressCheckPoint(Position__^.Score,Position__^.PackingOrder.SetNo); {new best score; create a new progress checkpoint}
 
       if (Result>=DEAD_END_SCORE) and
          (Solver.SearchLimits.DepthLimit>=0) then begin                         {'Solver.SearchLimits.DepthLimit>0': the solver hasn't been terminated}
@@ -16686,10 +18454,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 }
          if Result=DEADLOCK_SCORE then begin                                    {'True': the game position is a deadlock; note that a dead-end is not the same as a deadlock; a dead-end position has no successor positions in the transposition table}
             if (OldPushCount=Solver.PushCount) and                              {'True': there were no legal pushes in the current position}
-               (Game.DeadlockSets.Count<MAX_DEADLOCK_SETS) then begin           {'True': new deadlock sets may still be created}
+               (Game.DeadlockSets.Count<MAX_DEADLOCK_SETS) then begin           {'True': new deadlock-sets may still be created}
                if (CorralBoxCount=0) and
                   ((Game.Board[Game.BoxPos[Position__^.Move.BoxNo]] and DIRECTION_TO_TUNNEL_FLAG[TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK)])<>0) and
-                  {the box left a tunnel square and bypassed corral pruning; call it now so it can be checked whether the deadlock situation can produce a new deadlock set}
+                  {the box left a tunnel square and bypassed corral pruning; call it now so it can be checked whether the deadlock situation can produce a new deadlock-set}
                   (RoomNo>=0) then                                              {'True': the corral pruning didn't find a deadlocked corral}
                   with Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares do begin
                     OldPushCount:=-1; {'-1': it's undefined whether there are any legal pushes in the current position; only successors for the box at the tunnel square have been generated}
@@ -16701,10 +18469,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                     if ((Game.Board[NeighborSquare] and (BOX+WALL))=0)          {'True': and empty floor}
                        and
                        (Squares[NeighborSquare]<>TimeStamp) then                {'True': the floor isn't in the player's current access area}
-                       {there is a 'corral' on the board, i.e., the boxes separate the empty floors on the board into different 'pockets'}
+                       {there is a 'corral' on the board, i.e., the boxes separate the empty floors on the board into different "rooms"}
                        with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do begin
                          LowWaterBoxTimeStamp:=Succ(TimeStamp);                 {'Succ': the box timestamp, not the empty floor timestamp}
-                         if CorralPruning(Position__,Position__^.PushCount,NeighborSquare,0,LowWaterBoxTimeStamp,nil,HasAllBoxesOnGoals,IsACombinedCorral,CorralMinPlayerPos,LowWaterBoxTimeStamp) then begin
+                         if CorralPruning(Position__,Position__^.PushCount,NeighborSquare,0,LowWaterBoxTimeStamp,nil,HasAllBoxesOnGoals,IsAMultiRoomCorral,CorralMinPlayerPos,LowWaterBoxTimeStamp) then begin
                             for BoxNo:=1 to Game.BoxCount do {remove the '0' from the box squares in the player's reachable squares vector for the current search depth}
                                 Solver.SearchStates[Position__^.PushCount].PlayersReachableSquares.Squares[Game.BoxPos[BoxNo]]:=1;
                             CalculatePlayersReachableSquares(Position__^.PushCount); {recalculate the player's reachable squares in order to mark the reachable boxes}
@@ -16748,11 +18516,11 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                   end
                else {'True': there is a corral on the board}
                   if   CorralBoxCount<=Game.DeadlockSets.BoxLimitForDynamicSets then begin
-                       if TTAddCombinedCorral(Position__,IsACombinedCorral,OldPushCount=Solver.PushCount,LowWaterBoxTimeStamp,CorralMinPlayerPos) then
+                       if TTAddMultiRoomCorral(Position__,IsAMultiRoomCorral,OldPushCount=Solver.PushCount,LowWaterBoxTimeStamp,CorralMinPlayerPos) then
                        else begin
 {
                           ShowBoard;
-                          Write('Deadlock position ',Solver.PushCount,SPACE,Positions.Count,SPACE,SPACE,CorralBoxCount,' Combined corral: ',TEXT_NO_YES[IsACombinedCorral]);
+                          Write('Deadlock position ',Solver.PushCount,SPACE,Positions.Count,SPACE,SPACE,CorralBoxCount,' Combined corral: ',TEXT_NO_YES[IsAMultiRoomCorral]);
                           Readln;
 }
                           end;
@@ -16761,13 +18529,28 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                           TTAddNoPushesDeadlock(Position__,nil,True,Position__) then begin
 {
                           ShowBoard;
-                          Write('Deadlock position ',Solver.PushCount,SPACE,Positions.Count,SPACE,SPACE,CorralBoxCount,SPACE,TEXT_NO_YES[IsACombinedCorral],SPACE,Game.DeadlockSets.SequenceNo);
+                          Write('Deadlock position ',Solver.PushCount,SPACE,Positions.Count,SPACE,SPACE,CorralBoxCount,SPACE,TEXT_NO_YES[IsAMultiRoomCorral],SPACE,Game.DeadlockSets.SequenceNo);
                           Readln;
 }
                           end;
                end;
             end;
          end;
+{
+      if Reader.LevelCount=20 then begin
+         for Index:=Positions.DebugHashValueIndex to High(Game.SolutionPathHashValues) do // testing original solution...
+             if Game.HashValue=Game.SolutionPathHashValues[Index] then begin
+                ShowBoard;
+                Write('B. Solution path ',Index,SLASH,Position__^.PushCount,SPACE,Position__^.Score,SPACE,Game.HashValue,' Pushes: ',Solver.PushCount);
+                Writeln;
+                if Index>=17 then
+                   Readln;
+                Positions.DebugPosition:=Position__;
+                Positions.DebugHashValueIndex:=Index;
+                break;
+                end;
+         end;
+}
     end; {Search.ForwardSearch.Search}
 
   begin {Search.ForwardSearch}
@@ -16784,14 +18567,20 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     Game.DeadlockSets.PathDeadlockCount:=0;
     Game.Rooms.Count:=Abs(Game.Rooms.Count);
     Solver.HighestSearchDepth:=0; Solver.CorralSearchDepth:=0;
-    InitializeProgressCheckPoint(High(Solver.ProgressCheckPoint.Score),True);
+    Solver.DisplayPushCountdown:=0;
+    InitializeProgressCheckPoint;
 
     if (Game.Board[0] and DIRECTION_TO_TUNNEL_FLAGS)<>DIRECTION_TO_TUNNEL_FLAGS then {'True': tunnel squares haven't been calculated yet}
        CalculateTunnelSquares;
     {ShowTunnelSquares; Readln;}
 
     OPENClear; {clear open-queue}
-
+{
+    if Reader.LevelCount=85 then begin
+       TTLoad( 'zzzzzz.zzz', Positions.DebugHashValueCount, Positions.DebugHashValues );
+       Positions.DebugHashValueIndex := 0;
+       end;
+}
     {enqueue start-position}
     CalculatePlayersReachableSquares(Game.TubeFillingPushCount);                {find normalized (top-left) player-position}
     if  (Game.TubeFillingPushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
@@ -16818,11 +18607,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     {the central loop; repeatedly expand the (deepest) least-cost position on the open-queue}
     while OPENRemoveNextPositionSelectedForExpansion(Position) do begin
 //    Writeln;
-//    Writeln('Open: ',Positions.OpenPositions.Count,' New deadlock sets: ',TEXT_NO_YES[Game.DeadlockSets.NewDynamicDeadlockSets]);
+//    Writeln('Open: ',Positions.OpenPositions.Count,' New deadlock-sets: ',TEXT_NO_YES[Game.DeadlockSets.NewDynamicDeadlockSets]);
 {
-      if Position^.HashValue= ... then begin
+      if Position^.HashValue=3401894310879497402 then begin
          ShowBoard;
-         Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+         Writeln( Solver.PushCount );
+         //Game.Board[MAX_BOARD_SIZE]:=FLOOR;
          Writeln;
          end;
 }
@@ -16854,7 +18644,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          SetPosition(Position) {update the board so it matches this position}
       else begin
          Game.DeadlockSets.NewDynamicDeadlockSets:=False;
-         SetPosition(nil); {backtrack to the start position so all deadlock sets, including the new ones are considered when the board is updated to match the position}
+         SetPosition(nil); {backtrack to the start position so all deadlock-sets, including the new ones, are considered when the board is updated to match the position}
          SetPosition(Position); {update the board so it matches this position}
          end;
 {
@@ -16891,7 +18681,14 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          Readln;
          end;
 }
-
+{
+      if (Reader.LevelCount=85) then begin
+         ShowBoard;
+         Write('Try position, Depth: ',Position^.PushCount,' Score: ',Position^.Score,'    Pushes: ',Solver.PushCount,' Positions: ',Positions.Count,' Open: ',Positions.OpenPositions.Count,SPACE,Position^.HashValue);
+         Readln;
+         Writeln;
+         end;
+}
       if Game.DeadlockSets.PathDeadlockCount=0 then begin
          with Solver.SearchStates[Position^.PushCount].PlayersReachableSquares do
            UsePlayersReachableSquaresFromPredecessor:=False;
@@ -16912,9 +18709,26 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             end;
 }
          end
-      else begin
-         Game.DeadlockSets.NewDynamicDeadlockSets:=True; {ensure that all deadlock sets are taken into account when the next position is selected and put on the board}
+      else begin {the current path leads to a a deadlocked position}
+         Game.DeadlockSets.NewDynamicDeadlockSets:=True; {ensure that all deadlock-sets are taken into account when the next position is selected and put on the board}
          Inc(Positions.SearchStatistics.DeadlockedOpenPositionsCount);
+         //Solver.ProgressCheckPoint.BestGamePhase:=Solver.PackingOrder.SetCount; {the best found game phase and score may have been found by following a deadlocked path; reset them so they will be updated with values from non-deadlocked positions}
+         //Solver.ProgressCheckPoint.BestScore:=High(Solver.ProgressCheckPoint.BestScore);
+         if (Positions.SearchStatistics.DeadlockedOpenPositionsCount and ((10*ONE_KIBI)-1))=0 then begin
+            {$IFDEF CONSOLE_APPLICATION}
+              Write('Forward  ');
+              Write('Depth: ',Position^.PushCount,SPACE,Position^.PushCount-Positions.CurrentPosition^.PushCount,SPACE,Game.PackingOrderPushCount,
+                    ' Score: ',Position^.Score,
+                    ' Positions: ',Positions.Count,
+                    ' Pushes: ',Solver.PushCount,
+                    ' Open: ',Positions.OpenPositions.Count,
+                    ': ',Positions.OpenPositions.MinValue
+//                  ' Reused: ',Positions.SearchStatistics.ReuseCount
+                   );
+              Writeln;
+            {$ENDIF}
+            TimeCheck;
+            end;
          {$IFDEF CONSOLE_APPLICATION}
 {
            if Game.DeadlockSets.PathDeadlockCount<0 then begin
@@ -16940,6 +18754,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                 end;
               Position:=Position^.Parent;
        until  Position=StartPosition;
+       //if Reader.LevelCount=85 then
+       //   TTSave( 'zzzzzz.zzz' );
+       //SetPosition(nil); ShowPathForwards(SolutionPosition); SetPosition(SolutionPosition); Readln;
        end;
 
     if Positions.StartPosition<>nil then SetPosition(Positions.StartPosition);
@@ -16962,7 +18779,7 @@ begin {Search}
   OldPlayerPos:=Game.PlayerPos;
   Solver.SokobanStatusPointer^.Flags:=SOKOBAN_PLUGIN_FLAG_UNSOLVED;
   OriginalBoxLimitForDynamicSets:=Game.DeadlockSets.BoxLimitForDynamicSets;
-  Game.DeadlockSets.BoxLimitForDynamicSets:=Min(Game.DeadlockSets.BoxLimitForDynamicSets,Max(Min(MIN_BOX_LIMIT_FOR_DYNAMIC_DEADLOCK_SETS,Game.BoxCount),Game.BoxCount div 2)); {select a reasonably small box limit for dynamic deadlock sets}
+  Game.DeadlockSets.BoxLimitForDynamicSets:=Min(Game.DeadlockSets.BoxLimitForDynamicSets,Max(Min(MIN_BOX_LIMIT_FOR_DYNAMIC_DEADLOCK_SETS,Game.BoxCount),Game.BoxCount div 2)); {select a reasonably small box limit for dynamic deadlock-sets}
 
   {$IFDEF PLUGIN_MODULE}
     SetSokobanStatusText('');
@@ -17046,10 +18863,11 @@ begin {Search}
               (Positions.SolutionPosition=nil) and
               (Solver.SearchLimits.DepthLimit>0) then begin
               TTClear;
-              {resurrect the statictics for dropped positions now because it's}
+              {resurrect the statistics for dropped positions now because it's}
               {used for status reports during the search; more statistics from}
-              {the packingorder search are added to the totals after the}
-              {forward and/or backward search have completed; see further down}
+              {the packing order search are added to the totals after the}
+              {forward search and the backward search have completed; see}
+              {further down}
               Positions.SearchStatistics.DroppedCount:=PackingOrderSearchStatistics.DroppedCount;
 
               case Solver.SearchMethod of
@@ -17101,13 +18919,17 @@ begin {Search}
     end;
 
   //WritelnToLogFile('');
-  //WritelnToLogFile('*** Active deadlock sets: '+IntToStr(Game.DeadlockSets.Count));
+  //WritelnToLogFile('*** Active deadlock-sets: '+IntToStr(Game.DeadlockSets.Count));
   //WritelnToLogFile('');
 
-  if (Positions.SolutionPosition<>nil) or (Game.SimpleLowerBound=0) then begin  {a solution was found}
+  if (Positions.SolutionPosition<>nil) or (Game.SimpleLowerBound=0) then begin  {a solution has been found, or the starting position has all boxes located at goal squares}
      {Write('Positions: ',Positions.Count,' New best position count: ',Positions.SearchStatistics.NewBestPositionCount); Readln;}
      Game.IsAnOptimalSolution:=(Positions.OpenPositions.Count=0) and
-                               (Positions.PartiallyExpandedPositionsList=nil); {if some positions haven't been fully expanded (e.g., because of room pruning) then optimality and completeness cannot be guaranteed}
+                               (Positions.PartiallyExpandedPositionsList=nil) and {if some positions haven't been fully expanded (e.g., because of room pruning) then optimality and completeness cannot be guaranteed}
+                               {a packing order search isn't necessarily a complete search;
+                                for instance, some branches of the search graph may have been ignored, and
+                                positions may have been classified as deadlocks based on hash key identity only;}
+                               (Solver.PackingOrder.SetCount<=0);
 
      p:=Positions.SolutionPosition;
      while Game.IsAnOptimalSolution and
@@ -17193,7 +19015,7 @@ begin {Search}
 
   Solver.SearchLimits:=OriginalSearchLimits; {restore search limits}
   Solver.SearchMethod:=OriginalSearchMethod; {restore search method}
-  Game.DeadlockSets.BoxLimitForDynamicSets:=OriginalBoxLimitForDynamicSets; {restore dynamic deadlock sets box limit}
+  Game.DeadlockSets.BoxLimitForDynamicSets:=OriginalBoxLimitForDynamicSets; {restore dynamic deadlock-sets box limit}
   MovePlayer(OldPlayerPos); {the search destroys the original player position; repair it before exiting}
   Solver.TimeMS:=CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS);
 
@@ -17206,7 +19028,7 @@ begin {Search}
        end;
   {$ENDIF}
 
-  if Result and Optimizer.Enabled then
+  if Result and Optimizer.Enabled then 
      ReduceBoxChanges; {performing small optimizations isn't included in the search time}
 end; {Search}
 
@@ -17358,7 +19180,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   function  HasABetterMovesPushesBoxLinesScore(Position__:PPosition; MoveCount__,PushCount__,BoxLines__:Integer):Boolean;
   var CompareResult:Integer;
   begin // returns 'True' if 'Position__' has a moves/pushes score better than ['MoveCount__', 'PushCount__'];
-        // as an exception, if the optimization method is boxlines/moves or boxlines/pushes, then the number of boxlines is used as the first comparison criteria
+        // as an exception, if the optimization method is boxlines/moves or boxlines/pushes, then the number of boxlines is used as the first comparison criterion
     if        (Optimizer.Optimization=opPushesMoves) or (Optimizer.Optimization=opPushesOnly) then
               with POptimizerPosition(Position__)^ do with Position do          // optimize pushes/moves or pushes
                 if   PushCount<=PushCount__ then
@@ -17887,7 +19709,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   begin
     YASS.TTClear;
     Positions.Capacity :=
-      ( Cardinal( Positions.EndOfPositions ) - Cardinal( Positions.Positions ) ) div SizeOf( TOptimizerPosition ); {the optimizer uses an extended position data structure, hence, there is room for fewer nodes in the transposition table}
+      ( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TOptimizerPosition ); {the optimizer uses an extended position data structure, hence, there is room for fewer nodes in the transposition table}
     Positions.UninitializedItemCount := Integer( Positions.Capacity );
     OPENClear;                                                                  {clearing the transposition table entails that the open-queue is empty too}
   end; // OptimizeGame.TTClear
@@ -18759,7 +20581,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       var Position:PPosition;
       begin // performs pushes from the position 'Start__' up to, but not including the position 'Stop__'; if 'BoxNo' <> 0 then only a sequence of pushes with that box-number is performed
         Result:=0; Last__:=Start__^.Parent; Position:=Start__;
-        CalculatePlayersDistanceToReachableSquares(0); // 'IsALegalPush()' requires that the player's distance to all reachable squares has been calculated, using index = 0
+        CalculatePlayersDistanceToReachableSquares(0); // 'IsALegalPush()' requires that the player's distance to all reachable squares have been calculated, using index = 0
         while (Position<>Stop__) and
               (Position<>nil) and
               ((BoxNo__=0) or (BoxNo__=Position^.Move.BoxNo)) and
@@ -18771,7 +20593,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end; // DoPushes
 
       function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection; BoxSquare__:Integer):Boolean;
-      begin // precondition: player's distance to reachable squares has been calculated, using index = 0}
+      begin // precondition: player's distance to reachable squares have been calculated, using index = 0}
         Direction__:=TDirection(Ord(Direction__) and DIRECTION_BIT_MASK);
         with Game do with Solver.SearchStates[0].PlayersReachableSquares do
            Result:={inline simple checks for legal moves}
@@ -18787,7 +20609,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end; // IsALegalPush
 
       procedure UndoAllPushes(CurrentPosition__:PPosition);
-      begin // undo all pushes from the current position 'CurrentPosition__' back to the start position; precondition: the game-state (e.g., the board) matches the position 'CurrentPosition__'
+      begin // undo all pushes from the current position 'CurrentPosition__' back to the start position; precondition: the game state (e.g., the board) matches the position 'CurrentPosition__'
         while CurrentPosition__<>nil do with CurrentPosition__^ do begin        // undo all pushes
           YASS.UndoPush(Move.BoxNo,Move.Direction);
           CurrentPosition__:=Parent;                                            // backtrack to the previous position on the path
@@ -18848,7 +20670,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
               end;
 
            if CurrentPosition__<>nil then
-              DoPushes(Positions.StartPosition^.Successor,CurrentPosition__^.Successor,0,False,LastPosition); // replay pushes so the game-state again matches the position 'CurrentPosition__'
+              DoPushes(Positions.StartPosition^.Successor,CurrentPosition__^.Successor,0,False,LastPosition); // replay pushes so the game state again matches the position 'CurrentPosition__'
            end
         else
            Msg(TEXT_INTERNAL_ERROR+': "OptimizeGame.RearrangementOptimization.UpdatePositionsOnBestPath"',TEXT_APPLICATION_TITLE);
@@ -21135,7 +22957,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
     function  VicinitySearch(var FullGameSearch__:Boolean):Boolean;
     const
-      GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH=1+AXIS_COUNT;        // optimizing boxlines requires that the 'Visited' data structure keeps track of the last push direction for all visited game-states
+      GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH=1+AXIS_COUNT;        // optimizing boxlines requires that the 'Visited' data structure keeps track of the last push direction for all visited game states
       MAX_BOX_CONFIGURATION_COUNT=10*ONE_MILLION;                               // the vicinity search is a simple breadth-first search so it's best to limit the number of nodes to a reasonable small number
       MEMORY_ALIGNMENT_BYTES=8;                                                 // must be a 2^n number where 'n' is an integer > 0 so '2^n-1' can be used as a bit mask ('n>0', not 'n>=0' because the minimum alignment is 2 bytes here)
       NONE=-1;                                                                  // note that even though 'NONE' is defined as a symbolic constant, its value cannot change; the value must be '-1'
@@ -21172,7 +22994,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end;
       TDataStructureType=(dstVicinitySquares,dstBinaryTree,dstPointerVector,dstBoxConfigurationVector,dstVisitedBitSet,dstBloomFilter,dstPositionVector);
       TDataStructureTypeSet=set of TDataStructureType;
-      TGameState=UInt32;                                                        // a game-state is a [box-configuration, player-square] tuple; the concrete representation is "BoxConfigurationIndex*PlayerSquareCount+PlayerSquare"
+      TGameState=UInt32;                                                        // a game state is a [box-configuration, player-square] tuple; the concrete representation is "BoxConfigurationIndex*PlayerSquareCount+PlayerSquare"
       PMemoryBlock=^TMemoryBlock;
       TMemoryBlock=record
         ByteSize:Cardinal;
@@ -21232,7 +23054,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       StartTimeMS:TTimeMS;
       VicinitySquares:TVicinitySquares;                                         // the nearest squares for each box-square
       VicinitySettingsAsText:String;
-      VisitedMultiplicationFactor:Cardinal;                                     // the size of 'Visited' depends on the optimization type; optimizing boxlines requires saving the last push direction for all visited game-states
+      VisitedMultiplicationFactor:Cardinal;                                     // the size of 'Visited' depends on the optimization type; optimizing boxlines requires saving the last push direction for all visited game states
 
       // forward declarations, i.e., functions that are referenced before they are defined in the source code
       function  CalculateDataStructuresByteSize(Count__:Cardinal; DataStructureTypeSet__:TDataStructureTypeSet):Cardinal; forward;
@@ -21896,7 +23718,7 @@ A---B-
           end; // IsABitSetDeadlock
 
           function  IsACapacityCountedDeadlock:Integer;
-          begin //returns the number of the (first) violated player-independent deadlock set, if any, otherwise the return value is 'NONE'
+          begin //returns the number of the (first) violated player-independent deadlock-set, if any, otherwise the return value is 'NONE'
             with Game.DeadlockSets do
               for Result:=1 to Count do
                   if (Capacity[Result]<0) and
@@ -21935,7 +23757,7 @@ A---B-
 
                       Dec(Game.Board[ExternalSquareNo],BOX);                    // remove the box from the board
                       RemoveBox(InternalSquareNo,BoxConfiguration__);
-                      with Game.DeadlockSets do                                 // update deadlock set capacities
+                      with Game.DeadlockSets do                                 // update deadlock-set capacities
                         for i:=1 to SquareSetCount[ExternalSquareNo] do Inc(Capacity[SquareSetNumbers[ExternalSquareNo]^[i]]); // leaving these deadlock-sets
 
                       FirstIndex:=VicinitySquares.FirstIndex[InternalSquareNo];
@@ -21954,7 +23776,7 @@ A---B-
                                 then begin
                                 AddBox(VicinitySquareNo,BoxConfiguration__);    // move the box to 'VicinitySquareNo'
                                 Inc(Game.Board[ExternalVicinitySquareNo],BOX);
-                                with Game.DeadlockSets do                       // update deadlock set capacities
+                                with Game.DeadlockSets do                       // update deadlock-set capacities
                                   for i:=1 to SquareSetCount[ExternalVicinitySquareNo] do Dec(Capacity[SquareSetNumbers[ExternalVicinitySquareNo]^[i]]); // entering these deadlock-sets
                                 ChangedBoxSquares__[VicinitySettingsIndex__]:=ExternalVicinitySquareNo; // update the set of squares with moved boxes
 
@@ -22014,14 +23836,14 @@ A---B-
                                               end;
                                    end;
 
-                                with Game.DeadlockSets do                       // restore deadlock set capacities
+                                with Game.DeadlockSets do                       // restore deadlock-set capacities
                                   for i:=1 to SquareSetCount[ExternalVicinitySquareNo] do Inc(Capacity[SquareSetNumbers[ExternalVicinitySquareNo]^[i]]); // leaving  these deadlock-sets
                                 Dec(Game.Board[ExternalVicinitySquareNo],BOX);  // remove the box from the tested square
                                 RemoveBox(VicinitySquareNo,BoxConfiguration__);
                                 end;
                              end;
 
-                      with Game.DeadlockSets do                                 // restore deadlock set capacities
+                      with Game.DeadlockSets do                                 // restore deadlock-set capacities
                         for i:=1 to SquareSetCount[ExternalSquareNo] do Dec(Capacity[SquareSetNumbers[ExternalSquareNo]^[i]]); //entering these deadlock-sets
                       Game.BoxPos[BoxNo]:=ExternalSquareNo;                     // restore box square number
                       Inc(Game.Board[ExternalSquareNo],BOX);                    // restore box configuration
@@ -22205,7 +24027,7 @@ A---B-
         // the search; only approx. 40% of the available memory is used for box
         // configurations; the rest is reserved for the open-queue;
         // despite its name, the open-queue actually contains open (not yet
-        // expanded game-states) as well as all the closed (expanded) game-states
+        // expanded game states) as well as all the closed (expanded) game states
 
         MaxBoxConfigurationCount:=Max(0, // '0': guard against any programming errors where unsigned numbers by mistake are interpreted as negative signed numbers
                                       Min((MAX_BOX_CONFIGURATION_COUNT*10) div 9, // the vicinity search is a simple breadth-first search so it's best to limit the number of nodes to a reasonable small number
@@ -22351,7 +24173,7 @@ A---B-
             FillChar(Deadlocks__,SizeOf(Deadlocks__),0);                        // clear the deadlock bit-sets, e.g., set the count to 0
             for SetNo:=1 to Game.DeadlockSets.Count do
                 if   [dsfPlayerIsInsideSet,dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet]*Game.DeadlockSets.Flags[SetNo]=[] then begin
-                     DeadlockSetExternalToInternalNo[SetNo]:=Count;             // map external to internal deadlock set numbers
+                     DeadlockSetExternalToInternalNo[SetNo]:=Count;             // map external to internal deadlock-set numbers
                      DeadlockSetInternalToExternalNo[Count]:=SetNo;
                      Inc(Count);
                      end
@@ -22365,7 +24187,7 @@ A---B-
                  for SquareNo:=1 to Game.BoardSize do
                      for Index:=1 to Game.DeadlockSets.SquareSetCount[SquareNo] do begin
                          SetNo:=Game.DeadlockSets.SquareSetNumbers[SquareNo]^[Index];
-                         if DeadlockSetExternalToInternalNo[SetNo]<>NONE then   // 'True': add a box at the current square for the current deadlock set number
+                         if DeadlockSetExternalToInternalNo[SetNo]<>NONE then   // 'True': add a box at the current square for the current deadlock-set number
                             AddBox(BoxExternalToInternalSquare[SquareNo],
                                    PBoxConfiguration(Cardinal(First)+Cardinal(DeadlockSetExternalToInternalNo[SetNo]*BoxConfigurationByteSize))^);
                         end;
@@ -22386,7 +24208,7 @@ A---B-
 
            // the size of the 'Visited' datastructure depends on the
            // optimization type; optimizing boxlines requires saving the last
-           // push direction for all visited game-states
+           // push direction for all visited game states
            if   Optimizer.Optimization<opBoxLinesMoves then
                 VisitedMultiplicationFactor:=1
            else VisitedMultiplicationFactor:=GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH;
@@ -22477,11 +24299,11 @@ A---B-
       begin // 'InitializeMemoryPool'; precondition: 'TTPurge': had been called to compact the best game path at the bottom of the transposition table
         FillChar(MemoryPool__,SizeOf(MemoryPool__),0);
         if (Positions.Positions<>nil) and
-           (Cardinal(Positions.EndOfPositions)>Cardinal(Positions.Positions)) and // '>': per square precalculated deadlock set numbers and hash table buckets are allocated after the nodes stored in the transposition table
+           (Cardinal(Positions.HighWaterMark)>Cardinal(Positions.Positions)) and // '>': per square precalculated deadlock-set numbers and hash table buckets are allocated above the nodes stored in the transposition table
            (Positions.UninitializedItemCount*SizeOf(TOptimizerPosition)>2*MEMORY_ALIGNMENT_BYTES) then
            with MemoryPool__ do with MemoryBlock do begin
              // preserve the best game path at the bottom of the allocated memory,
-             // and per square precalculated deadlock set numbers and hash table
+             // and per square precalculated deadlock-set numbers and hash table
              // buckets at the top of the allocated memory;
              // the sandwiched memory area is used as the available memory pool
              // for the vicinity-search;
@@ -22494,7 +24316,7 @@ A---B-
              if   (Positions.BestPosition=nil) or (Cardinal(Positions.BestPosition)+Cardinal(SizeOf(TOptimizerPosition))<=Cardinal(Memory)) then begin
                   ByteAlignment(MEMORY_ALIGNMENT_BYTES,Memory);
                   //ByteSize:=(Cardinal(Positions.Positions)+Cardinal(Pred(Positions.MemoryByteSize))-Cardinal(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)); // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
-                  ByteSize:=(Cardinal(Positions.EndOfPositions)-Cardinal(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)); // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
+                  ByteSize:=(Cardinal(Positions.HighWaterMark)-Cardinal(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)); // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
 
                   if ProtectedUpperMemoryArea__<>nil then // 'ProtectedUpperMemoryArea__' is used for protecting an upper memory area (e.g. vicinity-squares) when the memory-pool is reallocated after a successful call to 'TTPurge'
                      if   (Cardinal(ProtectedUpperMemoryArea__)>=Cardinal(Memory))
@@ -22623,7 +24445,7 @@ A---B-
         TargetBoxConfigurationIndex,TargetPlayerSquare:Integer;
         SearchSliceHasTerminated:Boolean;
         Queues:TQueues;
-        VisitedArea:PByteVector;                                                // memory for keeping track of visited game-states, i.e., [box-configurations, player-squares] tuples
+        VisitedArea:PByteVector;                                                // memory for keeping track of visited game states, i.e., [box-configurations, player-squares] tuples
         {$IFDEF CONSOLE_APPLICATION}
           LastConsoleStatusMoveCount:Int64;
         {$ENDIF}
@@ -22704,7 +24526,7 @@ A---B-
         function  FirstItemInBlock(Block__:PMemoryBlock; ItemByteSize__:Cardinal):Pointer;
         var TagBitMask:Cardinal;
         begin // returns the memory address of the first item in the memory block; the items are right-justified, thereby making it more efficient to check if a block is full
-          if   ItemByteSize__>DIRECTION_BIT_MASK then                           // 'True': the items are big enough to store a direction in the low bits of an item pointer; this is used for items on the game-state queues
+          if   ItemByteSize__>DIRECTION_BIT_MASK then                           // 'True': the items are big enough to store a direction in the low bits of an item pointer; this is used for items on the game state queues
                TagBitMask:=DIRECTION_BIT_MASK                                   // reserve tag bits in the item pointers for a direction
           else TagBitMask:=0;                                                   // no tag bits in the item pointers
           if   (ItemByteSize__ and TagBitMask)=0 then begin                     // '0': it's possible to store tag bits in the low bits of a pointer to an item
@@ -22785,7 +24607,7 @@ A---B-
         end; // AdvanceToNextMemoryBlock
 
         function  CalculateQueueItemPushPathLength(Item__:PQueueItem):Integer;
-        begin  // returns the number of pushes on the path to the game-state represented by 'Item__'; the root node (the slice starting position) is not counted
+        begin  // returns the number of pushes on the path to the game state represented by 'Item__'; the root node (the slice starting position) is not counted
           Result:=-1;                                                           // '-1': // the first node on the path is the slice start position (the root node), and it's not counted; the new path begins with the next node
           while Item__<>nil do begin
             Inc(Result); Item__:=PQueueItem(Cardinal(Item__^.PushAncestor) and (not DIRECTION_BIT_MASK)); // '(not DIRECTION_BIT_MASK)': the push ancestor pointer may contain a direction stored in the low bits
@@ -22842,7 +24664,7 @@ A---B-
         end; // EnlargeQueue
 
         function  EnqueueGameState(GameState__:TGameState; PushAncestor__:PQueueItem; var GameStateQueue__:TQueue):Boolean;
-        begin // enqueues a game-state and its push-ancestor on a game-state queue, i.e., the moves-queue, the pushes-queue, or the boxlines-queue
+        begin // enqueues a game state and its push-ancestor on a game state queue, i.e., the moves-queue, the pushes-queue, or the boxlines-queue
           with GameStateQueue__ do begin
             Result:=(Top<>Block) or                                             // 'Block' is both the currently selected memory block and the end of its own data area
                     EnlargeQueue(QUEUE_MEMORY_BLOCK_BYTE_SIZE,GameStateQueue__);
@@ -22952,12 +24774,12 @@ A---B-
             end; // IsPlayerSquareInPlayersAccessArea
 
           begin // 'FindMatchingGameStates';
-                // searches for game-states on the queue with a matching
+                // searches for game states on the queue with a matching
                 // box configuration, and where the player-position is in the
                 // same access area as 'Position.PlayerPos';
                 // precondition: the player's access area has been calculated
                 // using depth index '0';
-                // returns the number of matching game-states;
+                // returns the number of matching game states;
             Result:=0;
             if Queue__.MemoryBlocks.Root<>nil then with Queue__ do begin
                EndOfBlock:=MemoryBlocks.Root;
@@ -22974,13 +24796,13 @@ A---B-
                                                            False) then begin
                          // the player is in the access area for 'Item^.GameState';
                          // now check if 'Item' is a member of a new best path
-                         Inc(Result); // count the number of matching game-states
+                         Inc(Result); // count the number of matching game states
                          if        IsNewBetterPath(Item,POptimizerPosition(Position__^.Successor)) then begin // 'True': found a new better path
                                    NewBestPath__:=True;
                                    Item         :=Top;                          // break out from the 'while' loop
                                    end
                          else if   (PlayerInternalToExternalSquare[GameState mod PlayerSquareCount]=Position__^.PlayerPos) and // 'True': 'Item' is identical to the best path position, with matching box-configuration and player-position
-                                   (Optimizer.Optimization<opBoxLinesMoves) then // 'True': this isn't a boxlines optimzation, in which case the same game-state may exist with the player entering its square from a different direction
+                                   (Optimizer.Optimization<opBoxLinesMoves) then // 'True': this isn't a boxlines optimzation, in which case the same game state may exist with the player entering its square from a different direction
                                    Item:=Top                                    // break out from the 'while' loop
                               else Inc(Item);                                   // advance to the next item
                          end
@@ -23052,7 +24874,7 @@ A---B-
                if Optimizer.Optimization>=opBoxLinesMoves then
                  GameState:=GameState div GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH;
                SavePlayerAndBoxConfigurationToGame(GameState mod PlayerSquareCount,GetBoxConfigurationByIndex(GameState div PlayerSquareCount)^);
-               WriteBoardToLogFile(IntToStr(PathLength));
+               WriteBoardToLogFile(IntToStr(PathLength),0);
                Item__:=PQueueItem(Cardinal(Item__^.PushAncestor) and (not DIRECTION_BIT_MASK));
                Dec(PathLength);
                end;
@@ -23091,11 +24913,11 @@ A---B-
 
           function  MakeVisitedArea(var VisitedArea__:PByteVector):Boolean;
           var ByteSize:Integer;
-          begin // reserves and initializes a memory area for the bookkeeping of visited game-states, i.e., [box configuration, player square] tuples
+          begin // reserves and initializes a memory area for the bookkeeping of visited game states, i.e., [box configuration, player square] tuples
             ByteSize:=CalculateDataStructuresByteSize(BoxConfigurations.Count,[dstVisitedBitSet]);
             VisitedArea__:=GetMemory(ByteSize,True);                            // 'True': allocate the memory from the top; it's not strictly necessary, but it doesn't hurt either
             Result:=VisitedArea__<>nil;
-            if Result then FillChar(VisitedArea__^,ByteSize,0);                 // clear the bits, i.e., mark all game-states as 'not Visited'
+            if Result then FillChar(VisitedArea__^,ByteSize,0);                 // clear the bits, i.e., mark all game states as 'not Visited'
           end; // MakeVisitedArea
 
         begin // Initialize
@@ -23113,7 +24935,7 @@ A---B-
 }
           {$WARNINGS OFF}                                                       // precondition checks
             {warning: Comparison always evaluates to True}
-            Result:=SizeOf(TGameState)=SizeOf(YASS.Positions.BestPosition^.GameState); {the vicinity-search stores the game-state for each position on the best path}
+            Result:=SizeOf(TGameState)=SizeOf(YASS.Positions.BestPosition^.GameState); {the vicinity-search stores the game state for each position on the best path}
           {$WARNINGS ON}
           if not Result then InternalError('Search.Initialize');                // the queue doesn't work efficiently if the spans embedded in the queue cause havoc to the alignment of the queue items
 
@@ -23139,7 +24961,7 @@ A---B-
           TargetBoxConfigurationIndex:=LookupBoxConfiguration(BoxConfiguration);
           TargetPlayerSquare:=PlayerExternalToInternalSquare[Game.PlayerPos];
 {
-          // calculate the game-state for each position on the path through the
+          // calculate the game state for each position on the path through the
           // current slice
           // (not in production because currently this information isn't used)
           Position:=SliceEndPosition;
@@ -23211,7 +25033,7 @@ A---B-
           begin
             FirstPosition__          :=RestPath__;                              // upon return, 'FirstPosition__' contains the head of the new list of positions leading through the current slice of the game
 
-            // calculate length of the push path leading to the game-state represented by 'QueueItem__^'; the path root node is not counted
+            // calculate length of the push path leading to the game state represented by 'QueueItem__^'; the path root node is not counted
             Count:=CalculateQueueItemPushPathLength(QueueItem__);
 
             Result:=(NewPathPositions<>nil) and (Count<=MaxSearchDepth);        // 'True' the memory area reserved for a new best path is present and big enough enough to hold the new path
@@ -23320,7 +25142,7 @@ A---B-
                // the positions may have been relocated;
                // the original 'SliceEndPosition' may not be a member of the
                // path anymore;
-               // theoretically, the game-state hashvalues aren't guaranteed to
+               // theoretically, the game state hashvalues aren't guaranteed to
                // be unique; that's why they are not used for the identification
                // of the slice boundary positions;
                // the new 'SliceEndPosition' may be nil, because the new path
@@ -23434,7 +25256,7 @@ A---B-
               DestinationQueue:PQueue;
               //oPlayerPos:Integer; oBoard:TBoard; oBoxPos:TBoxSquares;
 
-          begin // GenerateSuccessors; generates successor game-states for all nodes on the queue belonging to the specified span
+          begin // GenerateSuccessors; generates successor game states for all nodes on the queue belonging to the specified span
             Result:=False;
             if (Item__<>nil) and
                (not SearchSliceHasTerminated) then begin                        // 'True': the search hasn't been terminated
@@ -23452,19 +25274,19 @@ A---B-
                if (Item__=PQueueItem(EndOfBlock)) and (Item__<>EndOfSpan__) then // 'True': advance to the next memory block allocated to the queue
                   AdvanceToNextMemoryBlock(not IsPushesQueue__,Pointer(Item__),SourceQueue__,EndOfBlock); // there will always be a next block
 
-               while Item__<>EndOfSpan__ do begin                               // for each item belonging to the span, or until the search terminates, generate successors and store them on one of the game-state queues (moves, pushes, or boxlines)
+               while Item__<>EndOfSpan__ do begin                               // for each item belonging to the span, or until the search terminates, generate successors and store them on one of the game state queues (moves, pushes, or boxlines)
                  GameState               :=Item__^.GameState;
                  if FirstMarkPushesAsVisitedWhenTheyAreExpanded__ and IsPushesQueue__ then
-                    if   not IsVisited(GameState) then begin                    // 'True': the game-state hasn't been expanded yet; it may exist at more than one moves-depth within the current push-depth contour)
+                    if   not IsVisited(GameState) then begin                    // 'True': the game state hasn't been expanded yet; it may exist at more than one moves-depth within the current push-depth contour)
                          SetVisited(GameState);
                          if not GenerateSuccessors__ then                       // 'True': the search is over; what remains is to mark all seen pushes as visited as a preparation for 'CheckIntermediatePositionsOnBestFoundPath'
                             GameState    :=High(GameState);                     // skip generating successors for this item and continue to the next item
                          end
-                    else GameState       :=High(GameState);                     // 'High(GameState)' is a reserved value and it doesn't occur as a game-state on the queues
+                    else GameState       :=High(GameState);                     // 'High(GameState)' is a reserved value and it doesn't occur as a game state on the queues
 
-                 if GameState<>High(GameState) then begin                       // 'True': generate successors for this game-state
-                    if Optimizer.Optimization>=opBoxLinesMoves then             // 'True': the game-state contains the last push direction axis
-                       GameState         :=GameState div GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH; // drop the last push direction axis from the game-state
+                 if GameState<>High(GameState) then begin                       // 'True': generate successors for this game state
+                    if Optimizer.Optimization>=opBoxLinesMoves then             // 'True': the game state contains the last push direction axis
+                       GameState         :=GameState div GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH; // drop the last push direction axis from the game state
                     BoxConfigurationIndex:=GameState div PlayerSquareCount;
 //                  PlayerSquare         :=GameState mod PlayerSquareCount;
                     PlayerSquare         :=GameState-PlayerSquareCount*Cardinal(BoxConfigurationIndex); // 'mod' may be slow, hence, the player square is calculated this way instead
@@ -23472,7 +25294,7 @@ A---B-
                     NewBoxConfiguration  :=nil;                                 // 'nil': the current box configuration hasn't been copied to 'BoxConfigurationCopy'
 
                     if   IsPushesQueue__ then                                   // 'True': this is the pushes-queue or the boxline-queue
-                         PushAncestor    :=Item__                               // 'Item__' is a game-state which is the result of a push
+                         PushAncestor    :=Item__                               // 'Item__' is a game state which is the result of a push
                     else PushAncestor    :=Item__^.PushAncestor;                // each item carries its most recent push ancestor on the path leading to the item
 {
                     if   Solver.MoveCount>=0 then begin
@@ -23529,11 +25351,11 @@ A---B-
                                           GameState:=TGameState(Cardinal(NewBoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerNeighborSquare));
                                           if Optimizer.Optimization>=opBoxLinesMoves then
                                              GameState:=GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH+Cardinal(Succ(Ord(DIRECTION_TO_AXIS[Direction])));
-                                          if not IsVisited(GameState) then begin // 'True': this is the first time this [NewBoxConfigurationIndex, PlayerNeighborSquare] game-state has been found
+                                          if not IsVisited(GameState) then begin // 'True': this is the first time this [NewBoxConfigurationIndex, PlayerNeighborSquare] game state has been found
                                              if   (Optimizer.Optimization<opBoxLinesMoves)
                                                   or
                                                   ((Item__^.GameState mod GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH)<>Cardinal(Succ(Ord(DIRECTION_TO_AXIS[Direction]))))
-                                                  //(Cardinal(Ord(Direction))<>(Cardinal(PushAncestor) and DIRECTION_BIT_MASK)) // 'True': the box direction changes, or it's the root game-state
+                                                  //(Cardinal(Ord(Direction))<>(Cardinal(PushAncestor) and DIRECTION_BIT_MASK)) // 'True': the box direction changes, or it's the root game state
                                                   //or
                                                   //(Integer(PQueueItem(Cardinal(PushAncestor) and (not DIRECTION_BIT_MASK))^.GameState mod PlayerSquareCount)
                                                   // <> // 'True': the last move didn't push this box in the same direction
@@ -23545,9 +25367,9 @@ A---B-
 
                                              if EnqueueGameState(GameState,{PQueueItem((Cardinal(PushAncestor) and (not DIRECTION_BIT_MASK)) or Cardinal(Ord(Direction)))}PushAncestor,DestinationQueue^) then begin
                                                 if not FirstMarkPushesAsVisitedWhenTheyAreExpanded__ then
-                                                   SetVisited(GameState);       // optimizing moves/pushes sets the visited flag the first time the game-state is seen
-                                                //if Optimizer.Optimization<>opPushesMoves then // optimizing pushes/moves first sets the visited flag when the game-state is expanded
-                                                //   SetVisited(GameState);     // optimizing moves/pushes and boxlines/moves sets the visited flag the first time the game-state is seen
+                                                   SetVisited(GameState);       // optimizing moves/pushes sets the visited flag the first time the game state is seen
+                                                //if Optimizer.Optimization<>opPushesMoves then // optimizing pushes/moves first sets the visited flag when the game state is expanded
+                                                //   SetVisited(GameState);     // optimizing moves/pushes and boxlines/moves sets the visited flag the first time the game state is seen
                                                 if NewBoxConfigurationIndex=TargetBoxConfigurationIndex then begin // 'True': this is the target position
 {
                                                    if   True then begin
@@ -23564,7 +25386,7 @@ A---B-
                                                       (PPosition(SliceEndPosition)=YASS.Positions.SolutionPosition) // 'True': this is the final position, and the final position is a solution, in which case the player position doesn't matter
                                                       then begin
                                                       Result:=Result or         // don't call 'IsNewBetterPath()' again if a new better path already has been found; the search data may have been overwritten
-                                                              IsNewBetterPath(LastItemOnQueue(DestinationQueue^), // the new game-state is on the top of the pushes-queue or boxlines-queue ('Top' points to the next free item)
+                                                              IsNewBetterPath(LastItemOnQueue(DestinationQueue^), // the new game state is on the top of the pushes-queue or boxlines-queue ('Top' points to the next free item)
                                                                               POptimizerPosition(SliceEndPosition^.Position.Successor));
                                                       if Result then StopSearch;
                                                       end;
@@ -23580,7 +25402,7 @@ A---B-
                                     else StopSearch;                            // push-count limit exceeded
                                     end;
                                  end
-                              else begin // the square next to the player in this direction is an empty floor; put this game-state on the open-queue unless it already has been visited
+                              else begin // the square next to the player in this direction is an empty floor; put this game state on the open-queue unless it already has been visited
                                  GameState:=TGameState(Cardinal(BoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerNeighborSquare));
                                  if Optimizer.Optimization>=opBoxLinesMoves then
                                     GameState:=GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH;
@@ -23618,7 +25440,7 @@ A---B-
                            if (Item__=PQueueItem(EndOfBlock)) and (Item__<>EndOfSpan__) then // 'True': advance to the next memory block allocated to the queue
                               AdvanceToNextMemoryBlock(not IsPushesQueue__,Pointer(Item__),SourceQueue__,EndOfBlock); // there will always be a next block
                            end
-                 else if   FirstMarkPushesAsVisitedWhenTheyAreExpanded__ and IsPushesQueue__ then begin // 'True': game-states are first marked as visited when they're expanded
+                 else if   FirstMarkPushesAsVisitedWhenTheyAreExpanded__ and IsPushesQueue__ then begin // 'True': game states are first marked as visited when they're expanded
                            GenerateSuccessors__:=False;                         // finish the items in the span and mark them all as visited as a preparation for 'CheckIntermediatePositionsOnBestFoundPath()'
                            Inc(Item__);                                         // advance to the next item in the span
                            if (Item__=PQueueItem(EndOfBlock)) and (Item__<>EndOfSpan__) then // 'True': advance to the next memory block allocated to the queue
@@ -23672,15 +25494,15 @@ A---B-
           {
           moves/pushes optimizer algorithm
 
-          game-state "queues" or repositories:
+          game state "queues" or repositories:
             moves-queue:
-              game-states where the final step is a move;
+              game states where the final step is a move;
               after expansion, moves are not needed anymore and are recycled
               when all moves in a memory-block have been expanded;
             pushes-queue:
-              game-states where the final step is a push;
+              game states where the final step is a push;
               pushes are kept throughout the search because the final
-              path-reconstruction needs them; all saved game-states (also moves)
+              path-reconstruction needs them; all saved game states (also moves)
               carry their most recent push-ancestor; with this information
               available, path-reconstruction is straightforward;
 
@@ -23741,7 +25563,7 @@ A---B-
             each of the span-queues when the search changes from expanding moves
             to expanding pushes;
 
-            game-states are marked as 'visited' the first time they are seen
+            game states are marked as 'visited' the first time they are seen
             by the search;
           }
           begin // OptimizeMovesPushes
@@ -23753,7 +25575,7 @@ A---B-
                  EnqueueGameState (Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare),nil,PushesQueue) then begin // enqueue the start position on the pushes-queue
 
                  SetVisited       (Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare)); // mark the start position as visited
-                 FirstSpanWithOneMoreMove:=MoveSpansQueue.Bottom;               // the first span with moves (it's empty at this point; the initial game-state is the only member of the first push-span)
+                 FirstSpanWithOneMoreMove:=MoveSpansQueue.Bottom;               // the first span with moves (it's empty at this point; the initial game state is the only member of the first push-span)
 
                  // Position:=SliceStartPosition;
 
@@ -23771,7 +25593,7 @@ A---B-
                              //
                              // to see the check in action, it's necessary to
                              // enable the statements in 'Initialize' that
-                             // calculate the game-state for each of the
+                             // calculate the game state for each of the
                              // positions on the best path (for the slice)
 
                              while (Position<>nil) and (Position^.MoveCount<SearchDepth) do
@@ -23804,10 +25626,10 @@ A---B-
                                 DequeueSpan(MoveSpansQueue); DequeueSpan(PushSpansQueue); // drop the empty pair of spans
                                 end
                              else begin
-                                Result:=ExpandMoves(SuccessorCount);            // game-states on the current move-span have m moves and p-1 pushes
+                                Result:=ExpandMoves(SuccessorCount);            // game states on the current move-span have m moves and p-1 pushes
                                 if   (not (Result or SearchSliceHasTerminated)) and
                                      MakeSpansForMovesAndPushes(True) then begin // make a new pair of spans to enforce the separation of the items on the queues into sets with move-spans (m,p-1) and push-spans (m,p)
-                                     Result:=ExpandPushes(SuccessorCount);      // game-states on the current push-span have m moves and p pushes
+                                     Result:=ExpandPushes(SuccessorCount);      // game states on the current push-span have m moves and p pushes
                                      end
                                 else StopSearch;
                                 end;
@@ -23828,15 +25650,15 @@ A---B-
           {
           pushes/moves optimizer algorithm
 
-          game-state "queues" or repositories:
+          game state "queues" or repositories:
             moves-queue:
-              game-states where the final step is a move;
+              game states where the final step is a move;
               after expansion, moves are not needed anymore and are recycled
               when all moves in a memory-block have been expanded;
             pushes-queue:
-              game-states where the final step is a push;
+              game states where the final step is a push;
               pushes are kept throughout the search because the final
-              path-reconstruction needs them; all saved game-states (also moves)
+              path-reconstruction needs them; all saved game states (also moves)
               carry their most recent push-ancestor; with this information
               available, path-reconstruction is straightforward;
 
@@ -23872,7 +25694,7 @@ A---B-
             ......expand next move-span, which has M/P moves and pushes
             ......increase the moves-depth from M to M+1
 
-            the expansion of game-states with M/P moves and pushes generates two
+            the expansion of game states with M/P moves and pushes generates two
             types of successors:
               1. moves with M+1/P moves/pushes; they are put on the moves-queue
                  for expansion within the current push search depth; in other
@@ -23903,10 +25725,10 @@ A---B-
             ...........
             ........C..
 
-            game-states resulting from a non-pushing move are marked as
+            game states resulting from a non-pushing move are marked as
             'visited' the first time they are seen by the search;
-            game-states resulting from a push are first marked as 'visited' when
-            they are expanded, hence, there may be duplicate game-states on the
+            game states resulting from a push are first marked as 'visited' when
+            they are expanded, hence, there may be duplicate game states on the
             pushes-queue;
           }
           begin // OptimizePushesMoves
@@ -23930,7 +25752,7 @@ A---B-
                              //
                              // to see the check in action, it's necessary to
                              // enable the statements in 'Initialize' that
-                             // calculate the game-state for each of the
+                             // calculate the game state for each of the
                              // positions on the best path (for the slice)
 
                              while (Position<>nil) and (Position^.Position.PushCount<SearchDepth) do
@@ -24126,7 +25948,7 @@ A---B-
                 BoxConfigurationCopy:TBoxConfiguration;
                 MovesQueue:TBoardOfIntegers; MovesQueueBottom,MovesQueueTop:^Integer;
             begin // OptimizeGame.Search.VicinitySearch.Search.OptimizePushesOnly.GenerateSuccessors;
-                  // generates successor game-states for all nodes on the queue belonging to the specified span
+                  // generates successor game states for all nodes on the queue belonging to the specified span
               Result:=False;
               if not SearchSliceHasTerminated then begin                        // 'True': the search hasn't been terminated
                  EndOfBlock   :=FindMemoryBlockWithItem(Item__,Queues.PushesQueue.MemoryBlocks); // find the memory block that contains the span mark; a memory block is its own end-of-data-area pointer
@@ -24134,7 +25956,7 @@ A---B-
                     AdvanceToNextMemoryBlock(False,Pointer(Item__),Queues.PushesQueue,EndOfBlock); // there will always be a next block because there is always a 'next span' mark on the queue before a span is selected for expansion
 
                  while Item__<>EndOfSpan__ do begin                             // for each item belonging to the span, or until the search terminates, generate push-successors and store them on the pushes-queue
-                   GameState            :=Item__^.GameState;                    // get the next game-state on the queue
+                   GameState            :=Item__^.GameState;                    // get the next game state on the queue
                    BoxConfigurationIndex:=GameState div PlayerSquareCount;
 //                 PlayerSquare         :=GameState mod PlayerSquareCount;
                    PlayerSquare         :=GameState-PlayerSquareCount*Cardinal(BoxConfigurationIndex); // 'mod' may be slow, hence, the player square is calculated this way instead
@@ -24145,15 +25967,15 @@ A---B-
                    MovesQueueBottom:=Addr(MovesQueue[Low(MovesQueue)]);
                    MovesQueueTop   :=MovesQueueBottom;
 
-                   while Cardinal(MovesQueueBottom)<=Cardinal(MovesQueueTop) do begin // perform a breadth-first search from the current game-state, putting pushes on the pushes-queue that lead to unvisited game-states
+                   while Cardinal(MovesQueueBottom)<=Cardinal(MovesQueueTop) do begin // perform a breadth-first search from the current game state, putting pushes on the pushes-queue that lead to unvisited game states
                      PlayerSquare:=MovesQueueBottom^; Inc(MovesQueueBottom);
 
                      for Direction:=Low(Direction) to High(Direction) do
                          if not Result then begin                               // 'True': the search data haven't been invalidated by a call to 'TTPurge()' after finding a new best path
                             PlayerNeighborSquare:=PlayerSquareNeighbor[PlayerSquare,Direction];
-                            if PlayerNeighborSquare<>NONE then begin           // 'True': the square next to the player in this direction is a floor, possibly with a box
+                            if PlayerNeighborSquare<>NONE then begin            // 'True': the square next to the player in this direction is a floor, possibly with a box
                                BoxNeighborSquare:=PlayerSquareToBoxSquare[PlayerNeighborSquare];
-                               if (BoxNeighborSquare<>NONE) and                // 'True': the square next to the player is a legal box square
+                               if (BoxNeighborSquare<>NONE) and                 // 'True': the square next to the player is a legal box square
                                   IsABoxSquare(BoxNeighborSquare,BoxConfiguration^) then begin // 'True': there is a box next to the player in this direction
                                   NextBoxNeighborSquare:=BoxSquareNeighbor[BoxNeighborSquare,Direction];
                                   if (NextBoxNeighborSquare<>NONE) and
@@ -24194,7 +26016,7 @@ A---B-
                                         NewBoxConfigurationIndex:=LookupBoxConfiguration(NewBoxConfiguration^);
                                         if NewBoxConfigurationIndex<>NONE then begin // 'True': the new box configuration is in the vicinity of the best found path
                                            GameState:=TGameState(Cardinal(NewBoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerNeighborSquare));
-                                           if not IsVisited(GameState) then begin // 'True': this is the first time this [NewBoxConfigurationIndex, PlayerNeighborSquare] game-state has been found
+                                           if not IsVisited(GameState) then begin // 'True': this is the first time this [NewBoxConfigurationIndex, PlayerNeighborSquare] game state has been found
                                               if EnqueueGameState(GameState,Item__,Queues.PushesQueue) then begin
                                                  SetVisited(GameState);
                                                  if NewBoxConfigurationIndex=TargetBoxConfigurationIndex then begin // 'True': this is the target position
@@ -24203,7 +26025,7 @@ A---B-
                                                        (PPosition(SliceEndPosition)=YASS.Positions.SolutionPosition) // 'True': this is the final position, and the final position is a solution in which case the player position doesn't matter
                                                        then begin
                                                        Result:=Result or        // 'don't call 'IsNewBetterPath()' again if a new better path already has been found; the search data may have been overwritten by the new best path
-                                                               IsNewBetterPath(LastItemOnQueue(Queues.PushesQueue), // the new game-state is on the top of the pushes-queue ('Top' points to the next free item)
+                                                               IsNewBetterPath(LastItemOnQueue(Queues.PushesQueue), // the new game state is on the top of the pushes-queue ('Top' points to the next free item)
                                                                                POptimizerPosition(SliceEndPosition^.Position.Successor));
                                                        if Result then StopSearch;
                                                        end;
@@ -24224,7 +26046,7 @@ A---B-
                                   if not IsVisited(GameState) then begin
                                      Inc(MovesQueueTop);
                                      MovesQueueTop^:=PlayerNeighborSquare;      // enqueue the non-pushing player moves
-                                     SetVisited(GameState);                     // mark that the game-state has been visited
+                                     SetVisited(GameState);                     // mark that the game state has been visited
                                      Inc(Solver.MoveCount);                     // update statistics
 
                                      if (BoxConfigurationIndex=TargetBoxConfigurationIndex) and
@@ -24232,7 +26054,7 @@ A---B-
                                         if (SliceEndPosition^.Position.Successor<>nil) then   // 'True': this isn't the last slice of the game
                                            with Queues.MovesQueue do begin
                                              Result:=Result or                  // 'don't call 'IsNewBetterPath()' if a new better path already has been found because it may have overwritten search data
-                                                     IsNewBetterPath(Item__,    // 'Item__': there are only items on the pushes-queue, so the current game-state after the non-pushing player move is not on any of the queues
+                                                     IsNewBetterPath(Item__,    // 'Item__': there are only items on the pushes-queue, so the current game state after the non-pushing player move is not on any of the queues
                                                                      POptimizerPosition(SliceEndPosition^.Position.Successor));
                                              if Result then StopSearch;
                                              end
@@ -24300,12 +26122,12 @@ A---B-
 
         procedure ResetVisited(GameState__:TGameState);
         begin // sets the visited state to 'False' for the game state [box configuration, player square] represented by 'GameState__'
-          Dec(VisitedArea^[GameState__ div BITS_PER_BYTE],1 shl (GameState__ mod BITS_PER_BYTE)); // precondition: 'Visited' = 'True'  for this game-state
+          Dec(VisitedArea^[GameState__ div BITS_PER_BYTE],1 shl (GameState__ mod BITS_PER_BYTE)); // precondition: 'Visited' = 'True'  for this game state
         end; // OptimizeGame.Search.VicinitySearch.Search.ResetVisited
 
         procedure SetVisited(GameState__:TGameState);
         begin // sets the visited state to 'True' for the game state [box configuration, player square] represented by 'GameState__'
-          Inc(VisitedArea^[GameState__ div BITS_PER_BYTE],1 shl (GameState__ mod BITS_PER_BYTE)); // precondition: 'Visited' = 'False' for this game-state
+          Inc(VisitedArea^[GameState__ div BITS_PER_BYTE],1 shl (GameState__ mod BITS_PER_BYTE)); // precondition: 'Visited' = 'False' for this game state
         end; // OptimizeGame.Search.VicinitySearch.Search.SetVisited
 
         procedure ShowGameState(InternalPlayerSquare__:Integer; const BoxConfiguration__:TBoxConfiguration; const Caption__:String; Log__:Boolean); // debugging service function
@@ -24316,7 +26138,7 @@ A---B-
           SavePlayerAndBoxConfigurationToGame(InternalPlayerSquare__,BoxConfiguration__);
 
           if Log__ then begin
-             WriteBoardToLogFile(Caption__); FlushLogFile;
+             WriteBoardToLogFile(Caption__,0); FlushLogFile;
              end;
 
           ShowBoard;
@@ -24383,7 +26205,7 @@ A---B-
         begin // stops searching through the current slice of the best found path
           Result                  :=nil;                                        // return 'nil' in case it comes in handy for the caller to use the function result, say, to update a loop control variable
           SearchSliceHasTerminated:=True;                                       // 'True': signal that the search through the current slice has terminated, and ensure that 'AllocateMemoryBlock()' fail, i.e., no more memory blocks are allocated
-          with Queues do begin                                                  // ensure that no more game-states are added to the queues
+          with Queues do begin                                                  // ensure that no more game states are added to the queues
             MovesQueue   .Block   :=MovesQueue   .Top;                          // fake that the queue is full; it makes calls to 'EnqueueGameState()' fail because allocating new memory blocks fail when 'SearchSliceHasTerminated' = 'True'
             PushesQueue  .Block   :=PushesQueue  .Top;                          // fake that the queue is full; it makes calls to 'EnqueueGameState()' fail because allocating new memory blocks fail when 'SearchSliceHasTerminated' = 'True'
             BoxLinesQueue.Block   :=BoxLinesQueue.Top;                          // fake that the queue is full; it makes calls to 'EnqueueGameState()' fail because allocating new memory blocks fail when 'SearchSliceHasTerminated' = 'True'
@@ -24967,9 +26789,18 @@ begin {ProcessLevels}
                            (Solver.LimitExceededPushCount=0) {'True': no positions were dropped because of a depth limit or a push count limit}
                            and
                            (Positions.SearchStatistics.RoomPositionsCount=0) {'True': no room pruning has been performed, i.e., all boxes have been taken into account during node expansion}
+                           and
+                           (Positions.PerimeterListCount<>High(Positions.PerimeterListCount)) {'True': no file error while saving perimeter nodes to disk}
                           ) then begin
+                          {the criteria for getting here have been seen not to
+                           suffice (anymore) for classifying the level as
+                           unsolvable, hence, the following "Not solvable"
+                           message has been disabled;
+                          }
+{
                           Writeln(TEXT_LEVEL_UNSOLVABLE);
                           if UserInterface.Prompt then Readln;
+}
 {
                           if ReplayGame(Game.OriginalSolution) then begin
                              Writeln('Existing solution: ',Game.OriginalSolutionMoveCount,SLASH,Game.OriginalSolutionPushCount);
@@ -24982,6 +26813,7 @@ begin {ProcessLevels}
                    end;
                 end
              else begin
+                Solved:=False;
                 Optimizer.Result:=prUnsolved;
                 if Optimizer.Enabled and (Game.OriginalSolution<>'') then begin
                    OptimizeGame(Length(Game.OriginalSolution),PChar(Addr(Game.OriginalSolution[1])));
@@ -24999,6 +26831,8 @@ begin {ProcessLevels}
                 else    Positions.Count:=High(Positions.Count);
                 if      Solver.Enabled then begin
                         i:=Game.History.Count; j:=i;
+                        if Solved and (Game.SimpleLowerBound=0) and (not Assigned(Positions.SolutionPosition)) and (Positions.Count=1) then {'Positions.Count=1': no search was performed because there are no valid pushes}
+                           Include(LevelStatisticsFlags,lsfZeroPushSolution);
                         end
                 else if Optimizer.Enabled then
                         if ((Optimizer.Result=prOK) or (Optimizer.Result=prGameTooLong)) and
@@ -25140,7 +26974,7 @@ begin
 
   InitializeLegend(True);
 //InitializeLegend(False);
-  InitializeRandomState(0);
+//InitializeRandomState(0);
   InitializeReader;
   InitializeStatistics;
 
@@ -25237,6 +27071,8 @@ end;
   var FirstLevelNo,LastLevelNo:Cardinal; InputFileName:String;
   begin
     ShowTitle;
+
+    SAT(0); // for debugging convenience, ensure that the abbreviated 'SquareToColRowAsText()' function is included in the compiled program
     //Readln;
 
     {Write(SizeOf(TGame)); Readln;}
@@ -25254,13 +27090,13 @@ end;
               (MAX_HISTORY_BOX_MOVES                             <  High(Game.History.Count)) and
               (MAX_HISTORY_BOX_MOVES                             <  DEADLOCK_SCORE-2) and {'deadlock score', 'dead end score', and the number below them, are reserved values}
               (MAX_HISTORY_BOX_MOVES                             >  MAX_BOX_COUNT) and {the 'TSolver.SearchStates' vector must be large enough for a depth-first recursive search with one box at each recursion level}
-              (MAX_BOX_COUNT*DIRECTION_COUNT+1                   <  High(Positions.Positions^[0].SuccessorCount) div 2) and {'+1': 'SuccessorCount' is increased by 1 during node-expansion}
+              (MAX_BOX_COUNT*DIRECTION_COUNT+1                   <  High(Positions.Positions^[0].SuccessorCount) div 2) and {'+1': 'SuccessorCount' is increased by 1 during node-expansion to protect the position against recycling}
               (MAX_BOARD_HEIGHT                                  <= High(Int8)) and {board height, board width, and straight-line distances may sometimes be stored in signed 8-bit fields for efficiency}
               (MAX_BOARD_WIDTH                                   <= High(Int8)) and
               (MAX_BOARD_SIZE                                    <= High(Game.DeadlockSets.CenterSquare[0])) and
               (MAX_BOARD_SIZE                                    <= High(Game.DeadlockSets.FloorCount[0])) and
               (MAX_BOARD_SIZE                                    <= PLAYER_POSITION_MASK) and {the high-bit in 'TPosition.PlayerPos' is reserved for the move-axis}
-              (MAX_BOARD_SIZE                                    <= High(Positions.Positions^[0].PlayerPos) div 2) and {deadlock sets stored in the normal transposition table have player position stored as = player position +'MAX_BOARD_SIZE'}
+              (MAX_BOARD_SIZE                                    <= High(Positions.Positions^[0].PlayerPos) div 2) and {deadlock-sets stored in the normal transposition table have player position stored as = player position +'MAX_BOARD_SIZE'}
               (MAX_BOARD_SIZE*DIRECTION_COUNT                    <  High(TTimeStamp)) and {after clearing (zero-filling) timestamps, it must be possible to use 'CalculatePlayersReachableSquares()' to visit all board squares without timestamp wrap around}
               (High(MAX_BOX_COUNT)                               <= High(UInt8)) and {various fields and vectors depend on that box numbers and goal numbers fit in a byte, i.e., an 8 bit unsigned integer}
               (High(MAX_BOX_COUNT)                               <= MAX_HISTORY_BOX_MOVES) and {the 'Solver.SearchStates' vector must have room for a depth-first search for each box}
@@ -25280,7 +27116,7 @@ end;
               (SizeOf(UInt)                                      =  SizeOf(Pointer)) and
               (SizeOf(Integer)                                   =  SizeOf(Pointer)) and
               (SizeOf(TSmallBoxSet)                              =  SizeOf(Integer)) and
-              (High(Game.DeadlockSets.SquaresOutsideFence)       <= {'outside-fence' squares are only saved for some deadlock sets, and for compactness the squares are saved as small 16-bit numbers}
+              (High(Game.DeadlockSets.SquaresOutsideFence)       <= {'outside-fence' squares are only saved for some deadlock-sets, and for compactness the squares are saved as small 16-bit numbers}
                                                                     High(Game.DeadlockSets.SquaresOutsideFenceIndex[ Low(Game.DeadlockSets.SquaresOutsideFenceIndex) ]))
               ;
     {$WARNINGS ON}
@@ -25367,16 +27203,16 @@ end;
     if Result then begin
        Writeln('Static  memory: ',(SizeOf(Game)+SizeOf(GraphFile)+SizeOf(Legend)+
                                    SizeOf(LevelStatistics)+SizeOf(LogFile)+SizeOf(Optimizer)+
-                                   SizeOf(Positions)+SizeOf(RandomState)+SizeOf(Reader)+
+                                   SizeOf(Positions)+SizeOf(Reader)+
                                    SizeOf(Solver)
                                    +(ONE_MEBI div 2)
                                  ) div ONE_MEBI:6,' MiB');
        Write(  'Dynamic memory: ',(Positions.MemoryByteSize +(ONE_MEBI div 2)) div ONE_MEBI:6,' MiB');
        if      Solver.Enabled then
-               Write('   Position capacity: ',( Cardinal( Positions.EndOfPositions ) - Cardinal( Positions.Positions ) ) div SizeOf( TPosition ),
+               Write('   Position capacity: ',( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TPosition ),
                      '  Position size: '     ,SizeOf(TPosition))
        else if Optimizer.Enabled then
-               Write('   Position capacity: ',( Cardinal( Positions.EndOfPositions ) - Cardinal( Positions.Positions ) ) div SizeOf( TOptimizerPosition ),
+               Write('   Position capacity: ',( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TOptimizerPosition ),
                      '  Position size: '     ,SizeOf(TOptimizerPosition));
        Writeln;
        end
@@ -25397,7 +27233,7 @@ end;
     {$IFDEF CONSOLE_APPLICATION}
       //Writeln('Tested games: ',Game.DeadlockSets.SessionTestedGamesCount);
       //Writeln('Optimizer time: ',Optimizer.TimeMS);
-      //Msg('Done','');
+      //Msg('Done','');   
     {$ELSE}
     {$ENDIF}
   end;

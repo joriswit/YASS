@@ -1,9 +1,9 @@
-====================================================================
-YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.136b - June 20, 2016
+=====================================================================
+YASS - Yet Another Sokoban Solver and Optimizer - For Small Puzzles
+Version 2.137 - August 27, 2016
 Copyright (c) 2016 by Brian Damgaard, Denmark
 E-mail: BrianDamgaard@jubii.dk
-====================================================================
+=====================================================================
 
 Sokoban(r) Registered Trademark of Falcon Co., Ltd., Japan
 Sokoban Copyright (c) 1982-2016 by Hiroyuki Imabayashi, Japan
@@ -27,7 +27,7 @@ indebted to:
 
 Lee J Haywood for providing most of the basic deadlock patterns,
 for sharing a lot of ideas, and for a long-standing correspondence
-on Sokoban issues.
+on Sokoban topics.
 
 Matthias Meger for sharing a lot of ideas and for a long-standing
 correspondence on solvers, optimizers, and deadlock-detection.
