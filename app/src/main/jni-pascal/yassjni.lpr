@@ -14,6 +14,7 @@ library yassjni;
 //
 // disable :{$DEFINE WINDOWS}
 // ============================================================================
+{$MODE DELPHI}
 
 uses SysUtils, jni, YASS;
 
@@ -58,9 +59,9 @@ function Java_yass_YASSActivity_00024SolverTask_optimize(
 ): JString; cdecl;
 { Java JNI method yass.YASSActivity$SolverTask.optimize(...) }
 var Col,Row,Index:Integer;
-    IsASolution:Boolean;
+    IsASolution:Boolean=False;
     InitializeErrorText:String;
-    InitializePluginResult:TPluginResult;
+    InitializePluginResult:TPluginResult=prOK;
     BoardAsPChar:PChar;
     BoardAsText:String;
     GameAsPChar:PChar;
@@ -202,12 +203,8 @@ function Java_yass_YASSActivity_00024SolverTask_solve(
                  PEnv__:PJNIEnv;Obj__            : JObject;
                  Width__,Height__                : Cardinal;
                  BoardAsJString__                : JString;
-//                 SearchMethod__                  : Cardinal;
-//                 PackingOrderEnabled__           : Boolean;
-//                 PackingOrderBoxCountThreshold__ : Cardinal;
                  TransPositionTableSize__        : Cardinal;
                  TimeLimitS__                    : Cardinal
-//                 QuickVicinitySearchEnabled__    : Boolean
                  ): JString; cdecl;
 { Java JNI method yass.YASSActivity$SolverTask.solve(...) }
 var Col,Row:Integer; InitializeErrorText:String;
@@ -310,7 +307,10 @@ begin
   else Result:=nil;
 end;
 
-procedure Java_yass_YASSActivity_00024SolverTask_terminate; cdecl;
+procedure Java_yass_YASSActivity_00024SolverTask_terminate(
+                 PEnv__ : PJNIEnv;
+                 Obj__  : JObject
+                 ); cdecl;
 { Java JNI method yass.YASSActivity$SolverTask.terminate() }
 begin
   YASS.Terminate;
