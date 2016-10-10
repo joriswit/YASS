@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.137 - August 27, 2016
+Version 2.138 - October 2, 2016
 Copyright (c) 2016 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -537,7 +537,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.137';
+                           = '2.138';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -13138,7 +13138,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
               GoalRemovalCandidatesBoxStartPositions[GoalRemovalCandidates.Count]:=BoxStartPosIndex__;    {collect the used box starting position numbers locally for this recursive call to 'Search__'}
               UsedBoxStartPositions__[SetMembersCount__+GoalRemovalCandidates.Count]:=BoxStartPosIndex__; {collect the used box starting position numbers globally for passing values to recursive calls of 'Search__'}
               if PackingOrderType__>=poPullBoxesToStartingPositionsWithoutParking then begin
-                 Board[BoxPos[BoxStartPosIndex]]:=Board[BoxPos[BoxStartPosIndex]] or FLAG_VISITED_SQUARE; {mark the box starting position as 'used'}
+                 Board[BoxPos[BoxStartPosIndex__]]:=Board[BoxPos[BoxStartPosIndex__]] or FLAG_VISITED_SQUARE; {mark the box starting position as 'used'}
                  for Index:=1 to GoalAndParkingSquareCount__ do with GoalBoxSets[Index] do {update the number of remaining unused box starting positions for all boxes on the board, i.e., boxes at goals and parking squares}
                      if BoxStartPosIndex__ in BoxSet then Dec(Count);
                  end;
