@@ -1,7 +1,7 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.138 - October 2, 2016
-Copyright (c) 2016 by Brian Damgaard, Denmark
+Version 2.139 - October 31, 2016
+Copyright (c) 2017 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
@@ -532,12 +532,12 @@ const
 {Texts}
 
   TEXT_APPLICATION_COPYRIGHT
-                           = 'Copyright (c) 2016 by Brian Damgaard';
+                           = 'Copyright (c) 2017 by Brian Damgaard';
   TEXT_APPLICATION_TITLE   = 'YASS';
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.138';
+                           = '2.139';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -862,6 +862,7 @@ type
     DeadlockSetsTimeMS     : TTimeMS;
     DynamicDeadlockSetsCount
                            : Int64;
+    EnqueuedPositionsCount : array[Boolean] of Int64; {'True' counter: the player's reachable squares have been calculated}
     Flags                  : TLevelStatisticsFlags;
     ForwardPositionCount   : Int64;
     GeneratedMovesCount    : Int64;
@@ -1036,7 +1037,7 @@ type
     DeadlockPositionsCount : Cardinal;
     DroppedCount           : Cardinal;   {number of dropped positions}
     DuplicatesCount        : Cardinal;
-    Enqueue1Count          : Cardinal;
+    EnqueuedPositionsCount : array[Boolean] of Cardinal; {'True' counter: the player's reachable squares have been calculated}
     Enqueue2Count          : Cardinal;
     ForwardPositionCount   : Cardinal;
     FreezeTestDeadlockCount: Cardinal;
@@ -1307,6 +1308,31 @@ function  WriteLevelToFile({const} var F:Text; const LevelName__:String):Boolean
 function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var PluginResult__:TPluginResult):Boolean; forward; // only implemented for optimizer positions, i.e., positions of type 'TOptimizerPosition'
 {-----------------------------------------------------------------------------}
 
+{Operating System Constants, Datatypes, and Functions}
+
+{$IFDEF WINDOWS}
+  type
+    UInt64                       = Int64; {Delphi 4: no unsigned 64-bit integer}
+    DWORDLONG                    = UInt64;
+    TMemoryStatusEx              = record
+      dwLength                   : DWORD;
+      ullMemoryLoad              : DWORD;
+      ullTotalPhys               : DWORDLONG;
+      ullAvailPhys               : DWORDLONG;
+      ullTotalPageFile           : DWORDLONG;
+      ullAvailPageFile           : DWORDLONG;
+      ullTotalVirtual            : DWORDLONG;
+      ullAvailVirtual            : DWORDLONG;
+      ullAvailExtendedVirtual    : DWORDLONG;
+    end;
+    PMemoryStatusEx              = ^TMemoryStatusEx;
+
+  procedure GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx); stdcall;
+            external 'kernel32.dll' name 'GlobalMemoryStatusEx';
+{$ENDIF}
+
+{-----------------------------------------------------------------------------}
+
 {General Utilities}
 
 function  Align( Value__, Alignment__ : Integer ) : Integer;
@@ -1349,8 +1375,8 @@ procedure GetAsMuchMemoryAsPossible(var Memory__:Pointer; var ByteSize__:Cardina
 const {$IFDEF WINDOWS}
         RESERVE_MEMORY_BYTE_SIZE=  8*ONE_MEBI; {for safety, leave some memory unused; for instance, opening the 'Settings' window while the plugin is running will need some working memory}
       {$ENDIF}
-      START_DECREMENT           = 16*ONE_MEBI; {start decreasing with 16 MiB, and end up decreasing with 256 MiB at a time in each attempt to allocate a memory block}
-      MAX_DECREMENT             =256*ONE_MEBI;
+      START_DECREMENT           = 16*ONE_MEBI; {start decreasing with 16 MiB, and end up decreasing with 64 MiB at a time in each attempt to allocate a memory block}
+      MAX_DECREMENT             = 64*ONE_MEBI;
 
 var Decrement {$IFDEF WINDOWS}, UserMemoryByteSize {$ENDIF} :Cardinal;
 begin {try to allocate maximum 'ByteSize__' bytes of memory, minimum 'MinimumByteSize__' bytes}
@@ -1385,44 +1411,53 @@ begin {try to allocate maximum 'ByteSize__' bytes of memory, minimum 'MinimumByt
 end;
 {$ENDIF}
 
-function  GetAvailablePhysicalMemoryByteSize:UInt32;
+function  GetAvailablePhysicalMemoryByteSize:Cardinal;
 {$IFDEF WINDOWS}
-var MemoryStatus:TMemoryStatus;
-begin
-  MemoryStatus.dwLength:=SizeOf(MemoryStatus);
-  GlobalMemoryStatus(MemoryStatus);
-  Result:=MemoryStatus.dwAvailPhys;
+  var MemoryStatusEx:TMemoryStatusEx;
+  begin
+    MemoryStatusEx.dwLength:=SizeOf(MemoryStatusEx);
+    GlobalMemoryStatusEx(MemoryStatusEx);
+    if   MemoryStatusEx.ullAvailPhys<=High(Result) then
+         Result:=MemoryStatusEx.ullAvailPhys
+    else Result:=High(Result);
+  end;
 {$ELSE}
-begin
-  Result:=0;
+  begin
+    Result:=0;
+  end;
 {$ENDIF}
-end;
 
-function  GetAvailableUserMemoryByteSize:UInt32;
+function  GetAvailableUserMemoryByteSize:Cardinal;
 {$IFDEF WINDOWS}
-var MemoryStatus:TMemoryStatus;
-begin
-  MemoryStatus.dwLength:=SizeOf(MemoryStatus);
-  GlobalMemoryStatus(MemoryStatus);
-  Result:=MemoryStatus.dwAvailVirtual;
+  var MemoryStatusEx:TMemoryStatusEx;
+  begin
+    MemoryStatusEx.dwLength:=SizeOf(MemoryStatusEx);
+    GlobalMemoryStatusEx(MemoryStatusEx);
+    if   MemoryStatusEx.ullAvailVirtual<=High(Result) then
+         Result:=MemoryStatusEx.ullAvailVirtual
+    else Result:=High(Result);
+  end;
 {$ELSE}
-begin
-  Result:=0;
+  begin
+    Result:=0;
+  end;
 {$ENDIF}
-end;
 
-function  GetPhysicalMemoryByteSize:UInt32;
+function  GetPhysicalMemoryByteSize:Cardinal;
 {$IFDEF WINDOWS}
-var MemoryStatus:TMemoryStatus;
-begin
-  MemoryStatus.dwLength:=SizeOf(MemoryStatus);
-  GlobalMemoryStatus(MemoryStatus);
-  Result:=MemoryStatus.dwTotalPhys;
+  var MemoryStatusEx:TMemoryStatusEx;
+  begin
+    MemoryStatusEx.dwLength:=SizeOf(MemoryStatusEx);
+    GlobalMemoryStatusEx(MemoryStatusEx);
+    if   MemoryStatusEx.ullTotalPhys<=High(Result) then
+         Result:=MemoryStatusEx.ullTotalPhys
+    else Result:=High(Result);
+  end;
 {$ELSE}
-begin
-  Result:=0;
+  begin
+    Result:=0;
+  end;
 {$ENDIF}
-end;
 
 function  GetTimeMS:TTimeMS;
 begin {returns a time measured in milliseconds; the base doesn't matter, the time is only used in relative calculations}
@@ -1555,7 +1590,7 @@ begin // returns the number of the box at the square 'SquareNo__', if any
 end;
 
 function  CalculateDefaultMemoryByteSize:Integer;
-var PhysicalMemoryBytes,PhysicalMemoryMiB:UInt32;
+var PhysicalMemoryBytes,PhysicalMemoryMiB:Cardinal;
 begin
   PhysicalMemoryBytes:=GetPhysicalMemoryByteSize;
   if PhysicalMemoryBytes<High(PhysicalMemoryBytes) - (ONE_MEBI div 2) then Inc(PhysicalMemoryBytes,(ONE_MEBI div 2)); // prepare to round up
@@ -2504,7 +2539,8 @@ function  MakeLevelStatistics(const Name__:String;
                               PositionCount__,CorralPositionCount__,CorralPositionBoxCount__,ForwardPositionCount__,GeneratedMovesCount__,GeneratedPushesCount__,
                               DeadlockedOpenPositionsCount__,DeadlockPositionsCount__,
                               PrecalculatedDeadlockSetsCount__,DynamicDeadlockSetsCount__,
-                              DeadlockSetsPushCount__,NewPathCount__,RoomPositionCount__:Cardinal;
+                              DeadlockSetsPushCount__,NewPathCount__,RoomPositionCount__,
+                              EnqueuedPositionsCountPlayersReachableSquaresNotCalculated__, EnqueuedPositionsCountPlayersReachableSquaresCalculated__:Cardinal;
                               InitializationTimeMS__,DeadlockSetsTimeMS__,PackingOrderTimeMS__,SolverTimeMS__,OptimizerTimeMS__:TTimeMS;
                               Flags__:TLevelStatisticsFlags):PLevelStatistics;
 begin
@@ -2519,6 +2555,8 @@ begin
      DeadlockSetsPushCount         :=DeadlockSetsPushCount__;
      DeadlockSetsTimeMS            :=DeadlockSetsTimeMS__;
      DynamicDeadlockSetsCount      :=DynamicDeadlockSetsCount__;
+     EnqueuedPositionsCount[False] :=EnqueuedPositionsCountPlayersReachableSquaresNotCalculated__;
+     EnqueuedPositionsCount[True ] :=EnqueuedPositionsCountPlayersReachableSquaresCalculated__;
      Flags                         :=Flags__;
      ForwardPositionCount          :=ForwardPositionCount__;
      GeneratedMovesCount           :=GeneratedMovesCount__;
@@ -2659,6 +2697,8 @@ begin {$I-}
        Inc(Total.DeadlockPositionsCount,DeadlockPositionsCount);
        Inc(Total.DeadlockSetsPushCount,DeadlockSetsPushCount);
        Inc(Total.DeadlockSetsTimeMS,DeadlockSetsTimeMS);
+       Inc(Total.EnqueuedPositionsCount[False],EnqueuedPositionsCount[False]);
+       Inc(Total.EnqueuedPositionsCount[True ],EnqueuedPositionsCount[True ]);
        Inc(Total.DynamicDeadlockSetsCount,DynamicDeadlockSetsCount);
        Inc(Total.NewPathCount,NewPathCount);
        Inc(Total.PackingOrderTimeMS,PackingOrderTimeMS);
@@ -2849,6 +2889,8 @@ begin {$I-}
         for i:=1 to LineLength do Write(F,HYPHEN); Writeln(F);
         Writeln(F,'Re-use player''s reachable squares? No      : ',Solver.ReusePlayersReachableSquaresFromPredecessorCount[False]:12);
         Writeln(F,'Re-use player''s reachable squares? Yes     : ',Solver.ReusePlayersReachableSquaresFromPredecessorCount[True ]:12);
+        i:=Total.EnqueuedPositionsCount[False]+Total.EnqueuedPositionsCount[True];
+        Writeln(F,'No player''s reachable squares calculation  : ',Total.EnqueuedPositionsCount                           [False]:12,' of ', i,' enqueued positions');
         end
      else
         if Optimizer.Enabled then begin
@@ -4637,7 +4679,7 @@ begin {LoadNextLevelFromFile} {$I-}
             Game.History.Count:=0;
             MakeLevelStatistics(
                   Game.Title,Game.BoardWidth,Game.BoardHeight,
-                  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,[]);
+                  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,[]);
             WriteStatistics(OutputFileName__);
             end;
 
@@ -4681,23 +4723,26 @@ end;
 function  NextPushToText(var PushNo__:Integer; var Text__:String):Boolean; {note that 'NextPushToText' replays the game}
 var i,PlayerSquare,MoveCount,LineCount{,Col,Row}:Integer; FinalDirection:TDirection; Moves:TSingleStepMoves;
 begin {makes a string like 'ddrrU', i.e., intermediate non-pushing player-moves (lower-case) followed by the pushing move (upper-case)}
-  Inc(PushNo__); Text__:='';
-  Result:=PushNo__<=Min(Game.History.Count,High(Game.History.Moves));
-  if Result then with Game.History.Moves[PushNo__] do begin
-     PlayerSquare:=Game.BoxPos[BoxNo]-Game.SquareOffsetForward[Direction];
+  Text__:='';
+  Result:=PushNo__<Min(Game.History.Count,High(Game.History.Moves));
+  if Result then begin
+     Inc(PushNo__);
+     with Game.History.Moves[PushNo__] do begin
+       PlayerSquare:=Game.BoxPos[BoxNo]-Game.SquareOffsetForward[Direction];
 {
-     ShowBoard;
-     SquareToColRow(Game.PlayerPos,Col,Row); Write('Player: ',Game.PlayerPos,SPACE,Col,SPACE,Row);
-     SquareToColRow(PlayerSquare,Col,Row); Write(' => ',PlayerSquare,SPACE,Col,SPACE,Row);
-     Readln;
+       ShowBoard;
+       SquareToColRow(Game.PlayerPos,Col,Row); Write('Player: ',Game.PlayerPos,SPACE,Col,SPACE,Row);
+       SquareToColRow(PlayerSquare,Col,Row); Write(' => ',PlayerSquare,SPACE,Col,SPACE,Row);
+       Readln;
 }
-     if (BoxNo<>0) and
-        CalculatePlayerPath(PlayerSquare,Direction,True,MoveCount,LineCount,FinalDirection,Moves) then begin
-        for i:=1 to MoveCount do Text__:=Text__+DIRECTION_TO_CHAR[Moves[i].Direction];
-        Text__:=Text__+UpCase(DIRECTION_TO_CHAR[Direction]);
-        DoPush(BoxNo,Direction,-1);
-        end
-     else Result:=False;
+       if (BoxNo<>0) and
+          CalculatePlayerPath(PlayerSquare,Direction,True,MoveCount,LineCount,FinalDirection,Moves) then begin
+          for i:=1 to MoveCount do Text__:=Text__+DIRECTION_TO_CHAR[Moves[i].Direction];
+          Text__:=Text__+UpCase(DIRECTION_TO_CHAR[Direction]);
+          DoPush(BoxNo,Direction,-1);
+          end
+       else Result:=False;
+       end;
      end;
 end;
 
@@ -15168,7 +15213,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
                                 if    (SuccessorScore>PositionScore) then begin
                                       if    SuccessorPushCount<=Solver.BackwardSearchDepthLimit then begin {'True': backward search depth-limit not exceeded}
-                                            Inc(Positions.SearchStatistics.Enqueue1Count);
+                                            Inc(Positions.SearchStatistics.EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); {'True' counter: the player's reachable squares have been calculated}
                                             OPENAdd(SuccessorPosition);         {put the position on the open-queue}
                                             end;
                                       end
@@ -17357,7 +17402,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
                            if   (SuccessorPosition^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
                                 ((Ord(SuccessorPosition^.Move.Direction) and POSITION_OPEN_TAG)=0) then begin {'0': the packing order search hasn't put the position on the open-queue}
-                                Inc(Positions.SearchStatistics.Enqueue1Count);
+                                Inc(Positions.SearchStatistics.EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); // 'True' counter: the player's reachable squares have been calculated
                                 OPENAdd(SuccessorPosition);                     {put the position on the open-queue}
                                 end;
 
@@ -17561,6 +17606,46 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              end;
          end;
     end; {Search.ForwardSearch.TryToFillGoalsAndParkingspaces}
+*)
+(*
+    function  IsLegalOrimazePush(Position__:PPosition; BoxNo__:Integer; Direction__:TDirection):Boolean;
+    var Countdown:Integer;
+        PositionDirection:TDirection;
+    begin
+      with Game do begin
+        Result:=True;
+        PositionDirection:=TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK);
+        if BoxNo__=Position__^.Move.BoxNo then begin
+           Result:=(Direction__=PositionDirection)
+                   and // only push the box three times if the third push brings it to a goal square
+                   ((BoxNo__<>Position__^.Parent^.Move.BoxNo)
+                    or
+                    IsAGoalSquare(BoxPos[BoxNo__]+SquareOffsetForward[Direction__]));
+           end
+        else
+           if Position__^.PushCount>=1 then begin
+              if      Direction__=OPPOSITE_DIRECTION[PositionDirection] then
+                      Result:=False // don't push in the opposite direction of the last push
+              else if ManhattanDistance(BoxPos[BoxNo__],BoxPos[Position__^.Move.BoxNo])>6 then
+                      Result:=False
+              else if IsAGoalSquare(BoxPos[Position__^.Move.BoxNo]+SquareOffsetForward[PositionDirection]) then
+                      Result:=False; // push box further to the goal square
+              if  Result and (Position__^.PushCount>1)  then begin
+                  if      (Position__^.Move.BoxNo<>Position__^.Parent^.Move.BoxNo) then
+                          Result:=False // push a box at least twice
+                  else if Direction__<>PositionDirection then begin // changing direction
+                          Countdown:=4; // 4: at least 6 pushes in the same direction. 2 has already been found (see the first "if" statement).
+                          while Result and (Countdown>0) and (Position__^.PushCount>2) do begin
+                            Position__:=Position__^.Parent;
+                            Result:=PositionDirection=TDirection(Ord(Position__^.Move.Direction) and DIRECTION_BIT_MASK);
+                            Dec(Countdown);
+                            end;
+                          Result:=Result and (Countdown=0);
+                         end;
+                  end;
+              end;
+        end;
+    end;
 *)
     begin {Search.ForwardSearch.Search}
       {$IFDEF CONSOLE_APPLICATION} //......
@@ -18184,7 +18269,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                             then begin {put the successor position on the open-queue}
                                             if (SuccessorPosition^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
                                                ((Ord(SuccessorPosition^.Move.Direction) and POSITION_OPEN_TAG)=0) then begin {'0': the packing order search hasn't put the position on the open-queue}
-                                               Inc(Positions.SearchStatistics.Enqueue1Count);
+                                               Inc(Positions.SearchStatistics.EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); {'True' counter: the player's reachable squares have been calculated}
                                                OPENAdd(SuccessorPosition);      {put the position on the open-queue}
                                                end;
                                             end
@@ -18235,7 +18320,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                             // alternatively, put the position on the
                                             // open-queue as usual
                                             if SuccessorPosition^.PushCount<=Solver.SearchLimits.DepthLimit then begin
-                                               Inc(Positions.SearchStatistics.Enqueue1Count);
+                                               Inc(EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); // 'True' counter: the player's reachable squares have been calculated
                                                OPENAdd(SuccessorPosition);      // put the position on the open-queue
                                                end;
                                             SuccessorPosition^.PackingOrder.SetNo:=Position__^.PackingOrder.SetNo;
@@ -26875,6 +26960,8 @@ begin {ProcessLevels}
                   Game.DeadlockSets.LevelTotalPushCount,
                   Positions.SearchStatistics.NewPathCount,
                   Positions.SearchStatistics.RoomPositionsCount,
+                  Positions.SearchStatistics.EnqueuedPositionsCount[False],
+                  Positions.SearchStatistics.EnqueuedPositionsCount[True ],
                   Game.InitializationTimeMS,
                   Game.DeadlockSets.TimeMS,
                   Solver.PackingOrder.TimeMS,
