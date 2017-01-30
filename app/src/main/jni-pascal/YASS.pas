@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.139 - October 31, 2016
+Version 2.140 - January 28, 2017
 Copyright (c) 2017 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -537,7 +537,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.139';
+                           = '2.140';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -555,6 +555,8 @@ const
                            = 'Level has too many boxes/goals';
   TEXT_LEVEL_HAS_TOO_MANY_COLUMNS
                            = 'Level has too many columns';
+  TEXT_LEVEL_HAS_TOO_MANY_PLAYERS
+                           = 'Level has too many players';
   TEXT_LEVEL_HAS_TOO_MANY_ROWS
                            = 'Level has too many rows';
   TEXT_LEVEL_HAS_NO_PLAYER = 'Level has no player';
@@ -4485,7 +4487,7 @@ begin {$I-}
     if IOResult=0 then begin
        InputFileName:=InputFileName__;
        Result:=LoadNextLevelFromFile(OutputFileName__);
-       if not Result then ErrorText:='No levels found in file: ';
+       if not Result then ErrorText:='No valid levels found in file: ';
        end
     else ErrorText:='File open error (Check path, maybe file wasn''t found): ';
     Result:=ErrorText='';
@@ -12252,7 +12254,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
   function  FindBoxesAndGoalsAndPlayer(var PluginResult__:TPluginResult; var ErrorText__:String):Boolean;
   var i,LoopCount:Integer;
 
-    function  ChangeUnreachableBoxesAndGoalsToWalls:Integer;
+    function  ChangeUnreachableBoxesAndGoalsToWalls(var Result__:Boolean; var PluginResult__:TPluginResult; var ErrorText__:String):Integer;
     var i,SquareNo:Integer;
     begin
     {any immovable boxes and unreachable boxes and goals are converted to
@@ -12271,19 +12273,34 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
              SquareNo:=BoxPos[i];
              {the flag 'FLAG_BOX_REACHABLE_SQUARE' hasn't been calculated for the squares yet; 'IsAFreezingMove()' checks this flag; fake that all squares are box-reachable so 'IsAFreezingMove()' can be of some use for detecting immovable boxes}
              Board[SquareNo]:=Board[SquareNo] or FLAG_BOX_REACHABLE_SQUARE;
-             if (Squares[SquareNo]<>TimeStamp) or                               {'True': the player can never reach the box  square, hence, the square can just as well be a wall}
-                IsAFreezingMove(0,SquareNo,True) then begin                     {'True': the box is immovable, hence, the square can just as well be a wall}
-                Board[SquareNo]:=WALL;
-                Inc(Result);
-                end;
+             if (Squares[SquareNo]<>TimeStamp) or                               {'True': the player can never reach the box square, hence, the square can just as well be a wall}
+                IsAFreezingMove(0,SquareNo,True) then                           {'True': the box is immovable, hence, the square can just as well be a wall}
+                if (Board[SquareNo] and GOAL)<>0 then begin                     {'True': the box is located at a goal square}
+                   Board[SquareNo]:=WALL;
+                   Inc(Result);
+                   end
+                else if Result__ then begin                                     {'True': the level has not been classified as invalid yet}
+                        PluginResult__:=prUnsolvable;                           {the box cannot be pushed to a goal square, hence, the level is unsolvable}
+                        ErrorText__:=TEXT_LEVEL_UNSOLVABLE;
+                        Result__:=False;
+                        end;
              Board[SquareNo]:=Board[SquareNo] and (not FLAG_BOX_REACHABLE_SQUARE); {remove the artificial 'FLAG_BOX_REACHABLE_SQUARE' flag again}
              end;
 
-         for i:=1 to GoalCount do
-             if Squares[GoalPos[i]]<>TimeStamp then begin                       {'True': the player can never reach the goal square, hence, the square can just as well be a wall}
-                Board[GoalPos[i]]:=WALL;
-                Inc(Result);
-                end;
+         for i:=1 to GoalCount do begin
+             SquareNo:=GoalPos[i];
+             if (Squares[SquareNo]<>TimeStamp) and                              {'True': the player can never reach the goal square, hence, the square can just as well be a wall}
+                (Board[SquareNo]<>WALL) then                                    {'True': the square hasn't already been changed into a wall square}
+                if (Board[SquareNo] and BOX)<>0 then begin                      {'True': there is a box at the goal square}
+                   Board[SquareNo]:=WALL;
+                   Inc(Result);
+                   end
+                else if Result__ then begin                                     {'True': the level has not been classified as invalid yet}
+                        PluginResult__:=prUnsolvable;                           {no box can be pushed to a goal square, hence, the level is unsolvable}
+                        ErrorText__:=TEXT_LEVEL_UNSOLVABLE;
+                        Result__:=False;
+                        end;
+             end;
          end;
     end;
 
@@ -12317,7 +12334,13 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
             if   (Board[i] and PLAYER)<>0 then
                  if   PlayerPos=0 then
                       PlayerPos:=i
-                 else Dec(Board[i],PLAYER);
+                 else begin Dec(Board[i],PLAYER);
+                            if Result then begin
+                               PluginResult__:=prInvalidLevel;
+                               ErrorText__:=TEXT_LEVEL_HAS_TOO_MANY_PLAYERS;
+                               Result:=False;
+                               end;
+                      end;
             end;
         if (Game.BoxCount<>Game.GoalCount) and (LoopCount=0) and Result then begin
            PluginResult__:=prInvalidLevel;
@@ -12325,12 +12348,12 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
            Result:=False;
            end;
         Inc(LoopCount);
-      until (not Result) or (PlayerPos=0) or (ChangeUnreachableBoxesAndGoalsToWalls=0);
+      until (not Result) or (PlayerPos=0) or (ChangeUnreachableBoxesAndGoalsToWalls(Result,PluginResult__,ErrorText__)=0);
 
       if  Game.BoxCount<>Game.GoalCount then begin
-          for i:=Succ(Min(Game.BoxCount,GoalCount)) to Game.BoxCount  do Dec(Board[BoxPos [i]],BOX+FLAG_BOX_START_SQUARE);
-          for i:=Succ(Min(Game.BoxCount,GoalCount)) to GoalCount      do Dec(Board[GoalPos[i]],GOAL);
-          Game.BoxCount:=Min(Game.BoxCount,GoalCount); GoalCount:=Game.BoxCount;
+          for i:=Succ(Min(Game.BoxCount,Game.GoalCount)) to Game.BoxCount  do Dec(Board[BoxPos [i]],BOX+FLAG_BOX_START_SQUARE);
+          for i:=Succ(Min(Game.BoxCount,Game.GoalCount)) to Game.GoalCount do Dec(Board[GoalPos[i]],GOAL);
+          Game.BoxCount:=Min(Game.BoxCount,Game.GoalCount); Game.GoalCount:=Game.BoxCount;
           if Result then begin
              PluginResult__:=prUnsolvable;
              ErrorText__:=TEXT_LEVEL_UNSOLVABLE;
@@ -14152,7 +14175,7 @@ begin {InitializeGame}
     if (not Solver.Enabled) and Optimizer.Enabled then
        Solver.SearchLimits:=Optimizer.SearchLimits;                             {install optimizer limits as solver limits (they are used throughout the search and by 'Terminate')}
 
-    if Reader.LevelCount>=Reader.FirstLevelNo then begin {kludge: avoid time-consuming calculations for skipped levels}
+    if Reader.LevelCount>=Reader.FirstLevelNo then begin {otherwise, avoid time-consuming calculations for skipped levels}
        {$IFDEF CONSOLE_APPLICATION}
          Writeln; Writeln(Reader.LevelCount,COLON,SPACE,Game.Title); ShowBoard; {show the board}
          //if not Result then Writeln(ErrorText__);

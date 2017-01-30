@@ -1,7 +1,7 @@
 =====================================================================
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Puzzles
-Version 2.139 - October 31, 2016
-Copyright (c) 2016 by Brian Damgaard, Denmark
+Version 2.140 - January 28, 2017
+Copyright (c) 2017 by Brian Damgaard, Denmark
 E-mail: BrianDamgaard@jubii.dk
 =====================================================================
 
