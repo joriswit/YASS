@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.140 - January 28, 2017
+Version 2.141 - March 2, 2017
 Copyright (c) 2017 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -290,11 +290,13 @@ const
   FLAG_TUNNEL_DOWN         = 16384;
   FLAG_TUNNEL_RIGHT        = 32768;
   FLAG_VISITED_SQUARE      = 65536;
-//FLAG_WALL_GATE_SQUARE    = 131072;
+  FLAG_PLAYER_REACHABLE_SQUARE
+                           = 131072;
+  FLAG_WALL_GATE_SQUARE    = 262144;
   BOARD_SQUARE_FLAGS       = FLAG_BOX_REACHABLE_SQUARE+FLAG_BOX_START_SQUARE+FLAG_DOOR_SQUARE+FLAG_GATE_SQUARE+FLAG_ILLEGAL_BOX_SQUARE+
                              FLAG_NOT_SELECTED_SQUARE+FLAG_SQUARE_SET+
                              FLAG_TUNNEL_UP+FLAG_TUNNEL_LEFT+FLAG_TUNNEL_DOWN+FLAG_TUNNEL_RIGHT+
-                             FLAG_VISITED_SQUARE; //+FLAG_WALL_GATE_SQUARE;
+                             FLAG_VISITED_SQUARE+FLAG_PLAYER_REACHABLE_SQUARE; //+FLAG_WALL_GATE_SQUARE;
 
   CH_BOX                   = 'b';   CH_BOX_ON_GOAL           = 'B'; {all board characters and move characters must be 7-bit ASCII characters}
   CH_BOX_XSB               = '$';   CH_BOX_ON_GOAL_XSB       = '*';
@@ -511,7 +513,7 @@ const
     {probably is out of reach anyway; '32' may be a good threshold in that case;}
                            = {2;} 64;                                           {64: in effect disabling room pruning for practically all levels which are so small that the solver can handle them}
   SEARCH_STATE_INDEX_CORRAL_PRUNING                                             {the corral pruning needs to calculate the player's reachable squares inside each "room" on the board made by the boxes}
-                           = MAX_HISTORY_BOX_MOVES+4;                           {must be the highest index in the 'TSolver.SearchStates' vector because it's used in the vector declaration; see also 'SEARCH_STATE_INDEX_DO_PUSH'}
+                           = MAX_HISTORY_BOX_MOVES+4;                           {precondition: must be the highest index in the 'TSolver.SearchStates' vector because it's used in the vector declaration; see also 'SEARCH_STATE_INDEX_DO_PUSH'}
   SEARCH_STATE_INDEX_DO_PUSH
                            = MAX_HISTORY_BOX_MOVES+3;                           {private 'TSolver.SearchStates' vector member for 'DoPush()' and 'IsALegalPush()'; see also 'SEARCH_STATE_INDEX_CORRAL_PRUNING'}
   SEARCH_STATE_INDEX_SCRATCHPAD_1
@@ -537,7 +539,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.140';
+                           = '2.141';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -1475,12 +1477,7 @@ begin
   RandomState__.RandomNumber:=Max(1,Abs(RandomNumber__));
 end;
 
-function  IntToStr(Number__:Integer):String;
-begin
-  Str(Number__,Result);
-end;
-
-function  Int64ToStr(Number__:Int64):String;
+function  IntToStr(Number__:Int64):String;
 begin
   Str(Number__,Result);
 end;
@@ -1994,6 +1991,8 @@ begin
     else         Result:=CH_FLOOR;
   end;
   if Game.Board[Square__]=FLAG_SQUARE_SET then Result:=CH_SQUARE_SET;
+  if ((Game.Board[Square__] and FLAG_PLAYER_REACHABLE_SQUARE)<>0) and (Result=CH_FLOOR) then
+     Result:=CH_NON_BLANK_FLOOR; {highlight reachable squares}
   if ((Game.Board[Square__] and WALL)<>0) and (Game.Board[Square__]<>WALL) then
      if   Game.DeadlockSets.ControllerAndFreezeSetPairsEnabled then begin
           SquareToColRow(Square__,Col,Row);
@@ -3549,7 +3548,7 @@ begin {$I-}
              s:=s+'  Center: '+IntToStr(CenterSquareNo__)+EQUAL+LEFT_BRACKET+IntToStr(Col)+COMMA+IntToStr(Row)+RIGHT_BRACKET;
              if dsfHasDisconnectedInnerFloors in Flags[Index__] then s:=s+ ' (Some inner floor squares do not belong to the center room)';
              end;
-          s:=s+' Hash value: '+Int64ToStr(DeadlockSetHashValue);
+          s:=s+' Hash value: '+IntToStr(DeadlockSetHashValue);
           if (Flags[Index__]*[dsfPlayerMustBeOutsideSet,dsfControllerSet,dsfFreezeSet]=[dsfPlayerMustBeOutsideSet]) or
              (dsfPlayerMustBeOutsideFreezeSet in Flags[Index__]) then begin
              s:=s+'  The player must be outside the set.';
@@ -3578,6 +3577,7 @@ begin {$I-}
                 else s:=s+', or';
                 SquareToColRow(SquareOutsideFence[Index__],Col,Row);
                 s:=s+' the player can reach the square ['+IntToStr(Col)+COMMA+IntToStr(Row)+RIGHT_BRACKET;
+                Board[SquareOutsideFence[Index__]]:=Board[SquareOutsideFence[Index__]] or FLAG_PLAYER_REACHABLE_SQUARE; {highlight the squares which must be reachable by the player}
 
                 i:=SquaresOutsideFenceIndex[Index__];
                 if i=0 then begin
@@ -3590,8 +3590,10 @@ begin {$I-}
                    if k<>0 then begin
                       s:=s+' or the squares:';
                       for j:=1 to SquaresOutsideFence[i] do
-                          if SquaresOutsideFence[i+j]<>SquareOutsideFence[Index__] then {'True': the 'outside-fence' square from the list is different from the memoized 'outside-fence' square found in 'SquareOutsideFence[]' for this deadlock}
+                          if SquaresOutsideFence[i+j]<>SquareOutsideFence[Index__] then begin {'True': the 'outside-fence' square from the list is different from the memoized 'outside-fence' square found in 'SquareOutsideFence[]' for this deadlock}
                              s:=s+SPACE+LEFT_BRACKET+SquareToColRowAsText(SquaresOutsideFence[i+j])+RIGHT_BRACKET;
+                             Board[SquaresOutsideFence[i+j]]:=Board[SquaresOutsideFence[i+j]] or FLAG_PLAYER_REACHABLE_SQUARE; {highlight the squares which must be reachable by the player}
+                             end;
                       end;
                    end;
                 end;
@@ -7776,7 +7778,7 @@ XX              of them is a box on a non-goal square. The non-wall
       InitializeSquareColors;
       DeadlockSetCandidate__.GoalCount:=0;
 
-      if   DeadlockSetCandidate__.SquareOutsideFence>=0 then {'True': reset the existing value; this is the normal case where the square outside the fence only is calculated and valid during the call to 'CommitDeadlockSet'}
+      if   DeadlockSetCandidate__.SquareOutsideFence>=0 then {'True': reset the existing value; this is the normal case where the square outside the fence is calculated and valid during the call to 'CommitDeadlockSet' only}
            DeadlockSetCandidate__.SquareOutsideFence:=0
       else DeadlockSetCandidate__.SquareOutsideFence:=Abs(DeadlockSetCandidate__.SquareOutsideFence); {use the existing absolute value}
       if   DeadlockSetCandidate__.SquaresOutsideFence.Count>=0 then {'True': reset the existing value; this is the normal case where squares outside a fenced-in area only are calculated and valid during the call to 'CommitDeadlockSet'}
@@ -7838,9 +7840,9 @@ XX              of them is a box on a non-goal square. The non-wall
                             (Squares[SquareNo]<TimeStamp) then {a floor square which the player cannot reach}
                             VisitFloor(SquareNo, False);
 
-                   Include(DeadlockSetCandidate__.Flags,dsfHasDisconnectedInnerFloors);
-                   Include(DeadlockSetCandidate__.Flags,dsfHasUnspecifiedInnerFloors);
-                   end
+                     Include(DeadlockSetCandidate__.Flags,dsfHasDisconnectedInnerFloors);
+                     Include(DeadlockSetCandidate__.Flags,dsfHasUnspecifiedInnerFloors);
+                     end
                 else
                    for SquareNo := 0 to Game.BoardSize do
                        if DeadlockSetCandidate__.SquareColors[ SquareNo ] =  scWhite then
@@ -8480,7 +8482,7 @@ XX              of them is a box on a non-goal square. The non-wall
         {   where all boxes are located at goal-positions;                                        }
         const PLAYER_START_SQUARE_COLORS:array[TCheckType] of TSquareColor =(scWhite,scLightGray,scWhite); {'white': outside floor; 'light gray': inner floor}
               SMALL_PLAYER_ACCESS_AREA_LIMIT=8;
-        var   i,j,BackJumpDepth,DepthOffset,MaximumSearchDepth,
+        var   i,j,BackJumpDepth,DepthOffset,MaximumSearchDepth,MinimumRepetitionDepth,
               PlayerReachableSquaresCount,PlayerOutsideFenceReachableSquaresCount:Integer;
               Frontier:TBoardSquareSet;
               PeeledOffBoxes:TBoxNumberSet;
@@ -8695,7 +8697,7 @@ XX              of them is a box on a non-goal square. The non-wall
               end;
           end;
 
-          function  IsADuplicatePosition(Depth__,PlayerPos__:Integer):Boolean;
+          function  IsADuplicatePosition(Depth__,PlayerPos__:Integer; var {io:} MinimumRepetitionDepth__:Integer):Boolean;
           {this function belongs inside the following 'Search()' function,
            but that exceeds the maximum nesting level for some versions of the
            FPC Pascal compiler;
@@ -8734,6 +8736,8 @@ XX              of them is a box on a non-goal square. The non-wall
                                   end
                              else break; {fail, i.e., not a duplicate position on the path}
                              end;
+                         if Result and (i<MinimumRepetitionDepth__) then
+                            MinimumRepetitionDepth__:=i;
                          end
                       end
                    else break; {done, i.e., found a duplicate position on the path}
@@ -8819,9 +8823,42 @@ XX              of them is a box on a non-goal square. The non-wall
           end;
 
           function  AddGamePositionToLocalTranspositionTable( Depth__, PlayerPos__ : Integer ) :Integer;
-          var i{, OriginalPlayerPos} : Integer;
+          var i{, b, g, oPlayerPos} : Integer;
           begin { stores the current game position in the local transposition table;
                   precondition: the current game position is a deadlock;}
+{
+            if CheckType__=ctCheckPushes then with Game do begin
+               oPlayerPos:=Game.PlayerPos;
+               MovePlayer(PlayerPos__);
+               LogFile.FileName:=LogFile.TrueFileName;
+
+               b:=BoxCount;
+               for i:=1 to BoxCount do
+                   if BoxPos[i]<=0 then Dec(b);
+               g:=GoalCount;
+               i:=GoalCount;
+               while (g>b) and (i>0) do begin
+                 if (Board[GoalPos[i]] and BOX)=0 then begin
+                    Board[GoalPos[i]]:=Board[GoalPos[i]] and (not Goal);
+                    Dec(g);
+                    end;
+                 Dec(i);
+                 end;
+
+               //if Game.HashValue=7262103337051493141 then begin
+               //   ShowBoard;
+               //   Writeln('**** **** **** Deadlock ', Depth__,SPACE,PlayerPos__,SPACE,oPlayerPos,SPACE,Game.HashValue);
+               //   Readln;
+               //   end;
+
+               WriteBoardToLogFile(Game.Title+SPACE+IntToStr(PlayerPos__)+SPACE+IntToStr(Game.HashValue),0);
+               for i:=1 to GoalCount do
+                   Board[GoalPos[i]]:=Board[GoalPos[i]] or Goal;
+               WritelnToLogFile('');
+               LogFile.FileName:='';
+               MovePlayer(oPlayerPos);
+               end;
+}
             Result := Game.HashValue and High( Game.DeadlockSets.TranspositionTable );
             with Game.DeadlockSets.TranspositionTable[ Result ] do begin
               PlayerPos                  := PlayerPos__; {normalized player position}
@@ -8851,8 +8888,8 @@ XX              of them is a box on a non-goal square. The non-wall
 }
           end;
 
-          function  Search(Depth__:Integer; var BackJumpDepth__:Integer):Boolean; {returns 'True' on deadlock}
-          var i,BoxNo,BoxToSquareNo,LastPushedBoxNo,OriginalPeeledOffBoxesCount,OriginalPlayerPos,SquareNo,SuccessorDepth:Integer;
+          function  Search(Depth__:Integer; var {o:} BackJumpDepth__, {io:} MinimumRepetitionDepth__:Integer):Boolean; {returns 'True' on deadlock}
+          var i,BoxNo,BoxToSquareNo,LastPushedBoxNo,OriginalPeeledOffBoxesCount,OriginalPlayerPos,SquareNo,SuccessorDepth,MinimumRepetitionDepthForSuccessorMoves:Integer;
               HasLegalSuccessorMoves:Boolean;
               Direction:TDirection;
               //s:String;
@@ -8888,9 +8925,9 @@ XX              of them is a box on a non-goal square. The non-wall
                PeelOffBoxes(Depth__,DeadlockSetCandidate__.EscapedBoxesCountDown,BoxesOnBoardCount,PeeledOffBoxes);
                end;
 
-            Result:=((Game.SimpleLowerBound<>0) {'True': some boxes on the board are not located at goal squares}
+            Result:=((Game.SimpleLowerBound<>0)                                 {'True': some boxes on the board are not located at goal squares}
                      or
-                     (//False                                                   {'False': don't test for deadlocks with with all boxes at goal squares and unreachable unfilled goal squares}
+                     (//False                                                   {'False': don't test for deadlocks with all boxes at goal squares and unreachable unfilled goal squares}
                       //and
                       (BoxesOnBoardCount>0)
                       and
@@ -8901,19 +8938,19 @@ XX              of them is a box on a non-goal square. The non-wall
                      )
                     )
                     and
-                    (Depth__<MaximumSearchDepth) {if the search goes to deep, then be conservative and reject the deadlock-set}
+                    (Depth__<MaximumSearchDepth) {if the search depth exceeds a maximum, then be conservative and reject the deadlock-set}
                     and
-                    (Depth__+DepthOffset<MAX_HISTORY_BOX_MOVES) {range check for calculating the player's reachable squares; '<': ensure that the successor depth is valid;}
+                    (Depth__+DepthOffset<MAX_HISTORY_BOX_MOVES) {range check for calculating the player's reachable squares; '<': ensure that the successor depth is valid}
                     and
                     (Game.DeadlockSets.CandidatePushCount<=MAX_DEADLOCK_SET_CANDIDATE_PUSH_COUNT) {fallback stop criterion}
                     and
                     (Solver.SearchLimits.DepthLimit>=0); {'True': the solver hasn't been terminated}
 {
 //                  if Solver.PushCount=755 then if (Game.DeadlockSets.CandidatePushCount mod 10000) = 0
-                    if (Game.DeadlockSets.SequenceNo>=759)
+//                  if (Game.DeadlockSets.SequenceNo>=759)
 //                  if True
 //                  if (dsfPeelOffNonCorralBoxes in DeadlockSetCandidate__.Flags) and (Solver.PushCount>=0)
-//                  if Game.Board[MAX_BOARD_SIZE]=FLOOR //then
+                    if Game.Board[MAX_BOARD_SIZE]=FLOOR //then
                        //if ((Game.DeadlockSets.CandidatePushCount mod 1000000) = 0) or (Depth__ >= MaximumSearchDepth) or (Game.DeadlockSets.CandidatePushCount > MAX_DEADLOCK_SET_CANDIDATE_PUSH_COUNT)
                           then begin
                           ShowBoard;
@@ -8921,6 +8958,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                Write('Forward ')
                           else Write('Backward ');
                           Write(Depth__,SPACE,BackJumpDepth__,SPACE,Game.DeadlockSets.CandidatePushCount,SPACE,Solver.PushCount,SPACE,Game.HashValue);
+                          Writeln; 
                           Readln(s);
                           if s<>'' then
                              Game.Board[MAX_BOARD_SIZE]:=WALL;
@@ -8929,6 +8967,8 @@ XX              of them is a box on a non-goal square. The non-wall
             if Result then begin
                SuccessorDepth              := Succ( Depth__ );
                BackJumpDepth__             := MAX_DEADLOCK_SEARCH_DEPTH + 1;    {initialize to chronological backtracking}
+               MinimumRepetitionDepthForSuccessorMoves
+                                           := MAX_DEADLOCK_SEARCH_DEPTH + 1;
                HasLegalSuccessorMoves      := False;                            {no legal successor moves have been found yet}
                LastPushedBoxNo             := Game.DeadlockSets.History[ Depth__ ].BoxNo;
                if   LastPushedBoxNo        <> 0 then                            {'True': first expand the last pushed box to increase the chances of finding an early escape from a fenced-in area for that box}
@@ -9010,7 +9050,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                            DoPush(BoxNo,Direction,SuccessorDepth+DepthOffset); {do the move, i.e., update the board}
                                            CalculatePlayersReachableSquares(SuccessorDepth+DepthOffset); {note that the results from this calculation are passed on to the recursive call}
 
-                                           if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos) then begin
+                                           if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos,MinimumRepetitionDepthForSuccessorMoves) then begin
                                               {update the game history, i.e., the current path}
                                               Game.DeadlockSets.History[SuccessorDepth].BoxNo:=BoxNo;
                                               for i:=1 to Game.BoxCount do Game.DeadlockSets.History[SuccessorDepth].BoxPos[i]:=Game.BoxPos[i];
@@ -9018,7 +9058,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                               Game.DeadlockSets.History[SuccessorDepth].PlayerPos:=Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos;
 
                                               //Inc( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
-                                              Result:=Search(SuccessorDepth,BackJumpDepth__); {recursive step: explore the new position}
+                                              Result:=Search(SuccessorDepth,BackJumpDepth__,MinimumRepetitionDepthForSuccessorMoves); {recursive step: explore the new position}
                                               //Dec( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
                                               end;
 
@@ -9027,6 +9067,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
                                         if Result and (BackJumpDepth__=Depth__) then begin {'True': the box can escape the fenced-in area after zero or more pushes starting from its current position}
                                            BackJumpDepth__ := MAX_DEADLOCK_SEARCH_DEPTH + 1; {re-initialize the backjump depth to exhaustive search}
+                                           MinimumRepetitionDepthForSuccessorMoves := MAX_DEADLOCK_SEARCH_DEPTH + 1;
 
                                            {remove the box from the board and try a search with the remaining boxes}
                                            RemoveBoxFromBoard(BoxNo);           {remove the box from the board}
@@ -9041,7 +9082,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
                                            CalculatePlayersReachableSquares(SuccessorDepth+DepthOffset); {note that the results from this calculation are passed on to the recursive call}
 
-                                           if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos) then begin
+                                           if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos,MinimumRepetitionDepthForSuccessorMoves) then begin
                                               Game.DeadlockSets.History[SuccessorDepth].BoxNo:=0; {removing the box from the board is a "null-move"}
                                               Game.DeadlockSets.History[SuccessorDepth].BoxPos[BoxNo]:=0;
                                               Game.DeadlockSets.History[SuccessorDepth].HashValue:=Game.HashValue;
@@ -9049,7 +9090,8 @@ XX              of them is a box on a non-goal square. The non-wall
                                                 Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos; {update the normalized player position now that the box has been removed from the board}
 
                                               //Inc( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
-                                              Result:=Search(SuccessorDepth,BackJumpDepth__); {recursive step: explore the new position; note that if 'Result' is 'True' then 'BackJumpDepth__' has been properly initialized so the search continues}
+                                              {recursive step: explore the new position; note that if 'Result' is 'True' then 'BackJumpDepth__' has been properly initialized so the search continues}
+                                              Result:=Search(SuccessorDepth,BackJumpDepth__,MinimumRepetitionDepthForSuccessorMoves);
                                               //Dec( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
                                               end;
 
@@ -9087,7 +9129,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
                                      CalculatePlayersReachableSquares(SuccessorDepth+DepthOffset); {note that the results from this calculation are passed on to the recursive call}
 
-                                     if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos) then begin
+                                     if not IsADuplicatePosition(SuccessorDepth,Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos,MinimumRepetitionDepthForSuccessorMoves) then begin
                                         if   CheckType__=ctCheckPulls then
                                              Result:=(not (dsfPlayerIsInsideSet in DeadlockSetCandidate__.Flags)) and
                                                      (not PlayerHasAccessToAnOuterSquare(SuccessorDepth+DepthOffset))
@@ -9103,7 +9145,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                            Game.DeadlockSets.History[SuccessorDepth].PlayerPos:=Solver.SearchStates[SuccessorDepth+DepthOffset].PlayersReachableSquares.MinPlayerPos;
                                            //Inc( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
 
-                                           Result:=Search(SuccessorDepth,BackJumpDepth__); {recursive step: explore the new position}
+                                           Result:=Search(SuccessorDepth,BackJumpDepth__,MinimumRepetitionDepthForSuccessorMoves); {recursive step: explore the new position}
 
                                            //Dec( PathPositionsBloomFilter[ Byte( Game.HashValue ) ] );
                                            end;
@@ -9121,48 +9163,54 @@ XX              of them is a box on a non-goal square. The non-wall
                       end
                    else break;                                                  {quick-and-dirty exit the boxes loop when it has been proved that the position isn't a deadlock}
 
-               if  Result and                                                   {'True': it's a deadlock position unless there is a backjump to this or a lower search depth}
-                   ( BackJumpDepth__            >  Depth__ ) and
-                   ( True
-                     or
-                     ( BoxesOnBoardCount        <= MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS ) {'1..MAX': reserve the transposition table for positions with few boxes; they are more likely to be subsets of other box constellations}
-                     or
-                     ( not HasLegalSuccessorMoves ) ) then                      {'True': a dead-end position with no successor moves; add it to the transposition table no matter how many boxes there are left on the board}
-                   AddGamePositionToLocalTranspositionTable(Depth__,Game.DeadlockSets.History[ Depth__ ].PlayerPos);
+               if Result then begin
+                  if   MinimumRepetitionDepthForSuccessorMoves <= Depth__ then begin
+                       if MinimumRepetitionDepthForSuccessorMoves < MinimumRepetitionDepth__ then
+                          MinimumRepetitionDepth__:= MinimumRepetitionDepthForSuccessorMoves;
+                       end
+                  else if ( BackJumpDepth__       > Depth__ ) and
+                          ( Depth__               > 0       ) and
+                          ( Game.SimpleLowerBound > 0       ) and
+                          ( True
+                            or
+                            ( BoxesOnBoardCount   <= MAX_BOX_COUNT_FOR_TRANSPOSITION_TABLE_POSITIONS ) {'1..MAX': reserve the transposition table for positions with few boxes; they are more likely to be subsets of other box constellations}
+                             or
+                             ( not HasLegalSuccessorMoves ) ) then              {'True': a dead-end position with no successor moves; add it to the transposition table no matter how many boxes there are left on the board}
+                          AddGamePositionToLocalTranspositionTable(Depth__,Game.DeadlockSets.History[ Depth__ ].PlayerPos);
 
-               if  Result and                                                   {'True': it's a deadlock position unless there is a backjump to this or a lower search depth}
-                   (not HasLegalSuccessorMoves) and                             {'True': a dead-end position, i.e., there are no legal successor moves}
-                   ( CheckType__                =  ctCheckPushes ) and
-                   ( BackJumpDepth__            >  Depth__ ) then begin
-                   if ( Game.SimpleLowerBound   <> 0 ) or ( BoxesOnBoardCount = 0 ) then begin {'True': it's not a position with one or more boxes on the board, with all boxes at goal squares}
-                      if ( Game.DeadlockSets.History[ Depth__ ].BoxNo = 0 ) then begin {the current position is a deadlock; backtrack to the point where the last of the remaining boxes on the board was pushed}
-                         while ( Depth__        >  0 ) and
-                               ( Game.BoxPos[ Game.DeadlockSets.History[ Depth__ ].BoxNo ] = 0 ) do {'0': a box was removed from the board at the preceding search depth}
-                               Dec( Depth__ );
-                         if Depth__             >  0 then
-                            BackJumpDepth__     := -Depth__;                    {'-Depth': the position at '-Depth' is a deadlock; the higher search depths has just peeled boxes off the board}
+                  if  (not HasLegalSuccessorMoves) and                          {'True': a dead-end position, i.e., there are no legal successor moves}
+                      ( CheckType__                =  ctCheckPushes ) and
+                      ( BackJumpDepth__            >  Depth__ ) then begin
+                      if ( Game.SimpleLowerBound   <> 0 ) or ( BoxesOnBoardCount = 0 ) then begin {'True': it's not a position with one or more boxes on the board, with all boxes at goal squares}
+                         if ( Game.DeadlockSets.History[ Depth__ ].BoxNo = 0 ) then begin {the current position is a deadlock; backtrack to the point where the last of the remaining boxes on the board was pushed}
+                            while ( Depth__        >  0 ) and
+                                  ( Game.BoxPos[ Game.DeadlockSets.History[ Depth__ ].BoxNo ] = 0 ) do {'0': a box was removed from the board at the preceding search depth}
+                                  Dec( Depth__ );
+                            if Depth__             >  0 then
+                               BackJumpDepth__     := -Depth__;                 {'-Depth': the position at '-Depth' is a deadlock; the higher search depths have just peeled off boxes from the board}
+                            end;
+                         end
+                      else begin
+                         {a position with one or more boxes on the board, and with
+                          all boxes located at goal squares; there are no legal
+                          successor moves;}
+                         if   (dsIsAGameStateDeadlockCandidate in DeadlockSetCandidate__.Flags)
+                              and
+                              (BoxesOnBoardCount >= FROZEN_GOALS_PATTERN_THRESHOLD)
+                              //and
+                              //BoardHasEmptyGoalSquaresUnreachableForThePlayer(Depth__+DepthOffset) {'True': there are empty goal squares on the board which the player cannot reach}
+                              {when there are empty goal squares which the player
+                               cannot reach, then these goals can only be filled by
+                               pushing some of the boxes further, even though all
+                               boxes currently are located at goal squares}
+                              then begin
+                              CalculateFreezeDeadlocks(Depth__+DepthOffset);
+                              DeadlockSetCandidate__.SquareOutsideFence := 0;   {'0': otherwise, the calling function 'CheckDeadlockSetCandidate' considers the deadlock candidate a deadlock if the player is located at this square}
+                              end;
+                         Result := False;                                       {'False': all boxes are located at goal squares, hence, the position isn't a deadlock}
                          end;
-                      end
-                   else begin
-                      {a position with one or more boxes on the board, and with
-                       all boxes located at goal squares; there are no legal
-                       successor moves;}
-                      if   (dsIsAGameStateDeadlockCandidate in DeadlockSetCandidate__.Flags)
-                           and
-                           (BoxesOnBoardCount >= FROZEN_GOALS_PATTERN_THRESHOLD)
-                           //and
-                           //BoardHasEmptyGoalSquaresUnreachableForThePlayer(Depth__+DepthOffset) {'True': there are empty goal squares on the board which the player cannot reach}
-                           {when there are empty goal squares which the player
-                            cannot reach, then these goals can only be filled by
-                            pushing some of the boxes further, even though all
-                            boxes currently are located at goal squares}
-                           then begin
-                           CalculateFreezeDeadlocks(Depth__+DepthOffset);
-                           DeadlockSetCandidate__.SquareOutsideFence := 0;      {'0': otherwise, the calling function 'CheckDeadlockSetCandidate' considers the deadlock candidate a deadlock if the player is located at this square}
-                           end;
-                      Result := False;                                          {'False': all boxes are located at goal squares, hence, the position isn't a deadlock}
                       end;
-                   end;
+                  end;
                end;
             if OriginalPeeledOffBoxesCount<PeeledOffBoxes.Count then begin
                repeat                                                           {put boxes back on board which has been peeled off because the player can push them back and forth}
@@ -9178,7 +9226,7 @@ XX              of them is a box on a non-goal square. The non-wall
           end; {Search}
 
         function  PeelOffUnnecessaryBoxes:Boolean;
-        var BoxNo,BackJumpDepth,Count,FloorCount,SquareNo:Integer;
+        var BoxNo,BackJumpDepth,Count,FloorCount,SquareNo,MinimumRepetitionDepth:Integer;
             DeadlockPosition:PPosition;
             //s:String;
         begin {PeelOffUnnecessaryBoxes: removes boxes which don't contribute to the forward search deadlock for the position}
@@ -9222,8 +9270,10 @@ XX              of them is a box on a non-goal square. The non-wall
                  MovePlayer(GamePlayerPos);
                  CalculatePlayersReachableSquares(DepthOffset); {calculate the player's access area for the current game state, taking into account that this function may have removed boxes}
                  InitializeTranspositionTable;
+                 MinimumRepetitionDepth:=MAX_DEADLOCK_SEARCH_DEPTH + 1;
+
                  TimeCheck; {check the time limit, if any}
-                 Result:=Search(0,BackJumpDepth); {use the recursive search procedure to explore the possible moves}
+                 Result:=Search(0,BackJumpDepth,MinimumRepetitionDepth); {use the recursive search procedure to explore the possible moves}
                  if not Result then begin {the box is necessary for the deadlock}
                     PutBoxOnBoard(BoxNo,SquareNo); {put the box back on the board}
                     Inc(DeadlockSetCandidate__.EscapedBoxesCountDown); {restore the number of escaped boxes}
@@ -9306,16 +9356,20 @@ XX              of them is a box on a non-goal square. The non-wall
 
         begin {Check}
 {
-          if Game.DeadlockSets.SequenceNo = 792 then begin //148 then
-             if Game.DeadlockSets.Count >= 753 then
-             //if CheckType__= ctCheckPushes then
-                //if Game.HashValue = 3767143639058340985 then //6936261288664917473 then
-                   Game.Board[MAX_BOARD_SIZE]:=FLOOR;
-             end;
+          //if Game.DeadlockSets.SequenceNo = 792 then begin //148 then
+          //   if Game.DeadlockSets.Count >= 753 then
+          //   //if CheckType__= ctCheckPushes then
+          //      //if Game.HashValue = 3767143639058340985 then //6936261288664917473 then
+          //         Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+          //   end;
           //else Game.Board[MAX_BOARD_SIZE]:=WALL;
-          if   (Game.HashValue=3767143639058340985) and (Game.DeadlockSets.Count>=753) then
-               Game.Board[MAX_BOARD_SIZE]:=FLOOR;
+//        if   (Game.HashValue=3851218898626682731) and (Game.DeadlockSets.Count>=0) then
+//             Game.Board[MAX_BOARD_SIZE]:=FLOOR;
           //else Game.Board[MAX_BOARD_SIZE]:=WALL;
+          if   (Game.HashValue=957160080976304966) and
+               (Positions.DebugHashValueIndex=20) and (Game.DeadlockSets.Count>=0) and (CheckType__=ctCheckPushes) then
+               Game.Board[MAX_BOARD_SIZE]:=FLOOR
+          else Game.Board[MAX_BOARD_SIZE]:=WALL;
 
 }
           Result:=Game.SimpleLowerBound<>0;
@@ -9347,7 +9401,8 @@ XX              of them is a box on a non-goal square. The non-wall
                      MovePlayer(GamePlayerPos);
                      CalculatePlayersReachableSquares(DepthOffset);
                      InitializeTranspositionTable;
-                     Result:=Search(0,BackJumpDepth) and                        {use the recursive search procedure to explore the possible moves}
+                     MinimumRepetitionDepth:=MAX_DEADLOCK_SEARCH_DEPTH + 1;
+                     Result:=Search(0,BackJumpDepth,MinimumRepetitionDepth) and {use the recursive search procedure to explore the possible moves}
                              PeelOffUnnecessaryBoxes;                           {remove boxes which don't contribute to the deadlock}
 
                      if Result then                                             {'True': the boxes currently on the board constitute a forward pushing deadlock; don't validate is again;}
@@ -9397,7 +9452,8 @@ XX              of them is a box on a non-goal square. The non-wall
                                     end
                                  else begin
                                     InitializeTranspositionTable;
-                                    Result:=Search(0,BackJumpDepth);            {use the recursive search procedure to explore the possible moves}
+                                    MinimumRepetitionDepth := MAX_DEADLOCK_SEARCH_DEPTH + 1;
+                                    Result:=Search(0,BackJumpDepth,MinimumRepetitionDepth); {use the recursive search procedure to explore the possible moves}
                                     end;
 
                                  if (Position__<>nil) and
@@ -9445,7 +9501,8 @@ XX              of them is a box on a non-goal square. The non-wall
                                             MovePlayer(i); {put the player back at the correct square}
                                             CheckType__:=ctCheckPullsPaintThePlayerIntoACorner;
                                             InitializeTranspositionTable;
-                                            Result:=Search(0,BackJumpDepth);
+                                            MinimumRepetitionDepth := MAX_DEADLOCK_SEARCH_DEPTH + 1;
+                                            Result:=Search(0,BackJumpDepth,MinimumRepetitionDepth);
                                             CheckType__:=ctCheckPushes;
 {
                                             if Result then begin
@@ -9489,7 +9546,8 @@ XX              of them is a box on a non-goal square. The non-wall
                               CalculatePlayersReachableSquares(DepthOffset);
                               if Squares[DeadlockSetCandidate__.CenterSquare]<>TimeStamp then begin {'True': a floor square inside the set, but not in the same access area as the center square}
                                  InitializeTranspositionTable;
-                                 Result:=Search(0,BackJumpDepth);
+                                 MinimumRepetitionDepth := MAX_DEADLOCK_SEARCH_DEPTH + 1;
+                                 Result:=Search(0,BackJumpDepth,MinimumRepetitionDepth);
                                  if not Result then
                                     break; {quick-and-dirty exit the loop when it's known that there is a chance, the player can push a box from the inside to the outside}
                                  end;
@@ -9565,7 +9623,7 @@ XX              of them is a box on a non-goal square. The non-wall
            or
            (DeadlockSetCandidate__.SquareOutsideFence<>0) then                  {'True': the candidate is a deadlock if the player starts from its current access area (from the 'SquareOutsideFence' square)}
            if   Check(ctCheckPulls,i) then begin                                {'True': the player cannot break the fence by pulling boxes from the inside}
-                if not Result then begin                                        {'True': the candidate has only been proven to be a deadlock when the player when the player is in the access area represented by 'SquareOutsideFence'}
+                if not Result then begin                                        {'True': the candidate has only been proven to be a deadlock when the player is in the access area represented by 'SquareOutsideFence'}
                    Include(DeadlockSetCandidate__.Flags,dsfPlayerMustBeOutsideSet);
                    Include(DeadlockSetCandidate__.Flags,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence); {it's only a deadlock when the player is in the access area represented by 'SquareOutsideFence'}
 
@@ -9938,7 +9996,7 @@ XX              of them is a box on a non-goal square. The non-wall
             if (not (dsfIsANoProgressDeadlockCandidate in DeadlockSetCandidate__.Flags))
                or
                (dsIsAGameStateDeadlockCandidate in DeadlockSetCandidate__.Flags)
-               then begin {'True': it's not a no-progress deadlock candidate with box positions not matching match the current game state; check for forced pushes}
+               then begin {'True': it's not a no-progress deadlock candidate with box positions which don't match the current game state; check for forced pushes}
                while (Position__<>nil) and {search for the push leading to the current deadlock state}
                      (DeadlockSetCandidate__.SquareColors[Game.BoxPos[Position__^.Move.BoxNo]]<>scDarkGray) do
                      Position__:=Position__^.Parent;
@@ -10228,7 +10286,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                  fenced-in area;
                                  invalidate the deadlock-set candidate
                                 }
-                                DeadlockSetCandidate__.GoalCount:=Game.BoxCount+2; {'+2': so the count still is too high if the call below to 'RemoveSquareFromDeadlockSet()' substracts 1 from the count}
+                                DeadlockSetCandidate__.GoalCount:=Game.BoxCount+4; {'+4': so the count still is too high if the calls below to 'RemoveSquareFromDeadlockSet()' reduce the count}
                         end;
 
                     SquareNo:=i-Game.SquareOffsetForward[Direction]+Game.SquareOffsetLeft [Direction];
@@ -10251,7 +10309,7 @@ XX              of them is a box on a non-goal square. The non-wall
                     if Direction<=Succ(Low(Direction)) then                     {caution: 'Succ(Low...'): assumes 4 directions only}
                        CommitDeadlockSet(True,False,False,Result);
 
-                    if (not IsALegalAndBoxReachableSquare(RelativeSquareNo(i,1,1,Direction)))
+                    if (not IsALegalAndBoxReachableSquare(RelativeSquareNo(i,1, 1,Direction)))
                        and
                        IsALegalAndBoxReachableSquare     (RelativeSquareNo(i,1,-1,Direction))
                        and
@@ -10265,6 +10323,14 @@ XX              of them is a box on a non-goal square. The non-wall
                        and
                        (not IsALegalAndBoxReachableSquare(RelativeSquareNo(i,1,-3,Direction))) then
                        with DeadlockSetCandidate__ do begin
+                         {add an extension of a "Double-L"; an example:
+                            #
+                             #      [1,-3]   : a floor square which isn't a valid box-reachable square, here a non-goal corner square
+                           %%       [0..1,-2]: valid box-reachable floor squares
+                          %#        [0,-1]   : a wall square
+                          % %       [0, 0]   : 'i' is the floor square between "% %"
+                           %#       [1, 1]   : not a valid box-reachable square, here a wall square
+                         }
                          RemoveSquareFromDeadlockSet     (RelativeSquareNo(i,1,-1,Direction));
                          AddSquareToDeadlockSet          (RelativeSquareNo(i,1,-2,Direction));
                          AddSquareToDeadlockSet          (RelativeSquareNo(i,0,-2,Direction));
@@ -10272,7 +10338,22 @@ XX              of them is a box on a non-goal square. The non-wall
                          //Game.Board[MAX_BOARD_SIZE]:=FLOOR; {'FLOOR': debug the search}
                          CommitDeadlockSet(True,False,False,Result);
                          //Game.Board[MAX_BOARD_SIZE]:=WALL;
-                         end;
+                         end
+                    else if IsADoorSquare(i) and
+                            IsAWallSquare(i+Game.SquareOffsetForward[Direction]) and
+                            IsAWallSquare(i-Game.SquareOffsetForward[Direction]) and
+                            IsALegalAndBoxReachableSquare(i-Game.SquareOffsetForward[Direction]+Game.SquareOffsetRight[Direction]) then
+                            with DeadlockSetCandidate__ do begin
+                              {add a deadlock closely related to a "Double-L"; an example:
+                               %%
+                               # #       [ 0,0]   : 'i' is the floor square between "# #", a door square
+                               %%        [-1,1]   : a valid box-reachable floor square
+                              }
+                              RemoveSquareFromDeadlockSet     (i+Game.SquareOffsetForward[Direction]+Game.SquareOffsetRight[Direction]); {relative position [ 1,1]}
+                              AddSquareToDeadlockSet          (i-Game.SquareOffsetForward[Direction]+Game.SquareOffsetRight[Direction]); {relative position [-1,1]}
+                              EscapedBoxesCountDown:=Boxes.Count; {all boxes must escape the fenced-in area; otherwise it's a deadlock}
+                              CommitDeadlockSet(True,False,False,Result);
+                              end;
                     end;
     end;
 
@@ -10467,7 +10548,7 @@ XX              of them is a box on a non-goal square. The non-wall
                       if IsAFreezingMove(0,OppositeNeighborSquare) then OppositeNeighborSquare:=0;
                       Dec(Game.Board[Square],BOX);
 }
-                      if IsAGateSquare(Square) then begin                       {'True': this is a gate square that separates the board in 2 separate rooms}
+                      if IsAGateSquare(Square) then begin                       {'True': this is a gate square which separates the board in 2 separate rooms}
                          for BoxNo:=1 to Game.BoxCount do Inc(Game.Board[Game.BoxPos[BoxNo]],BOX); {put boxes back on the board for correct capacity calculation}
 
                          if NeighborSquare<>0 then begin
@@ -15682,8 +15763,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_DEADLOCK_TAG)
           else {the corral could not be proved to be a deadlock at creation}
                {time; the search may later hit a dead end with this corral on}
-               {the board; at that time it's tested once again if the corral}
-               {now is a deadlock (new deadlock-sets can help finding a proof);}
+               {the board; at that time it's tested once more if the corral is}
+               {a deadlock (new deadlock-sets might help finding a proof);}
                {to that end, the 'open' tag is added here to signal that the}
                {second attempt hasn't been performed yet}
                Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_OPEN_TAG);
@@ -18768,7 +18849,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
            end;
 }
 {
-      if Solver.PushCount>=121 then begin
+      if Solver.PushCount>=12 then begin
          ShowBoard;
          Writeln(Game.DeadlockSets.PathDeadlockCount);
          Write('Depth: ',Position^.PushCount,' Score: ',Position^.Score,'    Pushes: ',Solver.PushCount,' Positions: ',Positions.Count,' Open: ',Positions.OpenPositions.Count);
@@ -21597,7 +21678,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                    ((Game.Board[NeighborSquareNo+Game.SquareOffsetForward[Direction]] and (WALL+BOX))=0) and
                    ((Game.SimpleLowerBound=0)                                   {for solutions, the player's access-area doesn't matter}
                     or
-                    (Squares[NeighborSquareNo]>TimeStamp)                       {for an unsolved snapshot, the player must end it the proper access-area}
+                    (Squares[NeighborSquareNo]>TimeStamp)                       {for an unsolved snapshot, the player must end in the proper access-area}
                    )
                    then begin
                    MovePlayer(NeighborSquareNo);
@@ -27343,7 +27424,7 @@ end;
     {$IFDEF CONSOLE_APPLICATION}
       //Writeln('Tested games: ',Game.DeadlockSets.SessionTestedGamesCount);
       //Writeln('Optimizer time: ',Optimizer.TimeMS);
-      //Msg('Done','');   
+      //Msg('Done','');
     {$ELSE}
     {$ENDIF}
   end;
