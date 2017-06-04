@@ -67,20 +67,23 @@ var Col,Row,Index:Integer;
     GameAsPChar:PChar;
     GameAsText:String;
     ResultGameAsText:PChar;
+    ExceptionClass:JClass;
+    ExceptionExists:JBoolean;
 begin
   PEnv:=PEnv__;
   Obj:=Obj__;
-  BoardAsPChar:=(PEnv^^).GetStringUTFChars(PEnv, BoardAsJString__, nil);
-  BoardAsText:=BoardAsPChar;
-  (PEnv^^).ReleaseStringUTFChars(PEnv__, BoardAsJString__, BoardAsPChar);
-  GameAsPChar:=(PEnv^^).GetStringUTFChars(PEnv, GameAsJString__, nil);
-  GameAsText:=GameAsPChar;
-  (PEnv^^).ReleaseStringUTFChars(PEnv__, GameAsJString__, GameAsPChar);
+  try
+    BoardAsPChar:=(PEnv^^).GetStringUTFChars(PEnv, BoardAsJString__, nil);
+    BoardAsText:=BoardAsPChar;
+    (PEnv^^).ReleaseStringUTFChars(PEnv__, BoardAsJString__, BoardAsPChar);
+    GameAsPChar:=(PEnv^^).GetStringUTFChars(PEnv, GameAsJString__, nil);
+    GameAsText:=GameAsPChar;
+    (PEnv^^).ReleaseStringUTFChars(PEnv__, GameAsJString__, GameAsPChar);
 
-  SokobanStatus.Size:=SizeOf(TSokobanStatus);
-  if   (Width__ >=3) and (Width__ <=MAX_BOARD_WIDTH ) and
-       (Height__>=3) and (Height__<=MAX_BOARD_HEIGHT) then
-       if Cardinal(Length(BoardAsText))=Width__*Height__ then
+    SokobanStatus.Size:=SizeOf(TSokobanStatus);
+    if   (Width__ >=3) and (Width__ <=MAX_BOARD_WIDTH ) and
+         (Height__>=3) and (Height__<=MAX_BOARD_HEIGHT) then
+         if Cardinal(Length(BoardAsText))=Width__*Height__ then
                               try
                                    Positions.MemoryByteSize:=TransPositionTableSize__*1024*1024;
                                    if   TimeLimitS__ <> 0 then
@@ -194,9 +197,19 @@ begin
                                    else Result:=nil;
                               finally YASS.Finalize; // the plugin can and must be finalized, even if 'YASS.Initialize' failed
                               end
-       else
-          Result:=nil
-  else Result:=nil;
+         else
+            Result:=nil
+    else Result:=nil;
+  except
+    on E: Exception do begin
+      Result:=nil;
+      ExceptionClass:=(PEnv^^).FindClass(PEnv, 'java/lang/Exception');
+      ExceptionExists:=(PEnv^^).ExceptionCheck(PEnv);
+      if ExceptionExists <> 0 then
+          (PEnv^^).ExceptionClear(PEnv);
+      (PEnv^^).ThrowNew(PEnv, ExceptionClass, PChar(E.Message));
+      end;
+  end
 end;
 
 function Java_yass_YASSActivity_00024SolverTask_solve(
@@ -211,16 +224,19 @@ var Col,Row:Integer; InitializeErrorText:String;
     InitializePluginResult:TPluginResult;
     BoardAsPChar:PChar;
     BoardAsText:String;
+    ExceptionClass:JClass;
+    ExceptionExists:JBoolean;
 begin
   PEnv:=PEnv__;
   Obj:=Obj__;
-  BoardAsPChar:=(PEnv^^).GetStringUTFChars(PEnv, BoardAsJString__, nil);
-  BoardAsText:=BoardAsPChar;
-  (PEnv^^).ReleaseStringUTFChars(PEnv__, BoardAsJString__, BoardAsPChar);
+  try
+    BoardAsPChar:=(PEnv^^).GetStringUTFChars(PEnv, BoardAsJString__, nil);
+    BoardAsText:=BoardAsPChar;
+    (PEnv^^).ReleaseStringUTFChars(PEnv__, BoardAsJString__, BoardAsPChar);
 
-  SokobanStatus.Size:=SizeOf(TSokobanStatus);
-  if   (Width__ >=3) and (Width__ <=MAX_BOARD_WIDTH ) and
-       (Height__>=3) and (Height__<=MAX_BOARD_HEIGHT) then
+    SokobanStatus.Size:=SizeOf(TSokobanStatus);
+    if   (Width__ >=3) and (Width__ <=MAX_BOARD_WIDTH ) and
+         (Height__>=3) and (Height__<=MAX_BOARD_HEIGHT) then
        if Cardinal(Length(BoardAsText))=Width__*Height__ then
           try
                Positions.MemoryByteSize:=TransPositionTableSize__*1024*1024;
@@ -304,7 +320,17 @@ begin
           end
        else
           Result:=nil
-  else Result:=nil;
+    else Result:=nil;
+  except
+    on E: Exception do begin
+      Result:=nil;
+      ExceptionClass:=(PEnv^^).FindClass(PEnv, 'java/lang/Exception');
+      ExceptionExists:=(PEnv^^).ExceptionCheck(PEnv);
+      if ExceptionExists <> 0 then
+          (PEnv^^).ExceptionClear(PEnv);
+      (PEnv^^).ThrowNew(PEnv, ExceptionClass, PChar(E.Message));
+      end;
+  end
 end;
 
 procedure Java_yass_YASSActivity_00024SolverTask_terminate(
