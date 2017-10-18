@@ -45,7 +45,7 @@ begin
 end;
 
 {exported functions}
-function Java_yass_YASSActivity_00024SolverTask_optimize(
+function Java_yass_ProgressDialogFragment_00024SolverTask_optimize(
                  PEnv__:PJNIEnv;Obj__            : JObject;
                  Width__, Height__               : Cardinal;
                  BoardAsJString__                : JString;
@@ -57,7 +57,7 @@ function Java_yass_YASSActivity_00024SolverTask_optimize(
                  VicinityBox2__                  : Cardinal;
                  Optimization__                  : TOptimization
 ): JString; cdecl;
-{ Java JNI method yass.YASSActivity$SolverTask.optimize(...) }
+{ Java JNI method yass.ProgressDialogFragment$SolverTask.optimize(...) }
 var Col,Row,Index:Integer;
     IsASolution:Boolean=False;
     InitializeErrorText:String;
@@ -212,14 +212,14 @@ begin
   end
 end;
 
-function Java_yass_YASSActivity_00024SolverTask_solve(
+function Java_yass_ProgressDialogFragment_00024SolverTask_solve(
                  PEnv__:PJNIEnv;Obj__            : JObject;
                  Width__,Height__                : Cardinal;
                  BoardAsJString__                : JString;
                  TransPositionTableSize__        : Cardinal;
                  TimeLimitS__                    : Cardinal
                  ): JString; cdecl;
-{ Java JNI method yass.YASSActivity$SolverTask.solve(...) }
+{ Java JNI method yass.ProgressDialogFragment$SolverTask.solve(...) }
 var Col,Row:Integer; InitializeErrorText:String;
     InitializePluginResult:TPluginResult;
     BoardAsPChar:PChar;
@@ -333,18 +333,18 @@ begin
   end
 end;
 
-procedure Java_yass_YASSActivity_00024SolverTask_terminate(
+procedure Java_yass_ProgressDialogFragment_00024SolverTask_terminate(
                  PEnv__ : PJNIEnv;
                  Obj__  : JObject
                  ); cdecl;
-{ Java JNI method yass.YASSActivity$SolverTask.terminate() }
+{ Java JNI method yass.ProgressDialogFragment$SolverTask.terminate() }
 begin
   YASS.Terminate;
 end;
 
 exports
-  Java_yass_YASSActivity_00024SolverTask_optimize,
-  Java_yass_YASSActivity_00024SolverTask_solve,
-  Java_yass_YASSActivity_00024SolverTask_terminate;
+  Java_yass_ProgressDialogFragment_00024SolverTask_optimize,
+  Java_yass_ProgressDialogFragment_00024SolverTask_solve,
+  Java_yass_ProgressDialogFragment_00024SolverTask_terminate;
 begin
 end.

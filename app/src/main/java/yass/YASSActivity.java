@@ -3,15 +3,13 @@ package yass;
 import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
-import android.app.ProgressDialog;
+import android.app.FragmentManager;
 import android.content.ClipData;
-import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.SharedPreferences;
-import android.os.AsyncTask;
 import android.os.Bundle;
 import android.os.Handler;
 import android.preference.PreferenceManager;
@@ -19,7 +17,6 @@ import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
 import android.view.View;
-import android.view.WindowManager;
 import android.widget.EditText;
 import android.widget.ImageButton;
 import android.widget.TextView;
@@ -27,7 +24,7 @@ import android.widget.Toast;
 
 import net.sourceforge.sokobanyasc.joriswit.yass.R;
 
-public class YASSActivity extends Activity {
+public class YASSActivity extends Activity implements ProgressDialogFragment.SolverStatusUpdate {
 
     private static boolean mNativeLibLoaded = false;
 
@@ -39,6 +36,8 @@ public class YASSActivity extends Activity {
     private boolean mPlaybackPaused;
     private Board mPlaybackBoard;
     private int mPlaybackSolutionPosition = 0;
+
+    private static final String TAG_PROGRESS_DIALOG_FRAGMENT = "solver_progress_fragment";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -231,6 +230,7 @@ public class YASSActivity extends Activity {
 
     @Override
     protected void onSaveInstanceState(Bundle outState) {
+        super.onSaveInstanceState(outState);
         outState.putParcelable("board", mBoard);
         outState.putString("solution", mSolution);
     }
@@ -239,6 +239,9 @@ public class YASSActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updateToolbar();
+
+        FragmentManager fm = getFragmentManager();
+        mDialog = (ProgressDialogFragment) fm.findFragmentByTag(TAG_PROGRESS_DIALOG_FRAGMENT);
     }
 
     @Override
@@ -339,38 +342,41 @@ public class YASSActivity extends Activity {
         return null;
     }
 
-    private ProgressDialog mDialog;
-    private long mAvailMem;
+    private ProgressDialogFragment mDialog;
     private void startSolver(boolean optimizer) {
 
         if(mNativeLibLoaded) {
             ActivityManager activityManager = (ActivityManager) this.getSystemService(ACTIVITY_SERVICE);
             ActivityManager.MemoryInfo memInfo = new ActivityManager.MemoryInfo();
             activityManager.getMemoryInfo(memInfo);
-            mAvailMem = memInfo.availMem;
+            long availMem = memInfo.availMem;
+
+            SharedPreferences defaultSharedPreferences = PreferenceManager.getDefaultSharedPreferences(this);
+            int solverSearchTime = Integer.parseInt(defaultSharedPreferences.getString("solver_search_time", "600"));
+            int optimizerSearchTime = Integer.parseInt(defaultSharedPreferences.getString("optimizer_search_time", "3600"));
+            int optimizerOptimization = Integer.parseInt(defaultSharedPreferences.getString("optimizer_optimization", "1"));
+            int optimizerSearchMethodOrder = Integer.parseInt(defaultSharedPreferences.getString("optimizer_search_method_order", "0"));
+            int optimizerVicinitySearchBox1 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box1", 20);
+            int optimizerVicinitySearchBox2 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box2", 10);
 
             BoardView boardView = (BoardView) findViewById(R.id.view);
             boardView.setEnableEdit(false);
-            mDialog = new ProgressDialog(this);
-            if (!optimizer) {
-                mDialog.setMessage(getString(R.string.solving_initial_status_text));
-            } else {
-                mDialog.setMessage(getString(R.string.optimizing_initial_status_text));
-            }
-            mDialog.setProgressStyle(ProgressDialog.STYLE_SPINNER);
-            mDialog.setCancelable(true);
-            mDialog.setCanceledOnTouchOutside(false);
-            mDialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-            mDialog.setOnCancelListener(new DialogInterface.OnCancelListener() {
-                @Override
-                public void onCancel(DialogInterface dialog) {
-                    mSolverTask.stopSolver();
-                }
-            });
-            mDialog.show();
 
-            mSolverTask = new SolverTask();
-            mSolverTask.execute(mBoard, optimizer);
+            FragmentManager fm = getFragmentManager();
+            if (mDialog == null) {
+                mDialog = new ProgressDialogFragment();
+                mDialog.mBoard = mBoard;
+                mDialog.mSolution = mSolution;
+                mDialog.mOptimizer = optimizer;
+                mDialog.mAvailMem = availMem;
+                mDialog.mSolverSearchTime = solverSearchTime;
+                mDialog.mOptimizerSearchTime = optimizerSearchTime;
+                mDialog.mOptimizerOptimization = optimizerOptimization;
+                mDialog.mOptimizerSearchMethodOrder = optimizerSearchMethodOrder;
+                mDialog.mOptimizerVicinitySearchBox1 = optimizerVicinitySearchBox1;
+                mDialog.mOptimizerVicinitySearchBox2 = optimizerVicinitySearchBox2;
+                mDialog.show(fm, TAG_PROGRESS_DIALOG_FRAGMENT);
+            }
         } else {
             AlertDialog.Builder builder = new AlertDialog.Builder(this);
             builder
@@ -380,96 +386,27 @@ public class YASSActivity extends Activity {
         }
     }
 
-    private SolverTask mSolverTask;
+    @Override
+    public void onSolverDone(String solution) {
+        if (solution != null && solution.length() > 0) {
+            mSolution = solution;
+            invalidateOptionsMenu();
 
-    final class SolverTask extends AsyncTask<Object, String, String> {
+            mPlayback = true;
+            mPlaybackBoard = (Board)mBoard.clone();
+            mPlaybackSolutionPosition = 0;
 
-        void stopSolver() {
-            //this.cancel(true);
-            terminate();
+            playbackSolution();
+
+            Intent resultIntent = new Intent();
+            resultIntent.putExtra("SOLUTION", solution);
+            setResult(RESULT_OK, resultIntent);
         }
+        updateToolbar();
 
-        @Override
-        protected String doInBackground(Object... params) {
-
-            int transpositionTableSize = (int)(mAvailMem / 1024 / 1024 / 2);
-
-            SharedPreferences defaultSharedPreferences = PreferenceManager.getDefaultSharedPreferences(YASSActivity.this);
-            int solverSearchTime = Integer.parseInt(defaultSharedPreferences.getString("solver_search_time", "600"));
-            int optimizerSearchTime = Integer.parseInt(defaultSharedPreferences.getString("optimizer_search_time", "3600"));
-            int optimizerOptimization = Integer.parseInt(defaultSharedPreferences.getString("optimizer_optimization", "1"));
-            int optimizerSearchMethodOrder = Integer.parseInt(defaultSharedPreferences.getString("optimizer_search_method_order", "0"));
-            int optimizerVicinitySearchBox1 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box1", 20);
-            int optimizerVicinitySearchBox2 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box2", 10);
-
-
-            Board board = (Board)params[0];
-            boolean startOptimizer = (Boolean)params[1];
-
-            if(!startOptimizer) {
-                return solve(
-                        board.getWidth(), board.size(),
-                        board.toXSBWithoutNewline(),
-                        transpositionTableSize,
-                        solverSearchTime
-                );
-            } else {
-                return optimize(
-                        board.getWidth(), board.size(),
-                        board.toXSBWithoutNewline(),
-                        mSolution,
-                        transpositionTableSize,
-                        optimizerSearchTime,
-                        optimizerSearchMethodOrder,
-                        optimizerVicinitySearchBox1,
-                        optimizerVicinitySearchBox2,
-                        optimizerOptimization
-                );
-            }
-        }
-        @Override
-        protected void onProgressUpdate(String... progress) {
-            String statusText = progress[0];
-            mDialog.setMessage(statusText);
-        }
-        @Override
-        protected void onPostExecute(String result) {
-
-            if(result != null && result.length() > 0) {
-                mSolution = result;
-                invalidateOptionsMenu();
-
-                mPlayback = true;
-                mPlaybackBoard = (Board)mBoard.clone();
-                mPlaybackSolutionPosition = 0;
-
-                playbackSolution();
-
-                Intent resultIntent = new Intent();
-                resultIntent.putExtra("SOLUTION", result);
-                setResult(RESULT_OK, resultIntent);
-            }
-            updateToolbar();
-
+        if (mDialog != null) {
             mDialog.dismiss();
-        }
-
-        native String optimize(int width, int height, String board,
-                                      String game,
-                                      int solverTranspositionTableSize,
-                                      int searchTime,
-                                      int optimizerSearchMethodOrder,
-                                      int vicinityBox1,
-                                      int vicinityBox2,
-                                      int optimization);
-        native String solve(int width, int height, String board,
-                                   int solverTranspositionTableSize,
-                                   int solverSearchTime);
-        native void terminate();
-
-        @SuppressWarnings("UnusedDeclaration") // Called using JNI
-        public final void onProgress(String statusText) {
-            this.publishProgress(statusText);
+            mDialog = null;
         }
     }
 
