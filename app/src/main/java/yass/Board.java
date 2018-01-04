@@ -49,6 +49,9 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
     public void setXY(int x, int y, char tile) {
         set(y, get(y).substring(0, x) + tile + get(y).substring(x + 1));
     }
+    private boolean inBounds(int x, int y) {
+        return (y >= 0 && x >= 0 && y < size() && x < getWidth());
+    }
 
     public char getLastDirection()
     {
@@ -109,8 +112,14 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
                 return false;
         }
 
+        if (!inBounds(nextPosX, nextPosY)) {
+            return false;
+        }
         if (getXY(nextPosX, nextPosY) == '$' || getXY(nextPosX, nextPosY) == '*') {
             // Push
+            if (!inBounds(secondPosX, secondPosY)) {
+                return false;
+            }
             if (getXY(secondPosX, secondPosY) == ' ') {
                 setXY(secondPosX, secondPosY, '$');
             } else if (getXY(secondPosX, secondPosY) == '.') {
