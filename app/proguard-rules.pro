@@ -15,12 +15,3 @@
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {
 #   public *;
 #}
-
--keepnames class yass.YASSActivity$SolverTask
--keepclassmembers class yass.YASSActivity$SolverTask {
-   public *;
-}
--keepnames class yass.SettingsActivity$VicinitySearchPreference
-#-keepclassmembers class yass.SettingsActivity$VicinitySearchPreference {
-#   public *;
-#}
