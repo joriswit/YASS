@@ -28,7 +28,11 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
                 lines[row] += " ";
             }
         }
-        return new Board(Arrays.asList(lines));
+        if (lines.length > 0 && width > 0) {
+            return new Board(Arrays.asList(lines));
+        } else {
+            return createEmpty();
+        }
     }
     public static Board createEmpty() {
         Board newBoard = new Board();

@@ -118,7 +118,7 @@ public class BoardView extends View {
 
     protected void onDraw(Canvas canvas)
     {
-        int width = board.get(0).length();
+        int width = board.getWidth();
         int height = board.size();
         int tileSize = Math.min(getWidth() / (width + 2), getHeight() / (height + 2));
         int originX = (getWidth() - tileSize * width) / 2;
@@ -130,7 +130,7 @@ public class BoardView extends View {
             {
                 char tile = ' ';
                 if(x >= 0 && y >= 0 && x < width && y < height) {
-                    tile = board.get(y).charAt(x);
+                    tile = board.getXY(x, y);
                 }
                 Drawable drawable;
                 boolean drawWallTop = false;
@@ -154,11 +154,11 @@ public class BoardView extends View {
                     case '#':
                         drawWallTop = true;
                         int wallIndex = 0;
-                        if(y > 0 && board.get(y - 1).charAt(x) == '#')wallIndex += 1;else drawWallTop = false;
-                        if(y < height - 1 && board.get(y + 1).charAt(x) == '#')wallIndex += 2;
-                        if(x > 0 && board.get(y).charAt(x - 1) == '#')wallIndex += 4;else drawWallTop = false;
-                        if(x < width - 1 && board.get(y).charAt(x + 1) == '#')wallIndex += 8;
-                        if(drawWallTop && board.get(y - 1).charAt(x - 1) != '#')drawWallTop = false;
+                        if(y > 0 && board.getXY(x, y - 1) == '#')wallIndex += 1;else drawWallTop = false;
+                        if(y < height - 1 && board.getXY(x, y + 1) == '#')wallIndex += 2;
+                        if(x > 0 && board.getXY(x - 1, y) == '#')wallIndex += 4;else drawWallTop = false;
+                        if(x < width - 1 && board.getXY(x + 1, y) == '#')wallIndex += 8;
+                        if(drawWallTop && board.getXY(x - 1, y - 1) != '#')drawWallTop = false;
                         drawable = wallDrawables[wallIndex];
                         break;
                     default:
