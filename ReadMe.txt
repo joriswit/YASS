@@ -57,8 +57,9 @@ pushes, but with fewer non-pushing moves.
 
 Compiling the Program
 ---------------------
-You need FPC 3.1.1 (development version) to compile PIC compatible shared
-libraries. This is required by Android 6.0. 
+You need FPC 3.1.1 (development version) to build the native Pascal module.
+This is because Android 8.0 has blocked various syscalls which are used by
+FPC 3.0.4.
 
 The paths to the Android NDK must be configured in the Lazarus project
 file (yassjni.lpi).

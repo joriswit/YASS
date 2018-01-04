@@ -342,7 +342,16 @@ begin
   YASS.Terminate;
 end;
 
+function JNI_OnLoad(
+                 VM__       : PJavaVM;
+                 Reserved__ : pointer
+                 ): jint; cdecl;
+begin
+  Result:=JNI_VERSION_1_6;
+end;
+
 exports
+  JNI_OnLoad,
   Java_yass_ProgressDialogFragment_00024SolverTask_optimize,
   Java_yass_ProgressDialogFragment_00024SolverTask_solve,
   Java_yass_ProgressDialogFragment_00024SolverTask_terminate;
