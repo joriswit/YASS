@@ -36,6 +36,8 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
     private boolean mPlaybackPaused;
     private Board mPlaybackBoard;
     private int mPlaybackSolutionPosition = 0;
+    private boolean mIsPaused = false;
+    private boolean mShouldDismissProgressDialog = false;
 
     private static final String TAG_PROGRESS_DIALOG_FRAGMENT = "solver_progress_fragment";
 
@@ -238,15 +240,22 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
     @Override
     protected void onResume() {
         super.onResume();
+        mIsPaused = false;
         updateToolbar();
 
         FragmentManager fm = getFragmentManager();
         mDialog = (ProgressDialogFragment) fm.findFragmentByTag(TAG_PROGRESS_DIALOG_FRAGMENT);
+
+        if (mShouldDismissProgressDialog && mDialog != null) {
+            mDialog.dismiss();
+            mShouldDismissProgressDialog = false;
+        }
     }
 
     @Override
     protected void onPause() {
         super.onPause();
+        mIsPaused = true;
         if(mPlayback) {
             mPlayback = false;
             mPlaybackPaused = true;
@@ -405,7 +414,11 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
         updateToolbar();
 
         if (mDialog != null) {
-            mDialog.dismiss();
+            if (!mIsPaused) {
+                mDialog.dismiss();
+            } else {
+                mShouldDismissProgressDialog = true;
+            }
             mDialog = null;
         }
     }
