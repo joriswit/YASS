@@ -124,7 +124,7 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
             if (!inBounds(secondPosX, secondPosY)) {
                 return false;
             }
-            if (getXY(secondPosX, secondPosY) == ' ') {
+            if (getXY(secondPosX, secondPosY) == ' ' || getXY(secondPosX, secondPosY) == '-') {
                 setXY(secondPosX, secondPosY, '$');
             } else if (getXY(secondPosX, secondPosY) == '.') {
                 setXY(secondPosX, secondPosY, '*');
@@ -133,7 +133,7 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
             }
         }
 
-        if (getXY(nextPosX, nextPosY) == ' ' || getXY(nextPosX, nextPosY) == '$') {
+        if (getXY(nextPosX, nextPosY) == ' ' || getXY(nextPosX, nextPosY) == '-' || getXY(nextPosX, nextPosY) == '$') {
             setXY(nextPosX, nextPosY, '@');
         } else if (getXY(nextPosX, nextPosY) == '.' || getXY(nextPosX, nextPosY) == '*') {
             setXY(nextPosX, nextPosY, '+');
