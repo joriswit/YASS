@@ -15,9 +15,25 @@ public class VicinitySearchPreference extends DialogPreference {
 
     private int mDefaultValue;
     private int mValue;
+    private String[] mValues;
 
     public VicinitySearchPreference(Context context, AttributeSet attrs) {
         super(context, attrs);
+        mValues = new String[46];
+        int index = 0;
+
+        for (int i = 1; i < 10; i += 1) {
+            mValues[index] = Integer.toString(i);
+            index++;
+        }
+        for (int i = 10; i < 100; i += 5) {
+            mValues[index] = Integer.toString(i);
+            index++;
+        }
+        for (int i = 100; i <= 1000; i += 50) {
+            mValues[index] = Integer.toString(i);
+            index++;
+        }
     }
     @Override
     protected void onSetInitialValue(final boolean restoreValue, final Object defaultValue) {
@@ -56,14 +72,15 @@ public class VicinitySearchPreference extends DialogPreference {
         mPicker = (NumberPicker)view.findViewById(R.id.numberPicker);
         mSwitch1 = (Switch)view.findViewById(R.id.switch1);
         TextView defaultValueTextView = (TextView)view.findViewById(R.id.default_value);
-        mPicker.setMinValue(1);
-        mPicker.setMaxValue(100);
+        mPicker.setMinValue(0);
+        mPicker.setMaxValue(mValues.length - 1);
+        mPicker.setDisplayedValues(mValues);
         mPicker.setWrapSelectorWheel(false);
         if(this.mValue == -1) {
-            mPicker.setValue(mDefaultValue);
+            mPicker.setValue(findIndex(mDefaultValue));
             mSwitch1.setChecked(false);
         } else {
-            mPicker.setValue(this.mValue);
+            mPicker.setValue(findIndex(this.mValue));
             mSwitch1.setChecked(true);
         }
         if (mDefaultValue != -1) {
@@ -75,13 +92,22 @@ public class VicinitySearchPreference extends DialogPreference {
         }
     }
 
+    private int findIndex(int value) {
+        for (int i = mValues.length - 1; i >= 0; i--) {
+            if (Integer.parseInt(mValues[i]) <= value) {
+                return i;
+            }
+        }
+        return 0;
+    }
+
     @Override
     protected void onDialogClosed(boolean positiveResult) {
         super.onDialogClosed(positiveResult);
 
         if (positiveResult) {
             if(mSwitch1.isChecked()) {
-                mValue = mPicker.getValue();
+                mValue = Integer.parseInt(mValues[mPicker.getValue()]);
             } else {
                 mValue = -1;
             }
