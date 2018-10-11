@@ -55,11 +55,22 @@ Please note that the found push-optimal solutions are not optimized
 for moves, i.e., there may be other solutions with the same number of
 pushes, but with fewer non-pushing moves.
 
+YASS for Android
+----------------
+YASS for Android is a port. The official YASS website is located here:
+https://sourceforge.net/projects/sokobanyasc/
+
+The solver source code is in the file /app/src/main/jni-pascal/YASS.pas.
+This file is (almost) identical to the original file from the official
+YASC website. This enables quick updates when the official YASS version
+updates.
+
 Compiling the Program
 ---------------------
-You need FPC 3.1.1 (development version) to build the native Pascal module.
-This is because Android 8.0 has blocked various syscalls which are used by
-FPC 3.0.4.
+You need FreePascal 3.3.1 (development version) to build the native Pascal
+module. I expect it will also work with the upcoming 3.2 version.
+It does not work with FPC 3.0.4 because Android 8.0 has blocked various
+syscalls which are used by that version.
 
 The paths to the Android NDK must be configured in the Lazarus project
 file (yassjni.lpi).
