@@ -213,15 +213,18 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
                 int optimizerSearchMethodOrder = Integer.parseInt(prefs.getString("optimizer_search_method_order", "0"));
                 int optimizerVicinitySearchBox1 = prefs.getInt("optimizer_vicinity_search_box1", 20);
                 int optimizerVicinitySearchBox2 = prefs.getInt("optimizer_vicinity_search_box2", 10);
+                int optimizerVicinitySearchBox3 = prefs.getInt("optimizer_vicinity_search_box3", -1);
 
                 if (optimizerSearchMethodOrder != 0
                     || optimizerVicinitySearchBox1 != 20
-                    || optimizerVicinitySearchBox2 != 10) {
+                    || optimizerVicinitySearchBox2 != 10
+                    || optimizerVicinitySearchBox3 != -1) {
                     // Custom settings have expired, reset to defaults
                     SharedPreferences.Editor edit = PreferenceManager.getDefaultSharedPreferences(this).edit();
                     edit.putString("optimizer_search_method_order", "0");
                     edit.putInt("optimizer_vicinity_search_box1", 20);
                     edit.putInt("optimizer_vicinity_search_box2", 10);
+                    edit.putInt("optimizer_vicinity_search_box3", -1);
                     edit.apply();
 
                     Toast.makeText(this, R.string.settings_reset_to_defaults, Toast.LENGTH_SHORT).show();
@@ -367,6 +370,7 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
             int optimizerSearchMethodOrder = Integer.parseInt(defaultSharedPreferences.getString("optimizer_search_method_order", "0"));
             int optimizerVicinitySearchBox1 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box1", 20);
             int optimizerVicinitySearchBox2 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box2", 10);
+            int optimizerVicinitySearchBox3 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box3", -1);
 
             BoardView boardView = (BoardView) findViewById(R.id.view);
             boardView.setEnableEdit(false);
@@ -384,6 +388,7 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
                 mDialog.mOptimizerSearchMethodOrder = optimizerSearchMethodOrder;
                 mDialog.mOptimizerVicinitySearchBox1 = optimizerVicinitySearchBox1;
                 mDialog.mOptimizerVicinitySearchBox2 = optimizerVicinitySearchBox2;
+                mDialog.mOptimizerVicinitySearchBox3 = optimizerVicinitySearchBox3;
                 mDialog.show(fm, TAG_PROGRESS_DIALOG_FRAGMENT);
             }
         } else {

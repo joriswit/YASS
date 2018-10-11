@@ -12,5 +12,6 @@
     <PreferenceCategory android:title="@string/preferences_optimizer_vicinity_search_title_text">
         <yass.VicinitySearchPreference android:key="optimizer_vicinity_search_box1" android:title="@string/preferences_optimizer_vicinity_search_box1_enabled_title_text" android:dialogLayout="@layout/vicinity_search_preference" android:defaultValue="20"/>
         <yass.VicinitySearchPreference android:key="optimizer_vicinity_search_box2" android:title="@string/preferences_optimizer_vicinity_search_box2_enabled_title_text" android:dialogLayout="@layout/vicinity_search_preference" android:defaultValue="10"/>
+        <yass.VicinitySearchPreference android:key="optimizer_vicinity_search_box3" android:title="@string/preferences_optimizer_vicinity_search_box3_enabled_title_text" android:dialogLayout="@layout/vicinity_search_preference" android:defaultValue="-1"/>
     </PreferenceCategory>
 </PreferenceScreen>

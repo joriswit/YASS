@@ -66,9 +66,13 @@ public class VicinitySearchPreference extends DialogPreference {
             mPicker.setValue(this.mValue);
             mSwitch1.setChecked(true);
         }
-        defaultValueTextView.setText(
-                String.format(getContext().getString(R.string.preferences_optimizer_vicinity_search_default_text), mDefaultValue)
-                );
+        if (mDefaultValue != -1) {
+            defaultValueTextView.setText(
+                    String.format(getContext().getString(R.string.preferences_optimizer_vicinity_search_default_text), mDefaultValue)
+            );
+        } else {
+            defaultValueTextView.setText(R.string.preferences_optimizer_vicinity_search_default_disabled_text);
+        }
     }
 
     @Override

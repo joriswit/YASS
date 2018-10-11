@@ -55,6 +55,7 @@ function Java_yass_ProgressDialogFragment_00024SolverTask_optimize(
                  OptimizerSearchMethodOrder__    : TOptimizerSearchMethodOrder;
                  VicinityBox1__                  : Cardinal;
                  VicinityBox2__                  : Cardinal;
+                 VicinityBox3__                  : Cardinal;
                  Optimization__                  : TOptimization
 ): JString; cdecl;
 { Java JNI method yass.ProgressDialogFragment$SolverTask.optimize(...) }
@@ -138,6 +139,7 @@ begin
                                      Index:=MAX_VICINITY_BOX_COUNT;
                                      if VicinityBox1__>=1 then begin VicinitySettings[Index]:=VicinityBox1__; Dec(Index); end;
                                      if VicinityBox2__>=1 then begin VicinitySettings[Index]:=VicinityBox2__; Dec(Index); end;
+                                     if VicinityBox3__>=1 then begin VicinitySettings[Index]:=VicinityBox3__; Dec(Index); end;
                                      QuickVicinitySearchEnabled:=True;
                                      end;
 

@@ -31,6 +31,7 @@ public class ProgressDialogFragment extends DialogFragment {
     public int mOptimizerSearchMethodOrder;
     public int mOptimizerVicinitySearchBox1;
     public int mOptimizerVicinitySearchBox2;
+    public int mOptimizerVicinitySearchBox3;
     private String mMessage;
 
     /**
@@ -119,6 +120,7 @@ public class ProgressDialogFragment extends DialogFragment {
                         mOptimizerSearchMethodOrder,
                         mOptimizerVicinitySearchBox1,
                         mOptimizerVicinitySearchBox2,
+                        mOptimizerVicinitySearchBox3,
                         mOptimizerOptimization
                 );
             }
@@ -147,6 +149,7 @@ public class ProgressDialogFragment extends DialogFragment {
                                int optimizerSearchMethodOrder,
                                int vicinityBox1,
                                int vicinityBox2,
+                               int vicinityBox3,
                                int optimization);
         native String solve(int width, int height, String board,
                             int solverTranspositionTableSize,
