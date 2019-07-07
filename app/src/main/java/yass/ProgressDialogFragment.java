@@ -28,7 +28,7 @@ public class ProgressDialogFragment extends DialogFragment {
     public int mSolverSearchTime;
     public int mOptimizerSearchTime;
     public int mOptimizerOptimization;
-    public int mOptimizerSearchMethodOrder;
+    public OptimizerMethodOrder mOptimizerSearchMethodOrder;
     public int mOptimizerVicinitySearchBox1;
     public int mOptimizerVicinitySearchBox2;
     public int mOptimizerVicinitySearchBox3;
@@ -117,7 +117,14 @@ public class ProgressDialogFragment extends DialogFragment {
                         mSolution,
                         transpositionTableSize,
                         mOptimizerSearchTime,
-                        mOptimizerSearchMethodOrder,
+                        mOptimizerSearchMethodOrder.isPermutationsEnabled(),
+                        mOptimizerSearchMethodOrder.isRearrangementEnabled(),
+                        mOptimizerSearchMethodOrder.isGlobalSearchEnabled(),
+                        mOptimizerSearchMethodOrder.isVicinitySearchEnabled(),
+                        mOptimizerSearchMethodOrder.getPermutationsOrder(),
+                        mOptimizerSearchMethodOrder.getRearrangementOrder(),
+                        mOptimizerSearchMethodOrder.getGlobalSearchOrder(),
+                        mOptimizerSearchMethodOrder.getVicinitySearchOrder(),
                         mOptimizerVicinitySearchBox1,
                         mOptimizerVicinitySearchBox2,
                         mOptimizerVicinitySearchBox3,
@@ -146,7 +153,14 @@ public class ProgressDialogFragment extends DialogFragment {
                                String game,
                                int solverTranspositionTableSize,
                                int searchTime,
-                               int optimizerSearchMethodOrder,
+                               boolean optimizerMethodPermutationsEnabled,
+                               boolean optimizerMethodRearrangementEnabled,
+                               boolean optimizerMethodGlobalSearchEnabled,
+                               boolean optimizerMethodVicinitySearchEnabled,
+                               int optimizerMethodPermutationsOrder,
+                               int optimizerMethodRearrangementOrder,
+                               int optimizerMethodGlobalSearchOrder,
+                               int optimizerMethodVicinitySearchOrder,
                                int vicinityBox1,
                                int vicinityBox2,
                                int vicinityBox3,

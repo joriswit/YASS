@@ -210,18 +210,18 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
         if (lastSettingsDate != 0) {
             // Settings expire 24 hours after last viewing the settings screen
             if (System.currentTimeMillis() > lastSettingsDate + (1000 * 60 * 60 * 24)) {
-                int optimizerSearchMethodOrder = Integer.parseInt(prefs.getString("optimizer_search_method_order", "0"));
+                String optimizerSearchMethodOrder = prefs.getString("optimizer_search_method_order_detailed", "PRVg");
                 int optimizerVicinitySearchBox1 = prefs.getInt("optimizer_vicinity_search_box1", 20);
                 int optimizerVicinitySearchBox2 = prefs.getInt("optimizer_vicinity_search_box2", 10);
                 int optimizerVicinitySearchBox3 = prefs.getInt("optimizer_vicinity_search_box3", -1);
 
-                if (optimizerSearchMethodOrder != 0
+                if (!OptimizerMethodOrder.compareSetting(optimizerSearchMethodOrder, "PRVg")
                     || optimizerVicinitySearchBox1 != 20
                     || optimizerVicinitySearchBox2 != 10
                     || optimizerVicinitySearchBox3 != -1) {
                     // Custom settings have expired, reset to defaults
                     SharedPreferences.Editor edit = PreferenceManager.getDefaultSharedPreferences(this).edit();
-                    edit.putString("optimizer_search_method_order", "0");
+                    edit.putString("optimizer_search_method_order_detailed", "PRVg");
                     edit.putInt("optimizer_vicinity_search_box1", 20);
                     edit.putInt("optimizer_vicinity_search_box2", 10);
                     edit.putInt("optimizer_vicinity_search_box3", -1);
@@ -367,7 +367,8 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
             int solverSearchTime = Integer.parseInt(defaultSharedPreferences.getString("solver_search_time", "600"));
             int optimizerSearchTime = Integer.parseInt(defaultSharedPreferences.getString("optimizer_search_time", "3600"));
             int optimizerOptimization = Integer.parseInt(defaultSharedPreferences.getString("optimizer_optimization", "1"));
-            int optimizerSearchMethodOrder = Integer.parseInt(defaultSharedPreferences.getString("optimizer_search_method_order", "0"));
+            OptimizerMethodOrder optimizerSearchMethodOrder = new OptimizerMethodOrder(getApplicationContext());
+            optimizerSearchMethodOrder.setValue(defaultSharedPreferences.getString("optimizer_search_method_order_detailed", "PRVg"));
             int optimizerVicinitySearchBox1 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box1", 20);
             int optimizerVicinitySearchBox2 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box2", 10);
             int optimizerVicinitySearchBox3 = defaultSharedPreferences.getInt("optimizer_vicinity_search_box3", -1);

@@ -18,9 +18,6 @@ library yassjni;
 
 uses SysUtils, jni, YASS;
 
-type
-  TOptimizerSearchMethodOrder = ( PVR, VPR, PVRG, VPRG );
-
 {Global Variables}
 var PEnv:PJNIEnv;
     Obj:JObject;
@@ -46,17 +43,24 @@ end;
 
 {exported functions}
 function Java_yass_ProgressDialogFragment_00024SolverTask_optimize(
-                 PEnv__:PJNIEnv;Obj__            : JObject;
-                 Width__, Height__               : Cardinal;
-                 BoardAsJString__                : JString;
-                 GameAsJString__                 : JString;  // the game to optimize
-                 TransPositionTableSize__        : Cardinal;
-                 TimeLimitS__                    : Cardinal;
-                 OptimizerSearchMethodOrder__    : TOptimizerSearchMethodOrder;
-                 VicinityBox1__                  : Cardinal;
-                 VicinityBox2__                  : Cardinal;
-                 VicinityBox3__                  : Cardinal;
-                 Optimization__                  : TOptimization
+                 PEnv__:PJNIEnv;Obj__                    : JObject;
+                 Width__, Height__                       : Cardinal;
+                 BoardAsJString__                        : JString;
+                 GameAsJString__                         : JString;  // the game to optimize
+                 TransPositionTableSize__                : Cardinal;
+                 TimeLimitS__                            : Cardinal;
+                 OptimizerMethodBoxPermutationsEnabled__ : Boolean;
+                 OptimizerMethodRearrangementEnabled__   : Boolean;
+                 OptimizerMethodGlobalSearchEnabled__    : Boolean;
+                 OptimizerMethodVicinitySearchEnabled__  : Boolean;
+                 OptimizerMethodBoxPermutationsOrder__   : Cardinal;
+                 OptimizerMethodRearrangementOrder__     : Cardinal;
+                 OptimizerMethodGlobalSearchOrder__      : Cardinal;
+                 OptimizerMethodVicinitySearchOrder__    : Cardinal;
+                 VicinityBox1__                          : Cardinal;
+                 VicinityBox2__                          : Cardinal;
+                 VicinityBox3__                          : Cardinal;
+                 Optimization__                          : TOptimization
 ): JString; cdecl;
 { Java JNI method yass.ProgressDialogFragment$SolverTask.optimize(...) }
 var Col,Row,Index:Integer;
@@ -113,24 +117,16 @@ begin
                                    Solver.SokobanCallBackFunction:=@SokobanCallBackFunction;
                                    Solver.SokobanStatusPointer:=@SokobanStatus;
                                    Optimizer.MethodEnabled   [omBoxPermutations                        ]:=False; {the fallback strategy is the "box permutations" method}
-                                   Optimizer.MethodEnabled   [omRearrangement                          ]:=True;
-                                   Optimizer.MethodEnabled   [omGlobalSearch                           ]:= ( OptimizerSearchMethodOrder__ = PVRG ) or ( OptimizerSearchMethodOrder__ = VPRG );
-                                   Optimizer.MethodEnabled   [omBoxPermutationsWithTimeLimit           ]:=True;
-                                   Optimizer.MethodEnabled   [omVicinitySearch                         ]:=True;
+                                   Optimizer.MethodEnabled   [omRearrangement                          ]:=OptimizerMethodRearrangementEnabled__;
+                                   Optimizer.MethodEnabled   [omGlobalSearch                           ]:=OptimizerMethodGlobalSearchEnabled__;
+                                   Optimizer.MethodEnabled   [omBoxPermutationsWithTimeLimit           ]:=OptimizerMethodBoxPermutationsEnabled__;
+                                   Optimizer.MethodEnabled   [omVicinitySearch                         ]:=OptimizerMethodVicinitySearchEnabled__;
 
                                    Optimizer.MethodOrder     [Low(Optimizer.MethodOrder)               ]:=Low(TOptimizationMethod); {the fallback method is the first one}
-                                   if ( OptimizerSearchMethodOrder__ = PVR ) or ( OptimizerSearchMethodOrder__ = PVRG) then begin
-                                     Optimizer.MethodOrder     [2]:=omRearrangement;
-                                     Optimizer.MethodOrder     [4]:=omGlobalSearch;
-                                     Optimizer.MethodOrder     [1]:=omBoxPermutationsWithTimeLimit;
-                                     Optimizer.MethodOrder     [3]:=omVicinitySearch;
-                                   end
-                                   else begin
-                                     Optimizer.MethodOrder     [3]:=omRearrangement;
-                                     Optimizer.MethodOrder     [4]:=omGlobalSearch;
-                                     Optimizer.MethodOrder     [2]:=omBoxPermutationsWithTimeLimit;
-                                     Optimizer.MethodOrder     [1]:=omVicinitySearch;
-                                   end;
+                                   Optimizer.MethodOrder     [OptimizerMethodRearrangementOrder__]:=omRearrangement;
+                                   Optimizer.MethodOrder     [OptimizerMethodGlobalSearchOrder__]:=omGlobalSearch;
+                                   Optimizer.MethodOrder     [OptimizerMethodBoxPermutationsOrder__]:=omBoxPermutationsWithTimeLimit;
+                                   Optimizer.MethodOrder     [OptimizerMethodVicinitySearchOrder__]:=omVicinitySearch;
 
                                    Optimizer.Optimization:=Optimization__;
 

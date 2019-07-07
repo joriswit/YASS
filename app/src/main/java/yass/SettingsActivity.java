@@ -78,5 +78,9 @@ public class SettingsActivity extends PreferenceActivity implements
             VicinitySearchPreference editTextPref = (VicinitySearchPreference) p;
             p.setSummary(editTextPref.getSummary());
         }
+        if (p instanceof OptimizerMethodPreference) {
+            OptimizerMethodPreference optimizerOrderPref = (OptimizerMethodPreference) p;
+            p.setSummary(optimizerOrderPref.getSummary());
+        }
     }
 }

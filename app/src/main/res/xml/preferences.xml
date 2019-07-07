@@ -7,7 +7,7 @@
     <PreferenceCategory android:title="@string/preferences_optimizer_title_text">
         <ListPreference android:key="optimizer_optimization" android:title="@string/preferences_optimizer_optimization_title_text" android:entryValues="@array/preferences_optimizer_optimization_entry_key_array" android:entries="@array/preferences_optimizer_optimization_entry_text_array" android:defaultValue="1"/>
         <ListPreference android:key="optimizer_search_time" android:title="@string/preferences_optimizer_search_time_title_text" android:entryValues="@array/preferences_optimizer_search_time_entry_key_array" android:entries="@array/preferences_optimizer_search_time_entry_text_array" android:defaultValue="3600"/>
-        <ListPreference android:key="optimizer_search_method_order" android:title="@string/preferences_optimizer_search_method_order_title_text" android:entryValues="@array/preferences_optimizer_search_method_order_entry_key_array" android:entries="@array/preferences_optimizer_search_method_order_entry_text_array" android:defaultValue="0"/>
+        <yass.OptimizerMethodPreference android:key="optimizer_search_method_order_detailed" android:title="@string/preferences_optimizer_search_method_order_title_text" android:dialogLayout="@layout/optimizer_method_preference" android:defaultValue="PRVg"/>
     </PreferenceCategory>
     <PreferenceCategory android:title="@string/preferences_optimizer_vicinity_search_title_text">
         <yass.VicinitySearchPreference android:key="optimizer_vicinity_search_box1" android:title="@string/preferences_optimizer_vicinity_search_box1_enabled_title_text" android:dialogLayout="@layout/vicinity_search_preference" android:defaultValue="20"/>

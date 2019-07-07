@@ -44,12 +44,14 @@
         <item>Box lines, pushes</item>
     </string-array>
     <string name="preferences_optimizer_search_method_order_title_text">Optimizer search method order</string>
-    <string-array name="preferences_optimizer_search_method_order_entry_text_array">
-        <item>PRV - Permutations, rearrangements, vicinity (default)</item>
-        <item>VPR - Vicinity, permutations, rearrangements</item>
-        <item>PRVG - Permutations, rearrangements, vicinity, global</item>
-        <item>VPRG - Vicinity, permutations, rearrangements, global</item>
+    <string-array name="preferences_optimizer_search_method_entry_text_array">
+        <item>Permutations</item>
+        <item>Rearrangements</item>
+        <item>Vicinity</item>
+        <item>Global</item>
     </string-array>
+    <string name="preferences_optimizer_search_method_default_order_text">(default: Permutations, rearrangements, vicinity)</string>
+    <string name="preferences_optimizer_search_method_default_order_postfix_text">\u0020(default)</string>
     <string name="preferences_optimizer_vicinity_search_title_text">Optimizer vicinity search</string>
     <string name="preferences_optimizer_vicinity_search_box1_enabled_title_text">Box 1</string>
     <string name="preferences_optimizer_vicinity_search_box2_enabled_title_text">Box 2</string>
