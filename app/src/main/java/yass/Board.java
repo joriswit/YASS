@@ -18,18 +18,33 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
         super(list);
     }
     public static Board fromXSB(String level) {
-        String[] lines = level.split("\\n");
+        ArrayList<String> lines = new ArrayList<String>(Arrays.asList(level.split("\\n")));
+
+        // Remove CR character (might be left over after splitting CRLF line ending on LF)
+        for (int row = 0; row < lines.size(); row++) {
+            lines.set(row, lines.get(row).replace("\r", ""));
+        }
+        // Remove leading non-board lines
+        while (lines.size() > 0 && !isABoardLine(lines.get(0))) {
+            lines.remove(0);
+        }
+        // Remove trailing non-board lines
+        while (lines.size() > 0 && !isABoardLine(lines.get(lines.size() - 1))) {
+            lines.remove(lines.size() - 1);
+        }
+        // Find maximum width
         int width = 0;
         for (String line : lines) {
             width = Math.max(width, line.length());
         }
-        for (int row = 0; row < lines.length; row++) {
-            while(lines[row].length() < width) {
-                lines[row] += " ";
+        // Make all lines the same length
+        for (int row = 0; row < lines.size(); row++) {
+            while(lines.get(row).length() < width) {
+                lines.set(row, lines.get(row) + " ");
             }
         }
-        if (lines.length > 0 && width > 0) {
-            return new Board(Arrays.asList(lines));
+        if (lines.size() > 0 && width > 0) {
+            return new Board(lines);
         } else {
             return createEmpty();
         }
@@ -124,7 +139,7 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
             if (!inBounds(secondPosX, secondPosY)) {
                 return false;
             }
-            if (getXY(secondPosX, secondPosY) == ' ' || getXY(secondPosX, secondPosY) == '-') {
+            if (getXY(secondPosX, secondPosY) == ' ' || getXY(secondPosX, secondPosY) == '-' || getXY(secondPosX, secondPosY) == '_') {
                 setXY(secondPosX, secondPosY, '$');
             } else if (getXY(secondPosX, secondPosY) == '.') {
                 setXY(secondPosX, secondPosY, '*');
@@ -133,7 +148,7 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
             }
         }
 
-        if (getXY(nextPosX, nextPosY) == ' ' || getXY(nextPosX, nextPosY) == '-' || getXY(nextPosX, nextPosY) == '$') {
+        if (getXY(nextPosX, nextPosY) == ' ' || getXY(nextPosX, nextPosY) == '-' || getXY(nextPosX, nextPosY) == '_' || getXY(nextPosX, nextPosY) == '$') {
             setXY(nextPosX, nextPosY, '@');
         } else if (getXY(nextPosX, nextPosY) == '.' || getXY(nextPosX, nextPosY) == '*') {
             setXY(nextPosX, nextPosY, '+');
@@ -178,6 +193,12 @@ public class Board extends ArrayList<String> implements Cloneable, Parcelable {
                 }
             }
         }
+    }
+
+    private static boolean isABoardLine(String textLine) {
+        // skip trailing spaces and other floor characters, e.g., '_'
+        // first and last character in a line belonging to a board must be a wall or a box-on-goal
+        return textLine.matches("^[\\-_ ]*[#*]([# _\\-.$*@+]*[#*])?[_\\- ]*$");
     }
 
     @Override
