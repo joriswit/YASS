@@ -103,6 +103,12 @@ public class ProgressDialogFragment extends DialogFragment {
 
             int transpositionTableSize = (int)(mAvailMem / 1024 / 1024 / 2);
 
+            if (transpositionTableSize > 1536) {
+                // Prevent allocation of more than 1.5 GiB
+                // Because YASS is a 32 bit app, it might crash on 64 bit devices with lots of free memory
+                transpositionTableSize = 1536;
+            }
+
             if (!mOptimizer) {
                 return solve(
                         mBoard.getWidth(), mBoard.size(),
