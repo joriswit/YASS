@@ -407,11 +407,14 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
             mSolution = solution;
             invalidateOptionsMenu();
 
-            mPlayback = true;
+            boolean alreadyPlaying = mPlayback;
             mPlaybackBoard = (Board)mBoard.clone();
             mPlaybackSolutionPosition = 0;
 
-            playbackSolution();
+            if (!alreadyPlaying) {
+                mPlayback = true;
+                playbackSolution();
+            }
 
             Intent resultIntent = new Intent();
             resultIntent.putExtra("SOLUTION", solution);
