@@ -50,7 +50,7 @@
         <item>Vicinity</item>
         <item>Global</item>
     </string-array>
-    <string name="preferences_optimizer_search_method_default_order_text">(default: Permutations, rearrangements, vicinity)</string>
+    <string name="preferences_optimizer_search_method_default_order_text">(Default: Permutations, rearrangements, vicinity)</string>
     <string name="preferences_optimizer_search_method_default_order_postfix_text">\u0020(default)</string>
     <string name="preferences_optimizer_vicinity_search_title_text">Optimizer vicinity search</string>
     <string name="preferences_optimizer_vicinity_search_box1_enabled_title_text">Box 1</string>
@@ -58,8 +58,8 @@
     <string name="preferences_optimizer_vicinity_search_box3_enabled_title_text">Box 3</string>
     <string name="preferences_optimizer_vicinity_search_enabled_text">Enabled</string>
     <string name="preferences_optimizer_vicinity_search_vicinity_squares_text">Vicinity squares</string>
-    <string name="preferences_optimizer_vicinity_search_default_text">(default: Enabled with %1$d squares)</string>
-    <string name="preferences_optimizer_vicinity_search_default_disabled_text">(default: Disabled)</string>
+    <string name="preferences_optimizer_vicinity_search_default_text">(Default: Enabled with %1$d squares)</string>
+    <string name="preferences_optimizer_vicinity_search_default_disabled_text">(Default: Disabled)</string>
     <string name="preferences_optimizer_vicinity_search_summary_disabled_text">Disabled</string>
     <plurals name="preferences_optimizer_vicinity_search_summary_enabled_text">
         <item quantity="one">Enabled, %1$d vicinity square</item>
