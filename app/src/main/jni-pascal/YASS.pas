@@ -1,7 +1,7 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.141 - March 2, 2017
-Copyright (c) 2017 by Brian Damgaard, Denmark
+Version 2.142 - January 11, 2020
+Copyright (c) 2020 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
@@ -534,12 +534,12 @@ const
 {Texts}
 
   TEXT_APPLICATION_COPYRIGHT
-                           = 'Copyright (c) 2017 by Brian Damgaard';
+                           = 'Copyright (c) 2020 by Brian Damgaard';
   TEXT_APPLICATION_TITLE   = 'YASS';
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.141';
+                           = '2.142';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
