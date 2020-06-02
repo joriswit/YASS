@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.142 - January 11, 2020
+Version 2.143 - April 22, 2020
 Copyright (c) 2020 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -428,9 +428,9 @@ const
                            : Integer
                            =
                            {$IFDEF PLUGIN_MODULE}
-                             (MaxInt div 10) * 9; {only use 90% of the total memory address space; the host program might run other memory-consuming tasks in parallel with the plug-in}
+                             (MaxInt div 10) * 8; {only use 80% of the total memory address space; the host program might run other memory-consuming tasks in parallel with the plug-in}
                            {$ELSE}
-                             MaxInt - 32*ONE_MEBI;
+                             (MaxInt div 10) * 8; {only use 80% of the total memory address space; this leaves some memory for other purposes}
                            {$ENDIF}
   MAX_VICINITY_SQUARES     = {MAX_BOARD_WIDTH*MAX_BOARD_HEIGHT} 999; {the only reason for the 999-limit is that it allows a settings window to operate with 3-digits only for the spin-edit controls}
   MIN_BOX_LIMIT_FOR_DYNAMIC_DEADLOCK_SETS      {calculating and storing dynamic deadlock-sets are time-consuming operations; the minimum box limit must be reasonably small}
@@ -539,7 +539,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.142';
+                           = '2.143';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -562,11 +562,9 @@ const
   TEXT_LEVEL_HAS_TOO_MANY_ROWS
                            = 'Level has too many rows';
   TEXT_LEVEL_HAS_NO_PLAYER = 'Level has no player';
-  TEXT_LEVEL_HAS_NOT_THE_SAME_NUMBER_OF_BOXES_AND_GOALS
-                           = 'Level has not the same number of boxes and goals';
+  TEXT_LEVEL_DOES_NOT_HAVE_THE_SAME_NUMBER_OF_BOXES_AND_GOALS
+                           = 'Level does not have the same number of boxes and goals';
   TEXT_LEVEL_SOLVED        = 'Level solved';
-  TEXT_LEVEL_SOLVED_MAY_NOT_BE_OPTIMAL
-                           = TEXT_LEVEL_SOLVED+' (solution may not be optimal)';
   TEXT_LEVEL_UNSOLVABLE    = 'Level not solvable';
   TEXT_LEVEL_UNSOLVED      = 'Level not solved';
   TEXT_MEBI_BYTES          = 'MiB';
@@ -589,23 +587,26 @@ const
                               'Terminated by user');
   TEXT_PRESS_ENTER         = 'Press [Enter]';
   TEXT_PUSHES              = 'pushes';
+  TEXT_PUSH_OPTIMAL_SOLUTION
+                           = 'push-optimal solution';
   TEXT_PUSH_PULL           : array[Boolean] of String = ('Push','Pull');
   TEXT_SAVE_POSITIONS_TO_DISK
                            = 'Saving positions to disk...';
   TEXT_SEARCH_STATUS_BOX_PERMUTATIONS
                            = '-box permutations: Pushes ';
   TEXT_SEARCH_STATUS_GLOBAL_OPTIMIZATION
-                           = '  (Global optimization: Transposition table: ';
+                           = 'Global optimization: Transposition table: ';
   TEXT_SEARCH_STATUS_REARRANGEMENT_OPTIMIZATION
-                           = '  (Rearrangement optimization: Pushes ';
-  TEXT_SEARCH_STATUS_VICINITY_1
-                           = '  (Vicinity search: Positions: ';
-  TEXT_SEARCH_STATUS_VICINITY_2
-                           = '  (Vicinity search: Position queue: ';
+                           = 'Rearrangement optimization: Pushes ';
+  TEXT_SEARCH_STATUS_VICINITY_1__
+                           = '(Vicinity search: Positions: ';
+  TEXT_SEARCH_STATUS_VICINITY_2__
+                           = '(Vicinity search: Position queue: ';
   TEXT_SEARCH_STATUS_VICINITY_3
                            = 'Vicinity search (';
   TEXT_SEARCH_STATUS_VICINITY_4
-                           = SPACE+TEXT_MEBI_BYTES+'): Generating positions ';
+                           = SPACE+TEXT_MEBI_BYTES+'):'+NL+
+                             'Generating positions ';
   TEXT_SEARCH_STATUS_VICINITY_5
                            = 'Vicinity search: ';
   TEXT_SEARCH_DEPTH        = 'Depth: ';
@@ -616,7 +617,8 @@ const
   TEXT_SOLUTION            = 'Solution';
   TEXT_SOLUTIONS           = 'Solutions';
   TEXT_SOLUTION_INFO_1     = 'Solution: '; {number of pushes is inserted here}
-  TEXT_SOLUTION_INFO_2     = ' pushes. Search for a shorter solution continues.';
+  TEXT_SOLUTION_INFO_2     = ' pushes.'+NL+
+                             'Search for a shorter solution continues.';
   TEXT_SOLUTION_METHOD     : array[Boolean] of String =
     ('Move-optimal solutions','Push-optimal solutions');
   TEXT_STATISTICS_FILENAME_SUFFIX
@@ -2220,7 +2222,7 @@ begin {a simple and not fool-proof implementation}
                                                 s:=ParamStr(Pred(ItemIndex));
                                                 if (s<>'') and ((s[1]='a') or (s[1]='A')) then begin
                                                    {$IFDEF WINDOWS}
-                                                     MemoryByteSize__   :=GetAvailablePhysicalMemoryByteSize;
+                                                     MemoryByteSize__   :=GetAvailableUserMemoryByteSize; //GetAvailablePhysicalMemoryByteSize;
                                                      if MemoryByteSize__> Cardinal(MAX_TRANSPOSITION_TABLE_BYTE_SIZE) then
                                                         MemoryByteSize__:=Cardinal(MAX_TRANSPOSITION_TABLE_BYTE_SIZE); // limit the transposition table byte size to a signed integer and leave some memory for other purposes
                                                      Result:={(MemoryByteSize__>=0) and} (MemoryByteSize__<=MaxInt-ONE_MEBI);
@@ -4897,9 +4899,11 @@ begin {$I-}
      //i:=Positions.Count+Positions.SearchStatistics.DroppedCount;
      //Writeln(F,'Analysed positions: ',i);
      Writeln(F);
-     Write(F,'Solution/Pushes');
-     if Game.History.Count>High(Game.History.Moves) then Write(F,' (incomplete)');
-     if not Game.IsAnOptimalSolution then Write(F,' (may be non-optimal)');
+     Write(F,'Solution');
+     if      Game.History.Count>High(Game.History.Moves) then
+             Write(F,' (incomplete)')
+     else if Game.IsAnOptimalSolution then
+             Write(F,' (push-optimal)');
      Writeln(F);
 
      s:='';
@@ -12425,7 +12429,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
             end;
         if (Game.BoxCount<>Game.GoalCount) and (LoopCount=0) and Result then begin
            PluginResult__:=prInvalidLevel;
-           ErrorText__:=TEXT_LEVEL_HAS_NOT_THE_SAME_NUMBER_OF_BOXES_AND_GOALS;
+           ErrorText__:=TEXT_LEVEL_DOES_NOT_HAVE_THE_SAME_NUMBER_OF_BOXES_AND_GOALS;
            Result:=False;
            end;
         Inc(LoopCount);
@@ -19133,12 +19137,14 @@ begin {Search}
           (Positions.SolutionPosition<>nil) and
           (Positions.SolutionPosition^.PushCount<>0) then begin
           {$IFDEF PLUGIN_MODULE}
-            SetSokobanStatusText(TEXT_LEVEL_SOLVED_MAY_NOT_BE_OPTIMAL);
+            SetSokobanStatusText(TEXT_LEVEL_SOLVED);
           {$ENDIF}
           Solver.SokobanStatusPointer^.Flags:=SOKOBAN_PLUGIN_FLAG_SOLUTION;
           end
      else begin {$IFDEF PLUGIN_MODULE}
-                  SetSokobanStatusText(TEXT_LEVEL_SOLVED);
+                  if   Game.IsAnOptimalSolution then
+                       SetSokobanStatusText(TEXT_LEVEL_SOLVED+NL+LEFT_PAREN+TEXT_PUSH_OPTIMAL_SOLUTION+ RIGHT_PAREN)
+                  else SetSokobanStatusText(TEXT_LEVEL_SOLVED);
                 {$ENDIF}
                 Solver.SokobanStatusPointer^.Flags:=SOKOBAN_PLUGIN_FLAG_SOLUTION+SOKOBAN_PLUGIN_FLAG_PUSHES;
                 if (Positions.SolutionPosition=nil) or
@@ -19153,9 +19159,12 @@ begin {Search}
           else s:='es';
           Write(', including ',Game.TubeFillingPushCount,' initial push',s,' leading to the depicted board.');
           end;
-       if (not Game.IsAnOptimalSolution) and
-          (Positions.SolutionPosition<>nil) and
-          (Positions.SolutionPosition^.PushCount<>0) then Write('  (may not be optimal)');
+       if Game.IsAnOptimalSolution
+          or
+          (Positions.SolutionPosition=nil)
+          or
+          (Positions.SolutionPosition^.PushCount=0) then
+          Write('  ('+TEXT_PUSH_OPTIMAL_SOLUTION+RIGHT_PAREN);
        Writeln;
        //Readln;
 
@@ -20577,7 +20586,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   procedure ShowStatus;
   begin
     if Positions.BestPosition<>nil then
-       Optimizer.SearchResultStatusText:=OptimizerMetricsAsText(Positions.BestPosition)+SPACE+SPACE+
+       Optimizer.SearchResultStatusText:=OptimizerMetricsAsText(Positions.BestPosition)+NL+
                                            LEFT_PAREN+OptimizerImprovementAsText(Positions.BestPosition)+RIGHT_PAREN;
     SetSokobanStatusText(SearchStatePromptText+
                         {$IFDEF CONSOLE_APPLICATION}
@@ -20589,6 +20598,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                             +' Time: '+IntToStr((CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000)
                           {$ENDIF}
                         {$ELSE}
+                          +NL
                           +Optimizer.SearchStateStatusText
                         {$ENDIF}
                         {+' (Positions: '+IntToStr(Positions.Count+Positions.SearchStatistics.DroppedCount)+' Open: '+IntToStr(Positions.OpenPositions.Count)+RIGHT_PAREN}
@@ -20983,15 +20993,14 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                                  TEXT_SEARCH_STATUS_REARRANGEMENT_OPTIMIZATION,
                                  CurrentPosition^.PushCount,
                                  LAZY_COLON,
-                                 Positions.BestPosition.PushCount,
-                                 RIGHT_PAREN
+                                 Positions.BestPosition.PushCount
                                  {$IFDEF WINDOWS}
                                    ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
                                  {$ENDIF}
                                 );
                        {$ELSE}
-                         Optimizer.SearchStateStatusText:=TEXT_SEARCH_STATUS_REARRANGEMENT_OPTIMIZATION+IntToStr(CurrentPosition^.PushCount)+LAZY_COLON+IntToStr(Positions.BestPosition^.PushCount)+RIGHT_PAREN;
-                         SetSokobanStatusText(Optimizer.SearchResultStatusText+Optimizer.SearchStateStatusText);
+                         Optimizer.SearchStateStatusText:=TEXT_SEARCH_STATUS_REARRANGEMENT_OPTIMIZATION+IntToStr(CurrentPosition^.PushCount)+LAZY_COLON+IntToStr(Positions.BestPosition^.PushCount);
+                         SetSokobanStatusText(Optimizer.SearchResultStatusText+NL+Optimizer.SearchStateStatusText);
                        {$ENDIF}
 
                        TimeCheck;
@@ -22539,7 +22548,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         //Result:=False; exit;
 
         {$IFDEF PLUGIN_MODULE}
-          Optimizer.SearchStateStatusText:=SPACE+SPACE+LEFT_PAREN+IntToStr(BoxNumberSet__.Count)+TEXT_SEARCH_STATUS_BOX_PERMUTATIONS+IntToStr(SliceStart__^.PushCount)+LAZY_COLON+IntToStr(SliceEnd__^.PushCount)+RIGHT_PAREN;
+          Optimizer.SearchStateStatusText:=IntToStr(BoxNumberSet__.Count)+TEXT_SEARCH_STATUS_BOX_PERMUTATIONS+IntToStr(SliceStart__^.PushCount)+LAZY_COLON+IntToStr(SliceEnd__^.PushCount);
           ShowStatus;
         {$ENDIF}
 
@@ -22798,8 +22807,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                                           end;
                                        {else Write(PERIOD)};
                                      {$ELSE}
-                                       Optimizer.SearchStateStatusText:=TEXT_SEARCH_STATUS_GLOBAL_OPTIMIZATION+IntToStr((YASS.Positions.Count*100) div YASS.Positions.Capacity)+'%)';
-                                       SetSokobanStatusText(Optimizer.SearchResultStatusText+Optimizer.SearchStateStatusText);
+                                       Optimizer.SearchStateStatusText:=TEXT_SEARCH_STATUS_GLOBAL_OPTIMIZATION+IntToStr((YASS.Positions.Count*100) div YASS.Positions.Capacity)+'%';
+                                       SetSokobanStatusText(Optimizer.SearchResultStatusText+NL+Optimizer.SearchStateStatusText);
                                      {$ENDIF}
 
                                      TimeCheck;
@@ -22995,8 +23004,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                     end;
                {else Write(PERIOD)};
              {$ELSE}
-               Optimizer.SearchStateStatusText:=TEXT_SEARCH_STATUS_GLOBAL_OPTIMIZATION+IntToStr((YASS.Positions.Count*100) div YASS.Positions.Capacity)+'%)';
-               SetSokobanStatusText(Optimizer.SearchResultStatusText+Optimizer.SearchStateStatusText);
+               Optimizer.SearchStateStatusText:=TEXT_SEARCH_STATUS_GLOBAL_OPTIMIZATION+IntToStr((YASS.Positions.Count*100) div YASS.Positions.Capacity)+'%';
+               SetSokobanStatusText(Optimizer.SearchResultStatusText+NL+Optimizer.SearchStateStatusText);
              {$ENDIF}
              TimeCheck;
              if Solver.SearchLimits.DepthLimit<0 then                           {'True': the time limit has been exceeded}
@@ -23993,7 +24002,7 @@ A---B-
                                                end;
 
                                             Optimizer.SearchStateStatusText:={$IFDEF PLUGIN_MODULE}
-                                                                               '  ('+
+                                                                               //'('+
                                                                                VicinitySettingsAsText+
                                                                              {$ENDIF}
                                                                              TEXT_SEARCH_STATUS_VICINITY_3+
@@ -24002,7 +24011,7 @@ A---B-
                                                                              IntToStr(Max(1,Position^.Position.PushCount))+SLASH+IntToStr(YASS.Positions.BestPosition^.PushCount)+': '+
                                                                              IntToStr(Tree.Count)
                                                                              {$IFDEF PLUGIN_MODULE}
-                                                                               +RIGHT_PAREN
+                                                                               //+RIGHT_PAREN
                                                                              {$ENDIF}
                                                                              ;
 
@@ -24014,7 +24023,7 @@ A---B-
                                                      {$ENDIF}
                                                     );
                                             {$ELSE}
-                                              SetSokobanStatusText(Optimizer.SearchResultStatusText+Optimizer.SearchStateStatusText);
+                                              SetSokobanStatusText(Optimizer.SearchResultStatusText+NL+Optimizer.SearchStateStatusText);
                                             {$ENDIF}
 
                                             TimeCheck;
@@ -25521,7 +25530,7 @@ A---B-
                                                    {$ENDIF}
                                                    );
                                           {$ELSE}
-                                            SetSokobanStatusText(Optimizer.SearchResultStatusText+Optimizer.SearchStateStatusText);
+                                            SetSokobanStatusText(Optimizer.SearchResultStatusText+NL+Optimizer.SearchStateStatusText);
                                           {$ENDIF}
 
                                           TimeCheck;
@@ -26186,7 +26195,7 @@ A---B-
                                                     {$ENDIF}
                                                     );
                                            {$ELSE}
-                                             SetSokobanStatusText(Optimizer.SearchResultStatusText+Optimizer.SearchStateStatusText);
+                                             SetSokobanStatusText(Optimizer.SearchResultStatusText+NL+Optimizer.SearchStateStatusText);
                                            {$ENDIF}
 
                                            TimeCheck;
@@ -26356,14 +26365,14 @@ A---B-
 
              if Result then begin
                 Optimizer.SearchStateStatusText:={$IFDEF PLUGIN_MODULE}
-                                                   '  ('+
+                                                   //'('+
                                                    VicinitySettingsAsText+
                                                  {$ENDIF}
                                                  TEXT_SEARCH_STATUS_VICINITY_5+
                                                  IntToStr(Pred(SearchDepth))+
                                                  DepthLimitAsText
                                                  {$IFDEF PLUGIN_MODULE}
-                                                   +RIGHT_PAREN
+                                                   //+RIGHT_PAREN
                                                  {$ENDIF}
                                                  ;
 
@@ -26382,7 +26391,7 @@ A---B-
                      //Readln;
                      end;
                 {$ELSE}
-                  SetSokobanStatusText(Optimizer.SearchResultStatusText+Optimizer.SearchStateStatusText);
+                  SetSokobanStatusText(Optimizer.SearchResultStatusText+NL+Optimizer.SearchStateStatusText);
                   TimeCheck; //ShowStatus;
                   if SearchHasTerminated then StopSearch;
                 {$ENDIF}
