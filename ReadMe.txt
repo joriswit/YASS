@@ -1,8 +1,7 @@
 =====================================================================
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Puzzles
-Version 2.143 - April 22, 2020
+Version 2.144 - July 9, 2020
 Copyright (c) 2020 by Brian Damgaard, Denmark
-Website: https://sourceforge.net/projects/sokobanyasc/
 =====================================================================
 
 Sokoban(r) Registered Trademark of Falcon Co., Ltd., Japan

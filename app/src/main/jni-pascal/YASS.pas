@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.143 - April 22, 2020
+Version 2.144 - July 9, 2020
 Copyright (c) 2020 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -80,6 +80,8 @@ You should have received a copy of the GNU General Public License along with thi
 
 {$DEFINE LIGHTWEIGHT_DEADLOCK_GENERATION}      {this generates a reasonable number of deadlocks and works pretty fast}
 
+{$DEFINE SINGLE_LINE_STATUS_TEXT}              {this generates single line status texts for a plug-in module, as opposed to multi-line status texts separated by CR+LF newlines}
+
 {$R-}                                          {'R-': range checking disabled}
 
 {$IFDEF CONSOLE_APPLICATION}
@@ -90,14 +92,14 @@ You should have received a copy of the GNU General Public License along with thi
 {$ENDIF}
 
 {$IFDEF WINDOWS}
-  {$IFDEF PLUGIN_MODULE}
-  uses         SysUtils, Windows;              {for exception handling, e.g., in 'GetAsMuchMemoryAsPossible'}
-  {$ELSE}
-  uses         Windows;                        {for timing and memorystatus}
-  {$ENDIF}
+  uses
+      {$IFDEF PLUGIN_MODULE}
+        SysUtils,                              {for exception handling, e.g., in 'GetAsMuchMemoryAsPossible'}
+      {$ENDIF}
+        Windows;                               {for timing and memorystatus}
 {$ELSE}
   {$IFDEF PLUGIN_MODULE}
-  uses         SysUtils;                       {for exception handling, e.g., in 'GetAsMuchMemoryAsPossible'}
+    uses SysUtils;                             {for exception handling, e.g., in 'GetAsMuchMemoryAsPossible'}
   {$ENDIF}
 {$ENDIF}
 
@@ -539,7 +541,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.143';
+                           = '2.144';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -1868,12 +1870,26 @@ begin
 end;
 
 function  PerformSokobanCallBackFunction:Integer;
+{$IFDEF SINGLE_LINE_STATUS_TEXT}
+  var p:PChar;
+{$ENDIF}
 begin {returns a non-zero value if the solver should terminate}
   if   Assigned(Solver.SokobanCallBackFunction) then with Solver.SokobanStatusPointer^ do begin
        MovesGenerated :=Solver.MoveCount;
        PushesGenerated:=Solver.PushCount;
        StatesGenerated:=Int64(YASS.Positions.Count)+YASS.Positions.SearchStatistics.DroppedCount;
        TimeMS:=UInt32(Game.InitializationTimeMS+Solver.TimeMS+Optimizer.TimeMS);
+
+       {$IFDEF SINGLE_LINE_STATUS_TEXT}
+       StatusText[High(StatusText)-1]:=NULL_CHAR; // ensure that the status text has a null terminator. the last character has a special meaning. it points to "Notes:", if any,
+       p:=PChar(Addr(StatusText[Low(StatusText)]));
+       while p^<>NULL_CHAR do begin
+         if Ord(p^)<Ord(SPACE) then
+            p^:=SPACE;
+         Inc(p);
+         end;
+       {$ENDIF}
+
        Result:=Solver.SokobanCallBackFunction();
        end
   else Result:=0;
@@ -19989,7 +20005,14 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
                                   if Optimizer.GameMetrics.MoveCount<High(POptimizerPosition(NewPosition)^.MoveCount) then begin // '<': reserves highvalue (e.g., 65535 when the move count is a 16 bit unsigned number) for internal use
                                      if TTLookup(0,ppmExact,dUp,Position) then begin // 'True':  the position already exists
-                                        if WasALegalPush(Position) or (Position^.PushCount=0) then with Positions do begin
+                                        if WasALegalPush(Position)
+                                           or
+                                           ((Position^.PushCount=0)
+                                            and
+                                            (CharCount<MovesAsTextBufferByteSize__)
+                                            and
+                                            (MovesAsText__^<>NULL_CHAR)
+                                           ) then with Positions do begin
                                            with RepetitionMetrics do begin
                                              Inc(MoveCount      ,Optimizer.GameMetrics.MoveCount      -POptimizerPosition(Position)^.MoveCount);
                                              Inc(PushCount      ,Optimizer.GameMetrics.PushCount      -Position^.PushCount);
@@ -20279,7 +20302,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                 q:=BasePosition; NextInHashChain:=nil;
                 if q<>nil then
                    repeat if        (p^.HashValue=q^.HashValue) and (p^.PlayerPos=q^.PlayerPos) then begin
-                                    q:=p; Result:=-1;                           {this shouldn't happen, i.e., there cannot be 2 identical positions on the transposition table}
+                                    q:=p; Result:=-1;                           {there are two identical positions on the path, or two different positions with the same hash value and player position. terminate with failure}
                                     end
                           else if   p^.HashValue>=q^.HashValue then begin
                                     q:=q^.HashBucket.Next;                      {try next item in this bucket}
@@ -20288,7 +20311,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                                     end;
                    until  (p=q) or (q=BasePosition);                            {see the body of the loop for pointer manipulations that terminate the loop}
 
-                if p<>q then begin                                              {'<>': the position isn't already in the table (it should never happen that it's already in the table here)}
+                if p<>q then begin                                              {'<>': the position isn't already in the table}
                    if    NextInHashChain<>nil then begin                        {'True': insert the new position before 'NextInHashChain__'}
                          p^.HashBucket.Prev :=NextInHashChain^.HashBucket.Prev;
                          p^.HashBucket.Next :=NextInHashChain;
@@ -20358,7 +20381,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
          {update metrics for all positions on the best path; they may be out of sync at this time}
          if not CalculateMetricsForPositionsOnBestPath(b) then Result:=-1;      {'-1': something is wrong with the best path, such as 2 positions accidentally having the same hash value}
-         if UninitializedItemCount<0 then Result:=-1;                           {'True': the best path is longer than the transposition table capacity; this should never happen}
+         if UninitializedItemCount<0 then Result:=-1;                           {'True': the best path is longer than the transposition table capacity; this should not happen}
 
          SetPosition(nil);
 
