@@ -1,7 +1,7 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.144 - July 9, 2020
-Copyright (c) 2020 by Brian Damgaard, Denmark
+Version 2.145 - March 11, 2021
+Copyright (c) 2021 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
@@ -536,12 +536,12 @@ const
 {Texts}
 
   TEXT_APPLICATION_COPYRIGHT
-                           = 'Copyright (c) 2020 by Brian Damgaard';
+                           = 'Copyright (c) 2021 by Brian Damgaard';
   TEXT_APPLICATION_TITLE   = 'YASS';
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.144';
+                           = '2.145';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -6389,7 +6389,7 @@ begin {calculates - for all squares on the (empty) board - the distance to the n
      otherwise, this is not guaranteed for isolated boxes when the player's
      starting position is taken into account
     }
-    for BoxNo:=FirstBoxNo__ to LastBoxNo__ do Distances__[BoxPos[BoxNo]]:=0;
+    for BoxNo:=FirstBoxNo__ to LastBoxNo__ do Distances__[StartBoxPos[BoxNo]]:=0;
 
     for BoxNo:=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board}
     PlayerPos:=OldPlayerPosition; {restore the player position}
@@ -6495,10 +6495,10 @@ end; {CalculateDistanceToNearestGoalForAllSquares}
 
 function  CalculateBoxReachableSquaresForAllBoxes:Integer;
 var Square:Integer; Distances:TBoardOfIntegers;
-begin {note that the player's start position does matter, but otherwise each box is calculated individually with all other boxes removed from the board}
+begin
   with Game do begin
     Result:=0;
-    CalculateDistanceToNearestBoxStartPositionForAllSquares(1,BoxCount,True,Distances);
+    CalculateDistanceToNearestBoxStartPositionForAllSquares(1,BoxCount,False,Distances);
     {ShowBoxDistanceToAllSquares(Distances); Readln;}
 
     for Square:=0 to BoardSize do {for each square...}
@@ -12639,7 +12639,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
         FillChar(SquareBoxSets__,SizeOf(SquareBoxSets__),0);
         for BoxNo:=1 to BoxCount do {for each box, calculate the distances to the reachable squares by pushing the box around on the (empty) board}
             if Solver.SearchLimits.DepthLimit>=0 then begin {'True': the search hasn't been terminated; (the search may be terminated manually by the user or by a time limit)}
-               CalculateDistanceToNearestBoxStartPositionForAllSquares(BoxNo,BoxNo,True,Distances);
+               CalculateDistanceToNearestBoxStartPositionForAllSquares(BoxNo,BoxNo,False,Distances);
                for Square:=0 to BoardSize do
                    if Distances[Square]<>INFINITY then with SquareBoxSets__[Square] do begin {'True': the square is push-reachable from the current box starting position}
                       Inc(Count); Include(BoxSet,BoxNo);

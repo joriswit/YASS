@@ -1,17 +1,17 @@
 =====================================================================
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Puzzles
-Version 2.144 - July 9, 2020
-Copyright (c) 2020 by Brian Damgaard, Denmark
+Version 2.145 - March 11, 2021
+Copyright (c) 2021 by Brian Damgaard, Denmark
 =====================================================================
 
 Sokoban(r) Registered Trademark of Falcon Co., Ltd., Japan
-Sokoban Copyright (c) 1982-2020 by Hiroyuki Imabayashi, Japan
-Sokoban Copyright (c) 1989, 1990, 2001-2020 by Falcon Co., Ltd., Japan
+Sokoban Copyright (c) 1982-2021 by Hiroyuki Imabayashi, Japan
+Sokoban Copyright (c) 1989, 1990, 2001-2021 by Falcon Co., Ltd., Japan
 
 License
 --------
 YASS - Yet Another Sokoban Solver and Optimizer
-Copyright (c) 2020 by Brian Damgaard, Denmark
+Copyright (c) 2021 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
