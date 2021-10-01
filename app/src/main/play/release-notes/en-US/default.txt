@@ -1,0 +1,1 @@
+Added more detailed configurable preferences for the optimizer
