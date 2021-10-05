@@ -282,65 +282,65 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
     @Override
     public boolean onOptionsItemSelected(MenuItem item) {
         // Handle item selection
-        switch (item.getItemId()) {
-            case R.id.action_solve:
-                startSolver(false);
-                return true;
-            case R.id.action_optimize:
-                if(mSolution == null) {
-                    final EditText lurdTextView = new EditText(this);
-                    new AlertDialog.Builder(this)
-                        .setTitle(R.string.paste_solution_title_text)
-                        .setMessage(R.string.paste_solution_text)
-                        .setView(lurdTextView)
-                        .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
-                            public void onClick(DialogInterface dialog, int whichButton) {
-                                String lurd = lurdTextView.getText().toString();
-                                Board tryPositionBoard = (Board)mBoard.clone();
-                                if (tryPositionBoard.move(lurd)) {
-                                    mSolution = lurd;
-                                    updateToolbar();
-                                    startSolver(true);
-                                } else {
-                                    new AlertDialog.Builder(YASSActivity.this)
-                                            .setTitle(R.string.paste_solution_invalid_title_text)
-                                            .setMessage(R.string.paste_solution_invalid_text)
-                                            .setPositiveButton(android.R.string.ok, null)
-                                            .show();
-                                }
+        int itemId = item.getItemId();
+        if (itemId == R.id.action_solve) {
+            startSolver(false);
+            return true;
+        } else if (itemId == R.id.action_optimize) {
+            if (mSolution == null) {
+                final EditText lurdTextView = new EditText(this);
+                new AlertDialog.Builder(this)
+                    .setTitle(R.string.paste_solution_title_text)
+                    .setMessage(R.string.paste_solution_text)
+                    .setView(lurdTextView)
+                    .setPositiveButton(android.R.string.ok, new DialogInterface.OnClickListener() {
+                        public void onClick(DialogInterface dialog, int whichButton) {
+                            String lurd = lurdTextView.getText().toString();
+                            Board tryPositionBoard = (Board) mBoard.clone();
+                            if (tryPositionBoard.move(lurd)) {
+                                mSolution = lurd;
+                                updateToolbar();
+                                startSolver(true);
+                            } else {
+                                new AlertDialog.Builder(YASSActivity.this)
+                                        .setTitle(R.string.paste_solution_invalid_title_text)
+                                        .setMessage(R.string.paste_solution_invalid_text)
+                                        .setPositiveButton(android.R.string.ok, null)
+                                        .show();
                             }
-                        })
-                        .setNegativeButton(android.R.string.cancel, null)
-                        .show();
-                } else {
-                    startSolver(true);
-                }
-                return true;
-            case R.id.action_paste_puzzle:
-                String xsb = getClipboardText();
-                if(xsb != null) {
-                    mBoard = Board.fromXSB(getClipboardText());
-                    BoardView bv = (BoardView) YASSActivity.this.findViewById(R.id.view);
-                    bv.setBoard(mBoard);
-                    bv.invalidate();
-                }
-                return true;
-            case R.id.action_copy_puzzle:
-                ClipboardManager clipboardBoard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                ClipData clipBoard = ClipData.newPlainText(getString(R.string.clipboard_description), mBoard.toXSB());
-                clipboardBoard.setPrimaryClip(clipBoard);
-                return true;
-            case R.id.action_copy_solution:
-                ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                ClipData clip = ClipData.newPlainText(getString(R.string.clipboard_description), mSolution);
-                clipboard.setPrimaryClip(clip);
-                return true;
-            case R.id.action_settings:
-                Intent intent = new Intent(this, SettingsActivity.class);
-                this.startActivity(intent);
-                return true;
-            default:
-                return super.onOptionsItemSelected(item);
+                        }
+                    })
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show();
+            } else {
+                startSolver(true);
+            }
+            return true;
+        } else if (itemId == R.id.action_paste_puzzle) {
+            String xsb = getClipboardText();
+            if (xsb != null) {
+                mBoard = Board.fromXSB(getClipboardText());
+                BoardView bv = (BoardView) YASSActivity.this.findViewById(R.id.view);
+                bv.setBoard(mBoard);
+                bv.invalidate();
+            }
+            return true;
+        } else if (itemId == R.id.action_copy_puzzle) {
+            ClipboardManager clipboardBoard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            ClipData clipBoard = ClipData.newPlainText(getString(R.string.clipboard_description), mBoard.toXSB());
+            clipboardBoard.setPrimaryClip(clipBoard);
+            return true;
+        } else if (itemId == R.id.action_copy_solution) {
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            ClipData clip = ClipData.newPlainText(getString(R.string.clipboard_description), mSolution);
+            clipboard.setPrimaryClip(clip);
+            return true;
+        } else if (itemId == R.id.action_settings) {
+            Intent intent = new Intent(this, SettingsActivity.class);
+            this.startActivity(intent);
+            return true;
+        } else {
+            return super.onOptionsItemSelected(item);
         }
     }
 
