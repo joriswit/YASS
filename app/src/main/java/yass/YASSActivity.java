@@ -5,6 +5,7 @@ import android.app.ActivityManager;
 import android.app.AlertDialog;
 import android.app.FragmentManager;
 import android.content.ClipData;
+import android.content.ClipDescription;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
@@ -273,7 +274,7 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
 
     @Override
     public boolean onPrepareOptionsMenu(Menu menu) {
-        menu.findItem(R.id.action_paste_puzzle).setEnabled(mSolution == null && getClipboardText() != null);
+        menu.findItem(R.id.action_paste_puzzle).setEnabled(mSolution == null && hasClipboardText());
         menu.findItem(R.id.action_copy_solution).setEnabled(mSolution != null);
         return true;
     }
@@ -352,6 +353,12 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
                 return String.valueOf(data.getItemAt(0).coerceToText(this));
         }
         return null;
+    }
+
+    private boolean hasClipboardText() {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+        return (clipboard.hasPrimaryClip()
+                && clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN));
     }
 
     private ProgressDialogFragment mDialog;
