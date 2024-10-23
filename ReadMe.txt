@@ -1,6 +1,6 @@
 =====================================================================
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Puzzles
-Version 2.145 - March 11, 2021
+Version 2.146 - July 6, 2021
 Copyright (c) 2021 by Brian Damgaard, Denmark
 =====================================================================
 

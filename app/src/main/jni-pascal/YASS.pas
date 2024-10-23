@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.145 - March 11, 2021
+Version 2.146 - July 6, 2021
 Copyright (c) 2021 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -161,7 +161,7 @@ const
   BITS_PER_INTEGER         = BITS_PER_BYTE*SizeOf(Integer);
   BITS_PER_UNSIGNED_INTEGER= BITS_PER_BYTE*SizeOf(UInt);
   MAX_BOARD_WIDTH          = 50;
-  MAX_BOX_COUNT            = High(UInt8);      {limited by the slot 'BoxNo' in 'TMove'; must be a 2^N-1 number where 'N' is an integer > 0, so the value can be used as a bit mask to isolate a box number or a goal number}
+  MAX_BOX_COUNT            = High(UInt8);      {limited by the field 'BoxNo' in 'TMove'; must be a 2^N-1 number where 'N' is an integer > 0, so the value can be used as a bit mask to isolate a box number or a goal number}
   MAX_HISTORY_BOX_MOVES    = 1000;             {actually, it's pushes, not moves; originally it was limited by stack-size, but the tables for the recursive search are now allocated outside the stack; each +100 pushes cost ~1 MiB extra static data area}
   MAX_OPTIMIZER_SEARCH_DEPTH
                            = 99;               {must be < 'MAX_HISTORY_BOX_MOVES' div 4}
@@ -235,7 +235,7 @@ type
   TGoalSet                 = TBoxSet;
   TLevelStatisticsFlag     = (lsfMovesImproved,lsfOptimalSolution,lsfPushesImproved,lsfSecondaryMetricsImproved,lsfZeroPushSolution);
   TLevelStatisticsFlags    = set of TLevelStatisticsFlag;
-  TMove                    = packed record BoxNo:TBoxNo; Direction:TDirection; end; {'packed': sequence of unaligned slots, without gaps}
+  TMove                    = packed record BoxNo:TBoxNo; Direction:TDirection; end; {'packed': sequence of unaligned fields, without gaps}
   THashValue               = Int64;
   THistory                 = record
     Count                  : Integer;
@@ -326,6 +326,8 @@ const
                            = 8;                          {limits the search for expanded deadlock-sets}
   DEFAULT_DEADLOCK_SETS_BOX_LIMIT_FOR_DYNAMIC_SETS
                            = 16;                         {box limit for dynamically calculated deadlock-sets during the search (solver only)}
+  DEFAULT_SIMPLE_LOWER_BOUND_PUSHES_COUNT                {initially, try to use the simple lower bound as heuristic score, instead of the more accurate lower bound calculated by the time-consuming bipartite matching algorithm}
+                           = 250000;
   DEFAULT_LOG_FILE_ENABLED = False;
   DEFAULT_MEMORY_BYTE_SIZE = 64*ONE_MEBI;                {64 MiB}
   DEFAULT_OPEN_LIST_ESCAPE_INTERVAL
@@ -369,7 +371,7 @@ const
                            = (FLAG_TUNNEL_UP,FLAG_TUNNEL_LEFT,FLAG_TUNNEL_DOWN,FLAG_TUNNEL_RIGHT);
   {caution: if more directions are added to 'TDirection' (e.g., for the Hexoban variant), then 'DIRECTION_TO_TUNNEL_FLAGS' must be updated accordingly}
   DIRECTION_TO_TUNNEL_FLAGS: Cardinal=FLAG_TUNNEL_UP+FLAG_TUNNEL_LEFT+FLAG_TUNNEL_DOWN+FLAG_TUNNEL_RIGHT;
-  EMPTY_GOAL_PENALTY       = 32;               {penalty per unfilled target square (goal or parking space) during a packing order search; preferably a 2^n number for fast multiplications}
+  EMPTY_GOAL_PENALTY       = {64} 32;          {penalty for each unfilled target square (goal or parking space) during a packing order search; preferably a 2^n number for fast multiplications}
   FLAG_POSITION_BASE       = 1;
   FLAG_POSITION_VISITED    = 2;
   FROZEN_GOALS_PATTERN_THRESHOLD
@@ -399,7 +401,7 @@ const
   MAX_BOX_CHANGES_OPTIMIZATION_TIME_LIMIT_MS
                            = High(TTimeMS);    //30 * ONE_THOUSAND; {limit for the box-changes optimization; without a limit, large wide open levels may run 'forever'}
   MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND
-                           = 100;              {with more boxes it may take a long time to calculate a lower bound}
+                           = 32;               {with more boxes it may take a long time to calculate a lower bound}
   MAX_DEADLOCK_SEARCH_DEPTH
                            = 24;               {maximum search depth for the deadlock search which tries to prove that a given board constellation is a deadlock; must be less than high(byte); must be small because of exponential growth}
   MAX_DEADLOCK_SET_CANDIDATE_PUSH_COUNT
@@ -413,26 +415,27 @@ const
                            = 5 * 60 * ONE_THOUSAND; {arbitrary limit but should provide a reasonable bound on the running time}
   MAX_EXPAND_DEADLOCK_SET_PUSH_COUNT
                            = 10000;            {limit the number of pushes for attempts to derive new deadlock patterns after having proved that a pattern is a deadlock}
-  MAX_HISTORY_PLAYER_MOVES = Pred(High(TScore)); {limited by the slot 'Height' in 'TPosition'}
+  MAX_HISTORY_PLAYER_MOVES = Pred(High(TScore)); {limited by the field 'Height' in 'TPosition'}
   MAX_OPTIMIZER_BACKWARD_SEARCH_POSITIONS_COUNT
                            = 100*ONE_THOUSAND; {the size is rather critical; the backward search only plays a supporting role, and a too large limit will waste time as well as positions in the transposition table}
   MAX_OPTIMIZER_SEARCH_DEPTH_FOR_ADDING_BEST_PATH_PERMUTATIONS
-                           = 50;               {'50': a rather arbitrary depth limit (push count limit), but it must small enough to guard against stack overflow and to ensure that the transposition table isn't filled with best path permutations}
+                           = 50;               {'50': a rather arbitrary depth limit (push count limit), but it must be small enough to guard against stack overflow and to ensure that the transposition table isn't filled with best path permutations}
   MAX_OPTIMIZER_SUCCESSIVE_GLOBAL_OPTIMIZATION_SEARCHES
                            = 1;                {the optimizer performs this number of successful global-optimization searches before it changes optimization method}
   MAX_PACKING_ORDER_CALCULATION_TIME_MS        {maximum time for precalculation of a packing order; a somewhat arbitrary limit, but the precalculation should not take up too large a fraction of the total running time}
                            = 90 {seconds} * ONE_THOUSAND; {milliseconds}
   MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS        {maximum park-box attempts for the packing order calculation; the number should be small enough to guarantee a reasonably small running time upper bound}
                            = 500*ONE_KIBI;
+  MAX_SCORE_VALUE          = { (High(TScore) div 2)-1 } MAX_HISTORY_BOX_MOVES+(1+MAX_BOX_COUNT)*EMPTY_GOAL_PENALTY;
   MAX_SEARCH_TIME_LIMIT_MS = High(Integer)-1001; {'-1001': high-values are reserved for meaning 'unlimited'}
   MAX_SINGLE_STEP_MOVES    = MAX_BOARD_WIDTH*MAX_BOARD_HEIGHT+DIRECTION_COUNT*MAX_BOX_COUNT;
   MAX_TRANSPOSITION_TABLE_BYTE_SIZE            {limit the transposition table byte size to a signed integer and leave some memory free for other purposes}
                            : Integer
                            =
                            {$IFDEF PLUGIN_MODULE}
-                             (MaxInt div 10) * 8; {only use 80% of the total memory address space; the host program might run other memory-consuming tasks in parallel with the plug-in}
+                             ((MaxInt div 4) + 1) * 3; {use only 75% of the total memory address space; the host program might run other memory-consuming tasks in parallel with the plug-in}
                            {$ELSE}
-                             (MaxInt div 10) * 8; {only use 80% of the total memory address space; this leaves some memory for other purposes}
+                             ((MaxInt div 4) + 1) * 3; {use only 75% of the total memory address space; this leaves some memory for other purposes}
                            {$ENDIF}
   MAX_VICINITY_SQUARES     = {MAX_BOARD_WIDTH*MAX_BOARD_HEIGHT} 999; {the only reason for the 999-limit is that it allows a settings window to operate with 3-digits only for the spin-edit controls}
   MIN_BOX_LIMIT_FOR_DYNAMIC_DEADLOCK_SETS      {calculating and storing dynamic deadlock-sets are time-consuming operations; the minimum box limit must be reasonably small}
@@ -442,7 +445,7 @@ const
   MIN_NO_PROGRESS_DEADLOCK_SET_CANDIDATE_BOX_COUNT
                            = 3;                {threshold for checking whether not-pushed boxes should be checked for being deadlocked}
   MIN_SEARCH_TIME_FOR_EACH_SEARCH_METHOD_MS    {if there is less search time left, then special rules apply regarding which solver methods to use; for instance, one of the methods may get all the running time instead of giving all methods a try}
-                           = 60 {seconds} * ONE_THOUSAND; {milliseconds}
+                           = 30 {seconds} * ONE_THOUSAND; {milliseconds}
   NEXT_DIRECTION           : TDirectionMap {next anti-clockwise direction}
                            = (dLeft,dDown,dRight,dUp);
   OPPOSITE_DIRECTION       : TDirectionMap
@@ -541,7 +544,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.145';
+                           = '2.146';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -660,6 +663,7 @@ type
   TBoxArrayOfIntegers      = array[TBoxNo] of Integer;
   TBoxArrayOfUnsignedIntegers
                            = array[TBoxNo] of Cardinal;
+  TBoxGoalAssignments      = array[0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND] of TBoxNo;
   TBoxGoalSets             = array[TBoxNo] of TBoxSetWithCount; {for each box/goal, a set of box/goal numbers, e.g., for a mapping from goal numbers to pull-reachable box starting positions for each goal}
   TBoxNumbers              = array[TBoxNo] of TBoxNo;
   TBoxSquare               = Integer; {must be a signed integer-type value so negated values can indicate a flag value for the square}
@@ -801,6 +805,7 @@ type
     BoardSize              : Integer; {(Width+2)*(Height*2): the extra 2 is for a wall-filled border}
     BoardWidth             : Integer;
     BoxCount               : Integer;
+    BoxGoalAssignments     : TBoxGoalAssignments;
     BoxPos                 : TBoxSquares; {current game state; 'Board' = 'BoxPos' + 'PlayerPos'}
     DeadlockSets           : TDeadlockSets;
     DistanceToNearestGoal  : TBoardOfIntegers;
@@ -809,6 +814,7 @@ type
     EndPlayerPos           : Integer; {player's end position in the original snapshot/solution}
     FloorCount             : Integer; {number of floor squares on the board}
     FreezeTestTimeStamps   : TBoardTimeStamps; {timestamps for visited squares/axis during a freeze-test}
+    GoalBoxAssignments     : TBoxGoalAssignments;
     GoalCount              : Integer;
     GoalPos                : TBoxSquares;
     HashValue              : THashValue;
@@ -939,7 +945,7 @@ type
                            : Int64;
     VicinitySettings       : TVicinitySettings;
                              end;
-  TSquareGoalDistance      = array[0..MAX_BOARD_SIZE,TBoxNo] of UInt8; {'UInt8': otherwise the table gets unreasonable large; distances above are truncated to 254, and '255' is reserved for meaning 'INFINITY', i.e., no path to the square}
+  TSquareTargetDistance    = array[0..MAX_BOARD_SIZE,TBoxNo] of UInt16; {'UInt16': otherwise, the table gets unreasonable large; the high-value is reserved for meaning 'INFINITY', i.e., no path exists. real distances are truncated to high-value - 1}
   TPackingOrder            = record
     BoxCountThreshold      : Integer;  {threshold for trying to use a packing-order for solving the level}
     DistancesBasedOnPackingOrder       {when non-zero, square->goal distances taking the packing order into account have been calculated and are available in the table at index 'normal goal number' + 'DistancesBasedOnPackingOrder' for each of the goals}
@@ -963,7 +969,6 @@ type
     SquareDirectionTimestamps
                            : TSquareDirectionArrayOfInteger; {for path calculations while trying to push boxes to goals and parking spaces}
 *)
-    SquareGoalDistance     : TSquareGoalDistance; {distances from each square to each goal or parking square}
     TimeMS                 : TTimeMS;  {precalculation time, milli seconds}
                              end;
   TPositionLinks           = record    {the ordering of the fields must not change}
@@ -975,16 +980,16 @@ type
     SetMemberIndex         : UInt8;
                              end;
   TPositionType            = (ptNull,ptCorral,ptOpen,ptClosed,ptOptimizer,ptPerimeter);
-  TPosition                = packed record  {'packed': literal sequence of unaligned slots, without gaps (they must be carefully aligned manually)}
-    HashValue              : THashValue;    {must be first slot for fast addressing}
+  TPosition                = packed record  {'packed': literal sequence of unaligned fields, without gaps (they must be carefully aligned manually)}
+    HashValue              : THashValue;    {must be the first field for fast addressing}
     HashBucket             : TPositionLinks;{double-linked list of positions that hash into the same bucket; the positions in the bucket are sorted in ascending order on 'HashValue'}
     Parent                 : PPosition;     {predecessor position}
     PlayerPos              : UInt16;        {'0' marks an unused position}
-    Move                   : TMove;         {the move leading to this position; note that 'Move.Direction' is 'dirty', it contains flags as well as the direction}
+    Move                   : TMove;         {the move leading to this position; note that 'Move.Direction' is 'dirty', it contains flags as well as the direction. the field cannot be accessed as a normal field of type 'TDirection'}
     PushCount              : TScore;        {for the solver, this is the also the search-depth; for the optimizer it's only a metric}
-    Score                  : TScore;        {node cost; normally 'pushes + heuristic estimate'; special: perimeter-nodes from a previous search in the opposite direction have 'Score' = 0}
+    Score                  : TScore;        {node cost; normally 'heuristic estimate' or 'pushes + heuristic estimate'. special case: perimeter-nodes from a preceding search in the opposite direction have 'Score' = 0}
 {   Unused                 : UInt16;}       {so the record size is n*SizeOf(Integer)}
-{   TimeStamp              : TPositionTimeStamp;} {slot removed in order to save space; high-value marks locked positions, e.g., nodes on current path}
+{   TimeStamp              : TPositionTimeStamp;} {field removed in order to save space; high-value marks locked positions, e.g., nodes on current path}
     case TPositionType of                   {node-type dependent information for open nodes, closed nodes, and perimeter nodes}
       ptNull:
         (GameState         : Uint32;        {the optimizer method 'vicinity search' stores the game state for each position on the best path; the game state is a [box-configuration-index, player-square] tuple}
@@ -1021,7 +1026,7 @@ type
   TPositionVector          = array[0..(MaxInt div SizeOf(TPosition))-1] of TPosition;
   PPositionVector          = ^TPositionVector;
   TOpenPositions           = record
-    Buckets                : array[0..MAX_HISTORY_BOX_MOVES+(1+MAX_BOX_COUNT)*EMPTY_GOAL_PENALTY] of PPosition; {bucket-sorting open positions means that the sort is O(1), i.e., as fast as possible}
+    Buckets                : array[0..MAX_SCORE_VALUE] of PPosition; {bucket-sorting open positions means that sorting is O(1), i.e., as fast as possible}
     Count                  : Cardinal;      {number of open positions}
     HighValueItemCount     : Cardinal;      {number of positions with the highest possible score (used for a special list by the optimizer)}
     MaxValue               : Integer;       {highest stored score}
@@ -1088,9 +1093,9 @@ type
     PerimeterList          : PPosition;  {linked list of positions from a previous search in the opposite direction}
     PerimeterListCount     : Cardinal;   {number of positions on 'PerimeterList'; high-value: file error while saving perimeter nodes to disk}
     Positions              : PPositionVector;
-    SearchStatistics       : TSearchStatistics;
     SolutionPosition       : PPosition;
     StartPosition          : PPosition;  {start position for the search}
+    Statistics             : TSearchStatistics;    
     SquareHashValues       : array[0..MAX_BOARD_SIZE] of THashValue; {constants for calculating Zobrist hash-keys}
     UninitializedItemCount : Integer;    {start-value = 'Capacity'}
                              end;
@@ -1151,6 +1156,14 @@ type
     AddedCorralBoxesCount  : Int64;
     BackwardSearchDepthLimit
                            : Integer;   {maximum backward search limit (may differ from 'DepthLimit' in a perimeter-search, that is, first a backward search and then a forward search}
+    CalculateLowerboundCount
+                           : Int64;
+    CalculateLowerboundFailedCount      {time limit exceeded, or maximum auction bid count exceeded}
+                           : Int64;
+    CalculateLowerboundTimeMS
+                           : TTimeMS;
+    CalculateSquareTargetDistancesTimeMS
+                           : TTimeMS;
     CorralCount            : Int64;
     CorralSearchDepth      : Cardinal;
     DisplayPushCountdown   : Integer;
@@ -1176,10 +1189,13 @@ type
     SearchMethod           : TSearchMethod; {backward, forward, optimize, perimeter}
     SearchStates           : array[0..SEARCH_STATE_INDEX_CORRAL_PRUNING] of TSearchState;
     ShowBestPosition       : Boolean;   {show best found position when the solver doesn't find a solution (for testing)}
+    SimpleLowerBoundPushesCountdown     {initially, try to use the simple lower bound as heuristic score, instead of the more accurate lower bound calculated by the time-consuming bipartite matching algorithm}
+                           : Integer;
     SokobanCallBackFunction
                            : TSokobanCallBackFunction;
     SokobanStatus          : TSokobanStatus; {only used if the caller doesn't provide a pointer to its own status record}
     SokobanStatusPointer   : PSokobanStatus; {status info; points to 'SokobanStatus' if the caller doesn't provide its own record}
+    SquareTargetDistance   : TSquareTargetDistance; {for each square, the distance to each target square (start box square or goal square, depending on whether it's a backward search or a forward search}
     StartTimeMS            : TTimeMS;   {search time start; defined global here for slightly faster access}
     StopWhenSolved         : Boolean;   {'True': stop when a solution has been found, i.e., don't search for shorter solutions}
     Terminated             : Boolean;   {'True' indicates that the solver has been requested to terminate; stopping the currently running search only is done by calling 'TerminateSearch'}
@@ -1877,7 +1893,7 @@ begin {returns a non-zero value if the solver should terminate}
   if   Assigned(Solver.SokobanCallBackFunction) then with Solver.SokobanStatusPointer^ do begin
        MovesGenerated :=Solver.MoveCount;
        PushesGenerated:=Solver.PushCount;
-       StatesGenerated:=Int64(YASS.Positions.Count)+YASS.Positions.SearchStatistics.DroppedCount;
+       StatesGenerated:=Int64(YASS.Positions.Count)+YASS.Positions.Statistics.DroppedCount;
        TimeMS:=UInt32(Game.InitializationTimeMS+Solver.TimeMS+Optimizer.TimeMS);
 
        {$IFDEF SINGLE_LINE_STATUS_TEXT}
@@ -2167,7 +2183,7 @@ begin {a simple and not fool-proof implementation}
      if Result then
         case LoCase(s[2]) of
           'b'       : if           HasCharCI(s,'a') then begin {undocumented feature "-backwardsearchlimit": use a special backward search limit instead of 'maxdepth'}
-                                   Result:=GetParameter(BackwardSearchDepthLimit__,0,MaxInt,0,ItemIndex);
+                                   Result:=GetParameter(BackwardSearchDepthLimit__,0,MAX_HISTORY_BOX_MOVES,0,ItemIndex);
                                    end
                       else if      HasCharCI(s,'e') then begin {undocumented feature "-bestposition": show best found position when the solver doesn't find a solution}
                                    ShowBestPosition__:=True; Inc(ItemIndex);
@@ -2613,7 +2629,7 @@ function  WriteStatistics(OutputFileName__:String):Boolean;
 const SHORT_LINE_LENGTH=80;
 var
   i,j,Count,LineLength,SolvedCount,
-  NonOptimalSolutionCount,SolvedLevelsTotalTimeMS,TotalGeneratedPushesCountMillion:Integer;
+  OptimalSolutionCount,SolvedLevelsTotalTimeMS,TotalGeneratedPushesCountMillion:Integer;
   UnsignedInteger32:UInt32; Integer64:Int64;
   s:String; Total:TLevelStatistics; This,Next:PLevelStatistics; F:Text;
 begin {$I-}
@@ -2630,7 +2646,7 @@ begin {$I-}
        Next:=This^.Next; This^.Next:=LevelStatistics; LevelStatistics:=This; This:=Next;
        end;
      Count:=0; FillChar(Total,SizeOf(Total),0);
-     NonOptimalSolutionCount:=0; TotalGeneratedPushesCountMillion:=0;
+     OptimalSolutionCount:=0; TotalGeneratedPushesCountMillion:=0;
 
      for i:=1 to LineLength do Write(F,HYPHEN); Writeln(F);
      Write(F,TEXT_APPLICATION_TITLE,SPACE,TEXT_APPLICATION_VERSION_NUMBER);
@@ -2638,7 +2654,7 @@ begin {$I-}
      else Writeln(F,' - Optimizer Results');
      Writeln(F,'File: ',OutputFileName__);
      if      Solver.Enabled then
-             Writeln(F,'Method: ',TEXT_SOLUTION_METHOD[Solver.FindPushOptimalSolution],', ',TEXT_SEARCH_METHOD[Solver.SearchMethod],' search')
+             Writeln(F,'Method: ',Upcase(TEXT_SEARCH_METHOD[Solver.SearchMethod][1]), Copy(TEXT_SEARCH_METHOD[Solver.SearchMethod],2, MaxInt),' search')
      else if Optimizer.Enabled then
              if      Optimizer.Optimization=opMovesPushes then Writeln(F,'Optimize: Moves/pushes')
              else if Optimizer.Optimization=opPushesMoves then Writeln(F,'Optimize: Pushes/moves')
@@ -2687,7 +2703,8 @@ begin {$I-}
                Write(F,'Moves':8,'Pushes':8)
           else Write(F,'':8);
      Write(F,'Positions':13);
-     if   Solver.FindPushOptimalSolution then Write(F,'Pushes':13)
+     if   Solver.FindPushOptimalSolution then
+          Write(F,'Pushes':13)
      else Write(F,'Moves':13);
      Writeln(F,'Seconds':10);
      for i:=1 to LineLength do Write(F,HYPHEN); Writeln(F);
@@ -2741,7 +2758,7 @@ begin {$I-}
            )
           ) then begin
           Inc(SolvedCount);
-          if not (lsfOptimalSolution in Flags) then Inc(NonOptimalSolutionCount);
+          if lsfOptimalSolution in Flags then Inc(OptimalSolutionCount);
           end;
 
        if Solver.Enabled
@@ -2759,7 +2776,6 @@ begin {$I-}
        if i<>0 then Delete(s,i,MaxInt);
        if Length(s)>25 then Delete(s,26,MaxInt);
        Write(F,s:26);
-
 
        if   Solver.Enabled and
             (not Solver.FindPushOptimalSolution) then
@@ -2780,8 +2796,8 @@ begin {$I-}
                       end
                  else Write(F,'':9);
             if  Solver.Enabled then
-                if   lsfOptimalSolution in Flags then Write(F,SPACE)
-                else Write(F,ASTERISK);
+                if   lsfOptimalSolution in Flags then Write(F,ASTERISK)
+                else Write(F,SPACE);
             end
        else if Solver.Enabled then Write(F,'':9)
             else Write(F,'':17);
@@ -2855,10 +2871,10 @@ begin {$I-}
 
      if Solver.Enabled then begin
 
-        if NonOptimalSolutionCount<>0 then begin
-           if NonOptimalSolutionCount<>1 then s:='s'
+        if OptimalSolutionCount<>0 then begin
+           if OptimalSolutionCount<>1 then s:='s'
            else s:='';
-           Writeln(F,'  *:',NonOptimalSolutionCount:6,' solution',s,' may not be optimal');
+           Writeln(F,'  *:',OptimalSolutionCount:6,' push-optimal solution',s);
            for i:=1 to LineLength do Write(F,HYPHEN); Writeln(F);
            end;
 
@@ -2900,8 +2916,7 @@ begin {$I-}
         Writeln(F,'Time - packing order calculation           : ',Total.PackingOrderTimeMS:12,' milliseconds');
         Writeln(F,'Time - small optimizations                 : ',Total.OptimizerTimeMS:12,' milliseconds');
         if Solver.Enabled then
-           Writeln(
-                  F,
+           Writeln( F,
                   'Time - solved levels                       : ',SolvedLevelsTotalTimeMS:12,' milliseconds');
         i:=Total.InitializationTimeMS+Total.SolverTimeMS+Total.OptimizerTimeMS;
         Writeln(F,'Time - total                               : ',i:12,' milliseconds');
@@ -3135,7 +3150,7 @@ begin {caution: assumes 4 directions only}
                            * during the search for a solution, pushing a box to
                              a regular non-goal tunnel square always prunes all
                              other box pushes; for a goal tunnel square, this
-                             pruning only kicks in if the tunnel isn't blocked
+                             pruning kicks in only if the tunnel isn't blocked
                              by another box;
 
                           ( ( Solver.PackingOrder.SetCount > 0 )
@@ -3173,8 +3188,9 @@ begin {caution: assumes 4 directions only}
                         {'Direction', and both squares along the other axis     }
                         {contain walls (or 'NextSquare' is a gate square);      }
                         {                                                       }
-                        {at 'NextSquare', the box can also only move along the  }
+                        {at 'NextSquare', the box can also move only along the  }
                         {axis given by 'Direction';                             }
+                        {                                                       }
                         {therefore, when the box moves in the direction given by}
                         {'Direction' to 'NextSquare', then the box may just as  }
                         {well be pushed one step further at once, instead of    }
@@ -3187,7 +3203,7 @@ begin {caution: assumes 4 directions only}
                         { #@#    #@#    #@#     #@#     @ = 'Square'            }
                         {                                                       }
                         {if 'NextSquare' is a gate square then 'Square' doesn't }
-                        {need to be blocked by walls on both both sides;        }
+                        {have to be blocked by walls on both sides;             }
                         {                                                       }
                         {additionally, if 'Square' is a gate square and has     }
                         {walls on both sides, then "parking" at 'NextSquare' is }
@@ -3288,6 +3304,20 @@ begin
               end;
           end;
     BoardWidth:=BoardWidth__; BoardHeight:=BoardHeight__;
+    end;
+end;
+
+procedure MarkTargetSquares(ReverseMode__:Boolean);
+var BoxNo,GoalNo,Square:Integer;
+begin {marks goal squares or box starting positions as target squares, depending on the game mode}
+  with Game do begin
+    for  Square:=0 to BoardSize do {remove old marks, if any}
+         Board[Square]:=Board[Square] and ((1 shl GOAL_BIT_SHIFT_COUNT)-1);
+    if   not ReverseMode__ then
+         for GoalNo:=1 to GoalCount do
+             Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]]+Cardinal(GoalNo shl GOAL_BIT_SHIFT_COUNT)
+    else for BoxNo:=1 to BoxCount do
+             Board[StartBoxPos[BoxNo]]:=Board[StartBoxPos[BoxNo]]+Cardinal(BoxNo shl GOAL_BIT_SHIFT_COUNT);
     end;
 end;
 
@@ -3888,13 +3918,17 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
      end;
 end;
 
-function  HasALegalPush(Position__:PPosition; var BoxNo__:Integer; var Direction__:TDirection):Boolean;
+function  HasALegalPushOrPull(Position__:PPosition; var BoxNo__:Integer; var Direction__:TDirection):Boolean;
 var Count,SquareNo:Integer; d:TDirection; OldHashValue:THashValue;
-begin // returns 'True' if there currently is a move that leads to the position depicted by 'Position__'; see also 'OptimizeGame.WasALegalPush'
+begin // returns 'True' if there currently is a box push/pull that leads to the position depicted by 'Position__'; see also 'OptimizeGame.WasALegalPush'.
+      // the function searches for pushes or pulls depending on the current game mode given by 'Game.ReverseMode'
   Count:=0; OldHashValue:=Game.HashValue;
   with Position__^ do begin
     {find box number; due to transpositions it might differ from 'Position__^.Move.BoxNo'}
-    BoxNo__       :=BoxNoAtSquare(PlayerPos);
+    if    not Game.ReverseMode then
+          SquareNo:=PlayerPos
+    else  SquareNo:=PlayerPos-2*Game.SquareOffsetForward[TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK)];
+    BoxNo__       :=BoxNoAtSquare(SquareNo);
     if BoxNo__    <>0 then begin
        SquareNo   :=Game.BoxPos[BoxNo__];
        {find move direction; due to transpositions it might differ from 'Position__^.Move.Direction'}
@@ -3911,11 +3945,12 @@ begin // returns 'True' if there currently is a move that leads to the position 
     end;
 
   if Game.HashValue<>OldHashValue then
-     Msg(TEXT_INTERNAL_ERROR,'HasALegalPush');
+     Msg(TEXT_INTERNAL_ERROR,'HasALegalPushOrPull');
   Game.HashValue:=OldHashValue;
 
   Result:=Count=1; {'1': exactly 1 push direction matches the hashvalue for this position}
 end;
+
 (*
 procedure InitializePackingOrderPhase;
 begin
@@ -5516,7 +5551,7 @@ begin {transposition table: add new item unless it already is in the table}
                      TTRemove(Position__);                                      {remove 'Position__' from the transposition-table}
                      TTLookup(HashValue__,PlayerPos__,PushCount__,NextPosition);{find new 'NextPosition'}
                      end;
-                  Inc(SearchStatistics.ReuseCount);
+                  Inc(Statistics.ReuseCount);
 
                   Position__:=FreeList;                                         {get next free item ('TTRemove' may recurse, in effect putting several nodes on the free-list}
                   FreeList  :=FreeList^.HashBucket.Next;                        {the free-list uses 'HashBucket.Next' for linking}
@@ -5536,7 +5571,7 @@ begin {transposition table: add new item unless it already is in the table}
                            TTRemove(Position__);                                {remove 'Position__' from the transposition-table}
                            TTLookup(HashValue__,PlayerPos__,PushCount__,NextPosition);{find new 'NextPosition'}
                            end;
-                        Inc(SearchStatistics.ReuseCount);
+                        Inc(Statistics.ReuseCount);
 
                         Position__:=FreeList;                                   {get next free item}
                         FreeList  :=FreeList^.HashBucket.Next;                  {the free-list uses 'HashBucket.Next' for linking}
@@ -5588,23 +5623,23 @@ begin {transposition table: add new item unless it already is in the table}
 
           if   PlayerPos__<=MAX_BOARD_SIZE then begin {'True': this is a normal game state position}
                Inc(Count);
-               if   not Game.ReverseMode then Inc(SearchStatistics.ForwardPositionCount);
+               if   not Game.ReverseMode then Inc(Statistics.ForwardPositionCount);
                if   BestPosition<>nil then begin
                     if   Score<=BestScore then begin
                          if ((Score<BestScore) or (PushCount>BestPosition^.PushCount)) and {'PushCount>': positions closer to the solution (nodes deeper in the tree) are considered better positions than shallow nodes}
-                            (Position__^.PackingOrder.SetNo<>0) then begin {packing order search updates the best position back in the 'Search' function after changing the score to a more accurate estimate than the score available at this time}
+                            (Position__^.PackingOrder.SetNo<=0) then begin {packing order search updates the best position back in the 'Search' function after changing the score to a more accurate estimate than the score available at this time}
                             BestScore:=Score;
                             BestPosition:=Position__;
-                            Inc(SearchStatistics.NewBestPositionCount);
+                            Inc(Statistics.NewBestPositionCount);
                             end;
                          end;
                     end
                else begin BestScore:=Score;
                           BestPosition:=Position__;
-                          Inc(SearchStatistics.NewBestPositionCount);
+                          Inc(Statistics.NewBestPositionCount);
                     end;
                end
-          else Inc(SearchStatistics.CorralPositionsCount); {this is a corral position or a "no progress" deadlock stored in the transposition table together with the normal game state positions}
+          else Inc(Statistics.CorralPositionsCount); {this is a corral position or a "no progress" deadlock stored in the transposition table together with the normal game state positions}
 {
           if  DebugHashValueIndex < DebugHashValueCount then
               if HashValue__ = DebugHashValues^[ DebugHashValueIndex ] then
@@ -5633,7 +5668,7 @@ begin {transposition table: add new item unless it already is in the table}
           or
           (PlayerPos>MAX_BOARD_SIZE) {'True': it's a corral box configuration and not a normal game position}
           then begin {don't change the path to this position}
-          Inc(SearchStatistics.DuplicatesCount);
+          Inc(Statistics.DuplicatesCount);
           end
        else begin {cheaper path to this position: change path to it}
 {
@@ -5684,7 +5719,7 @@ begin {transposition table: add new item unless it already is in the table}
           PlayerPos             :=PlayerPos__;
           PushCount             :=PushCount__;
           Result                :=True;
-          Inc(SearchStatistics.NewPathCount);
+          Inc(Statistics.NewPathCount);
           if Parent__<>nil then Inc(Parent__^.SuccessorCount);
 
           if (BestPosition<>nil) and (Score<=BestScore) and
@@ -5692,7 +5727,7 @@ begin {transposition table: add new item unless it already is in the table}
              (Position__^.PackingOrder.SetNo<>0) then begin {packing order search updates the best position back in the 'Search' function after changing the score to a more accurate estimate than the score available at this time}
              BestScore:=Score;
              BestPosition:=Position__;
-             Inc(SearchStatistics.NewBestPositionCount);
+             Inc(Statistics.NewBestPositionCount);
              end;
           end;
 end;
@@ -5844,7 +5879,7 @@ begin {$I-}
        TimeCheck;
      {$ENDIF}
 
-     SearchStatistics.DroppedCount:=SearchStatistics.DroppedCount+InteriorNodesCount;
+     Statistics.DroppedCount:=Statistics.DroppedCount+InteriorNodesCount;
      if   Result>=0 then begin
           if Cardinal(Result)+InteriorNodesCount<>Count then
              Msg(TEXT_INTERNAL_ERROR+SPACE+LEFT_PAREN+IntToStr(Cardinal(Result)+InteriorNodesCount-Count)+RIGHT_PAREN,'TTCalculatePerimeter');
@@ -5893,12 +5928,12 @@ begin {transposition table: clear table, keeping precalculated deadlock-sets, if
     Count                         :=0;
     Capacity                      :=0;
     FreeList                      :=nil;
-    UninitializedItemCount        :=0;   SearchStatistics.DroppedCount:=0;
-    PerimeterList                 :=nil; PerimeterListCount           :=0;
-    BackwardPositionsList         :=nil; BackwardPositionsListCount   :=0;
-    CurrentPosition               :=nil; BestPosition                 :=nil;
-    StartPosition                 :=nil; SolutionPosition             :=nil;
-    PartiallyExpandedPositionsList:=nil; DebugPosition                :=nil;
+    UninitializedItemCount        :=0;   Statistics.DroppedCount    :=0;
+    PerimeterList                 :=nil; PerimeterListCount         :=0;
+    BackwardPositionsList         :=nil; BackwardPositionsListCount :=0;
+    CurrentPosition               :=nil; BestPosition               :=nil;
+    StartPosition                 :=nil; SolutionPosition           :=nil;
+    PartiallyExpandedPositionsList:=nil; DebugPosition              :=nil;
     BestScore                     := High( BestScore );
     if Positions<>nil then begin
        if HighWaterMark<>nil then
@@ -5916,7 +5951,7 @@ begin {transposition table: clear table, keeping precalculated deadlock-sets, if
        end;
 
     FillChar(CorralBoxSquares,SizeOf(CorralBoxSquares),0);
-    FillChar(SearchStatistics,SizeOf(SearchStatistics),0);
+    FillChar(Statistics,SizeOf(Statistics),0);
 
     with Game.DeadlockSets do begin
       if Count >  PrecalculatedSetsCount then begin {'True': dynamically calculated deadlock-sets were found during a previous search; drop all of them before a new search is launched}
@@ -6058,8 +6093,8 @@ begin {transposition table: test if a key already exists in the table;}
     Position__:=HashBuckets^[HashBucketIndex];
     if Position__<>nil then begin
        BasePosition:=Position__;
-       Inc(SearchStatistics.Lookup1Count);
-       repeat Inc(SearchStatistics.Lookup2Count);
+       Inc(Statistics.Lookup1Count);
+       repeat Inc(Statistics.Lookup2Count);
 
 //            lookup algorithm when the player-position isn't fixed, i.e., search the player's access area for a match
               if        HashValue__=Position__^.HashValue then
@@ -6131,7 +6166,7 @@ begin {transposition table: remove item; precondition: 'Position__' is a fringe-
      Position__^.HashBucket.Next:=Positions.FreeList;                           {return the item to the free-list}
      Positions.FreeList:=Position__;
 
-     Dec(Positions.Count); Inc(Positions.SearchStatistics.DroppedCount);        {update counts and statistics}
+     Dec(Positions.Count); Inc(Positions.Statistics.DroppedCount);              {update counts and statistics}
 
      if Parent<>nil then with Parent^ do begin
         Dec(SuccessorCount);
@@ -6495,10 +6530,10 @@ end; {CalculateDistanceToNearestGoalForAllSquares}
 
 function  CalculateBoxReachableSquaresForAllBoxes:Integer;
 var Square:Integer; Distances:TBoardOfIntegers;
-begin
+begin {note that the player's start position does matter, but otherwise each box is calculated individually with all other boxes removed from the board}
   with Game do begin
     Result:=0;
-    CalculateDistanceToNearestBoxStartPositionForAllSquares(1,BoxCount,False,Distances);
+    CalculateDistanceToNearestBoxStartPositionForAllSquares(1,BoxCount,True,Distances);
     {ShowBoxDistanceToAllSquares(Distances); Readln;}
 
     for Square:=0 to BoardSize do {for each square...}
@@ -7078,19 +7113,97 @@ begin
     if not Result then
        Readln;
   end;
-
 end;
 
-procedure CalculateSquareGoalDistances(FirstGoalNo__,LastGoalNo__,DestinationOffset__:Integer;
-                                       UsePackingOrder__:Boolean;
-                                       var SquareGoalDistance__:TSquareGoalDistance;
-                                       var GoalBoxSets__:TBoxGoalSets);
+
+procedure CalculateSquareStartBoxPositionDistances(var SquareTargetDistance__ :TSquareTargetDistance;
+                                                   var BoxGoalSets__          :TBoxGoalSets);
 type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
-var  BoxNo,GoalNo,Index,OldPlayerPosition,Square:Integer;
+var  BoxNo,GoalNo,OldPlayerPosition,Square:Integer;
+     StartTimeMS:TTimeMS;
      Direction:TDirection;
      Distances:TSquareDirectionArrayOfInteger;
 
-  procedure ShowSquareGoalDistance(GoalNo__:Integer; const SquareGoalDistance__:TSquareGoalDistance);
+  procedure ShowSquareTargetDistance(BoxNo__:Integer; const SquareTargetDistance__:TSquareTargetDistance);
+  var Col,Row,Square,Distance:Integer;
+  begin
+    Writeln('Box: ',BoxNo__);
+    with Game do
+      for Row:=1 to BoardHeight do begin
+          for Col:=1 to BoardWidth do begin
+              Square:=ColRowToSquare(Col,Row);
+              Distance:=SquareTargetDistance__[Square,BoxNo__];
+              if (Board[Square] and WALL)<>0 then
+                 Write('#':3)
+              else if   Distance>=High(SquareTargetDistance__[Square,BoxNo__]) then Write('_':3)
+                   else Write(Distance:3);
+              end;
+          Writeln;
+          end;
+    Writeln; Readln;
+  end;
+
+begin {CalculateSquareStartBoxPositionDistances}
+  with Game do begin
+    StartTimeMS:=GetTimeMS;
+    OldPlayerPosition:=PlayerPos;
+    for BoxNo:=1 to Game.BoxCount do Dec(Board[BoxPos[BoxNo]],BOX); {remove all boxes from the board}
+
+    for Square:=0 to BoardSize do
+        SquareTargetDistance__[Square,0]:=High(SquareTargetDistance__[Square,0]); {'High': no path from the square to the goal; note the difference between the defined integer constant 'INFINITY' and the high value}
+    for BoxNo:=1 to Game.BoxCount do
+        if Solver.SearchLimits.DepthLimit>=0 then begin {'True': the solver hasn't been terminated}
+
+           CalculateBoxPullOrPushDistances(StartBoxPos[BoxNo],SEARCH_STATE_INDEX_DO_PUSH,True,False,False,False,Distances);
+
+           for Square:=0 to BoardSize do begin
+               SquareTargetDistance__[Square,BoxNo]:=
+                 High(SquareTargetDistance__[Square,BoxNo]); {'High': means no path from the square to the goal; note the difference between the defined integer constant 'INFINITY' and the byte-sized high value}
+               if IsALegalAndBoxReachableSquare(Square) then
+                  for Direction:=Low(Direction) to High(Direction) do
+                      if Abs(Distances[Square,Direction])<>INFINITY then
+                         SquareTargetDistance__[Square,BoxNo]:=
+                           Min(SquareTargetDistance__[Square,BoxNo],
+                               Min(Distances[Square,Direction],
+                                   High(SquareTargetDistance__[Square,BoxNo])-1 {'High()-1': reserves high-value so it means 'unreachable'}
+                                  )
+                              );
+               end;
+
+           {calculate for box starting position, the goals that are reachable by pushing a box from the box starting position to the goal, as if playing the game in forward mode}
+           with BoxGoalSets__[BoxNo] do begin
+             Count:=0; BoxSet:=[];
+             for GoalNo:=1 to GoalCount do
+                 if SquareTargetDistance__[GoalPos[GoalNo],BoxNo]<
+                    High(SquareTargetDistance__[GoalPos[GoalNo],BoxNo]) then begin {'True': a box can be pushed from the box starting position 'BoxNo' to the goal with index 'GoalNo'}
+                    Inc(Count); Include(BoxSet,GoalNo); {'True': a box can be pushed from the box starting position 'BoxNo' to the goal with index 'GoalNo'}
+                    end;
+             end;
+
+           //ShowSquareTargetDistance(BoxNo,SquareTargetDistance__);
+
+           TimeCheck; {the calculation of the reachable box starting positions for each square can be a time consuming task if it's a large and open board; the task may be terminated by a time limit or by the user}
+           end;
+
+    for BoxNo:=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board}
+    PlayerPos:=OldPlayerPosition; {restore player position}
+
+    SquareTargetDistance__[0,0]:=Ord(Solver.SearchLimits.DepthLimit>=0); {(ab)use element[0,0] to signal that distances have been calculated. square 0 is a wall outside the user's board, and box number 0 is unused}
+    Inc(Solver.CalculateSquareTargetDistancesTimeMS, CalculateElapsedTimeMS(StartTimeMS,GetTimeMS));
+    end;
+end; {CalculateSquareStartBoxPositionDistances}
+
+procedure CalculateSquareGoalDistances(FirstGoalNo__,LastGoalNo__,DestinationOffset__:Integer;
+                                       UsePackingOrder__:Boolean;
+                                       var SquareTargetDistance__:TSquareTargetDistance;
+                                       var GoalBoxSets__:TBoxGoalSets);
+type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
+var  BoxNo,GoalNo,Index,OldPlayerPosition,Square:Integer;
+     StartTimeMS:TTimeMS;
+     Direction:TDirection;
+     Distances:TSquareDirectionArrayOfInteger;
+
+  procedure ShowSquareTargetDistance(GoalNo__:Integer; const SquareTargetDistance__:TSquareTargetDistance);
   var Col,Row,Square,Distance:Integer;
   begin
     Writeln('Goal: ',GoalNo__);
@@ -7098,10 +7211,10 @@ var  BoxNo,GoalNo,Index,OldPlayerPosition,Square:Integer;
       for Row:=1 to BoardHeight do begin
           for Col:=1 to BoardWidth do begin
               Square:=ColRowToSquare(Col,Row);
-              Distance:=SquareGoalDistance__[Square,DestinationOffset__+GoalNo__];
+              Distance:=SquareTargetDistance__[Square,DestinationOffset__+GoalNo__];
               if (Board[Square] and WALL)<>0 then
                  Write('#':3)
-              else if   Distance>=High(SquareGoalDistance__[Square,GoalNo__]) then Write('_':3)
+              else if   Distance>=High(SquareTargetDistance__[Square,GoalNo__]) then Write('_':3)
                    else Write(Distance:3);
               end;
           Writeln;
@@ -7111,17 +7224,21 @@ var  BoxNo,GoalNo,Index,OldPlayerPosition,Square:Integer;
 
 begin {CalculateSquareGoalDistances}
   with Game do begin
+    StartTimeMS:=GetTimeMS;
     OldPlayerPosition:=PlayerPos;
     for BoxNo:=1 to Game.BoxCount do Dec(Board[BoxPos[BoxNo]],BOX); {remove all boxes from the board}
+
+    for Square:=0 to BoardSize do
+        SquareTargetDistance__[Square,0]:=High(SquareTargetDistance__[Square,0]); {'High': no path from the square to the goal; note the difference between the defined integer constant 'INFINITY' and the high value}
     for GoalNo:=FirstGoalNo__ to LastGoalNo__ do
         if Solver.SearchLimits.DepthLimit>=0 then begin {'True': the solver hasn't been terminated}
 
-           if UsePackingOrder__ then with Solver.PackingOrder do begin {put the boxes on the board which will be filled according to the packing order at the time when 'GoalNo' should be filled}
+           if UsePackingOrder__ then with Solver.PackingOrder do begin {put the boxes on the board which will be filled according to the packing order at the time when 'GoalNo' is to be filled}
               for Index:=1 to GoalCount do  {'GoalCount': only consider real goal squares, not parking squares because boxes at parking squares can move; that's the point in having parking spaces;}
                   if (GoalSetNo[Index] > GoalSetNo[GoalNo]) and
                      (ParkedBoxDestinationGoalSetNo[Index]<=GoalSetNo[GoalNo]) then
                      Board[GoalPos[Index]]:=Board[GoalPos[Index]] or BOX;
-              for Index:=1 to GoalCount do {remove non-freezing boxes again, so the calculation finds all squares which possibly can be reached by pulling a box around on the board, starting from 'GoalNo'}
+              for Index:=1 to GoalCount do {remove non-freezing boxes again, so the calculation finds all squares that can be reached by pulling a box around on the board, starting from 'GoalNo'}
                   if ((Board[GoalPos[Index]] and BOX)<>0) and
                      (not IsAFreezingMove(0,GoalPos[Index],True )) then
                      Board[GoalPos[Index]]:=Board[GoalPos[Index]] and (not BOX);
@@ -7134,28 +7251,30 @@ begin {CalculateSquareGoalDistances}
                   Board[GoalPos[Index]]:=Board[GoalPos[Index]] and (not BOX);
 
            for Square:=0 to BoardSize do begin
-               SquareGoalDistance__[Square,DestinationOffset__+GoalNo]:=
-                 High(SquareGoalDistance__[Square,DestinationOffset__+GoalNo]); {'High': means no path from the square to the goal; note the difference between the defined integer constant 'INFINITY' and the byte-sized high value}
+               SquareTargetDistance__[Square,DestinationOffset__+GoalNo]:=
+                 High(SquareTargetDistance__[Square,DestinationOffset__+GoalNo]); {'High': no path from the square to the goal; note the difference between the defined integer constant 'INFINITY' and the high value}
                if IsALegalAndBoxReachableSquare(Square) then
                   for Direction:=Low(Direction) to High(Direction) do
                       if Abs(Distances[Square,Direction])<>INFINITY then
-                         SquareGoalDistance__[Square,DestinationOffset__+GoalNo]:=
-                           Min(SquareGoalDistance__[Square,DestinationOffset__+GoalNo],
+                         SquareTargetDistance__[Square,DestinationOffset__+GoalNo]:=
+                           Min(SquareTargetDistance__[Square,DestinationOffset__+GoalNo],
                                Min(Distances[Square,Direction],
-                                   High(SquareGoalDistance__[Square,DestinationOffset__+GoalNo])-1 {'High()-1': reserves 'High()' so it means 'unreachable'}
+                                   High(SquareTargetDistance__[Square,DestinationOffset__+GoalNo])-1 {'High()-1': reserves high-value so it means 'unreachable'}
                                   )
                               );
                end;
 
-           {calculate for each goal, the box starting positions that are reachable by pulling a box from the goal square to the box starting position, as if playing the game in reverse mode}
+           {calculate for each goal, the box starting positions that can be reached by pulling a box from the goal square to the box starting position, as if playing the game in reverse mode}
            with GoalBoxSets__[DestinationOffset__+GoalNo] do begin
              Count:=0; BoxSet:=[];
-              for BoxNo:=1 to BoxCount do
-                  if SquareGoalDistance__[StartBoxPos[BoxNo],DestinationOffset__+GoalNo]<
-                     High(SquareGoalDistance__[StartBoxPos[BoxNo],DestinationOffset__+GoalNo]) then begin {'True': a box can be pulled from the goal 'GoalNo' to the box starting position with index 'BoxNo'}
-                     Inc(Count); Include(BoxSet,BoxNo); {a box can be pulled from the goal 'GoalNo' to the box starting position 'BoxNo'}
-                     end;
-              end;
+             for BoxNo:=1 to BoxCount do
+                 if SquareTargetDistance__[StartBoxPos[BoxNo],DestinationOffset__+GoalNo]<
+                    High(SquareTargetDistance__[StartBoxPos[BoxNo],DestinationOffset__+GoalNo]) then begin {'True': a box can be pulled from the goal 'GoalNo' to the box starting position with index 'BoxNo'}
+                    Inc(Count); Include(BoxSet,BoxNo); {a box can be pulled from the goal 'GoalNo' to the box starting position 'BoxNo'}
+                    end;
+             end;
+
+           //ShowSquareTargetDistance(GoalNo,SquareTargetDistance__);
 
            TimeCheck; {the calculation of the reachable goals for each square can be a time consuming task if it's a large and open board; the task may be terminated by a time limit or by the user}
            end;
@@ -7163,9 +7282,11 @@ begin {CalculateSquareGoalDistances}
     for BoxNo:=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board}
     PlayerPos:=OldPlayerPosition; {restore player position}
 
+    SquareTargetDistance__[0,0]:=Ord(Solver.SearchLimits.DepthLimit>=0); {(ab)use element[0,0] to signal that distances have been calculated. square 0 is a wall outside the user's board, and box number 0 is unused}
+    Inc(Solver.CalculateSquareTargetDistancesTimeMS, CalculateElapsedTimeMS(StartTimeMS,GetTimeMS));
 {
     if UsePackingOrder__ then
-       for GoalNo:=1 to GoalCount do ShowSquareGoalDistance(GoalNo,SquareGoalDistance__);
+       for GoalNo:=1 to GoalCount do ShowSquareTargetDistance(GoalNo,SquareTargetDistance__);
 }
     end;
 end; {CalculateSquareGoalDistances}
@@ -9264,7 +9385,7 @@ XX              of them is a box on a non-goal square. The non-wall
           Include(DeadlockSetCandidate__.Flags,dsfPeelOffNonCorralBoxes); {initialize the peeling operation}
           Exclude(DeadlockSetCandidate__.Flags,dsIsAGameStateDeadlockCandidate); {when boxes tentatively are removed from the candidate, then the board isn't a complete game state anymore}
 
-          {try to find and discard boxes which don't contribute to the deadlock situation}
+          {try to find and discard boxes that don't contribute to the deadlock situation}
           for BoxNo:=1 to Game.BoxCount do begin
               //InitializeBoard; {put boxes on the board which contribute to the forward search deadlock, or which haven't been tested yet}
 
@@ -12067,7 +12188,7 @@ XX              of them is a box on a non-goal square. The non-wall
                (Solver.SearchLimits.DepthLimit>=0) then begin
                GoalNumberSet.Count:=0; {collect the goals which cannot be reached from this square}
                for GoalNo:=1 to GoalCount do
-                   if SquareGoalDistance[Square,GoalNo]=High(SquareGoalDistance[Square,GoalNo]) then {'High': high-value means 'INFINITY', i.e., there is no path from the square to the goal}
+                   if Solver.SquareTargetDistance[Square,GoalNo]=High(Solver.SquareTargetDistance[Square,GoalNo]) then {'High': high-value means 'INFINITY', i.e., there is no path from the square to the goal}
                       with GoalNumberSet do begin
                         Inc(Count); Numbers[Count]:=GoalNo;
                         end;
@@ -12082,7 +12203,7 @@ XX              of them is a box on a non-goal square. The non-wall
                          OK:=True;
                          for GoalNo:=1 to GoalNumberSet.Count do {check if the unreachable goals from the square number 'Index' is a subset of the unreachable goals from 'Square'}
                              if   OK then
-                                  if   SquareGoalDistance[Index,GoalNumberSet.Numbers[GoalNo]]<High(SquareGoalDistance[Index,GoalNumberSet.Numbers[GoalNo]]) then
+                                  if   Solver.SquareTargetDistance[Index,GoalNumberSet.Numbers[GoalNo]]<High(Solver.SquareTargetDistance[Index,GoalNumberSet.Numbers[GoalNo]]) then
                                        OK:=False
                                   else
                              else break; {quick-and-dirty exit the 'for' loop as soon as it has been established that the unreachable goals from the square 'Index' isn't a subset of the unreachable goals from 'Square'}
@@ -12202,8 +12323,8 @@ XX              of them is a box on a non-goal square. The non-wall
 
          {calculate distances from each square to each goal}
          if   Solver.PackingOrder.Enabled then with Solver.PackingOrder do
-              CalculateSquareGoalDistances(1,Game.GoalCount,0,False,SquareGoalDistance,GoalBoxSets);
-//       else FillChar(Solver.PackingOrder.SquareGoalDistance,SizeOf(Solver.PackingOrder.SquareGoalDistance),0);
+              CalculateSquareGoalDistances(1,Game.GoalCount,0,False,Solver.SquareTargetDistance,GoalBoxSets);
+//       else FillChar(Solver.PackingOrder.SquareTargetDistance,SizeOf(Solver.PackingOrder.SquareTargetDistance),0);
 
          {calculate distance to nearest goal for all squares}
          CalculateDistanceToNearestGoalForAllSquares(True,Game.DistanceToNearestGoal);
@@ -12463,11 +12584,10 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           end;
 
       {insert the goal numbers in the board square values so there is a mapping
-       from the board squares back to the goal numbers; note that the mapping
-       relies on the goal numbers occupying the high-order bits for each square;
+       from the board squares back to the goal numbers; the mapping uses the
+       high-order bits for each square
       }
-      for i:=1 to GoalCount do
-          Board[GoalPos[i]]:=Board[GoalPos[i]]+Cardinal(i shl GOAL_BIT_SHIFT_COUNT);
+      MarkTargetSquares(False);
 
       if  Result and (PlayerPos=0) then begin
           Result:=False; PluginResult__:=prInvalidLevel;
@@ -12937,7 +13057,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                between the parking square and the goal square, measuring the
                push-distance on an empty board;
                these square-to-goal distances have already been calculated and
-               are available in 'Solver.PackingOrder.SquareGoalDistance[,];
+               are available in 'Solver.PackingOrder.SquareTargetDistance[,];
 
                the secondary parking square is the one with the highest
                Manhattan distance between the goal square and the parking
@@ -12966,8 +13086,8 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                     Distance:=MinimumDistanceToSquare(Square,BoxPullSquareDirectionDistances);
                     if Distance<>INFINITY then {'True': the box can be pulled from the goal square to 'Square'}
                        if GoalNo__<=GoalCount then begin {'True': it's a normal goal square and not a parking space}
-                          if   Solver.PackingOrder.SquareGoalDistance[Square,GoalNo__]<High(Solver.PackingOrder.SquareGoalDistance[Square,GoalNo__]) then {'True': the distance to the goal doesn't exceed the (byte-sized) maximum distance}
-                               Distance:=Solver.PackingOrder.SquareGoalDistance[Square,GoalNo__]
+                          if   Solver.SquareTargetDistance[Square,GoalNo__]<High(Solver.SquareTargetDistance[Square,GoalNo__]) then {'True': the distance to the goal doesn't exceed the (byte-sized) maximum distance}
+                               Distance:=Solver.SquareTargetDistance[Square,GoalNo__]
                           else Distance:=INFINITY;
                           end
                        else begin
@@ -13787,7 +13907,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
 
         if Result then begin
            if GoalAndParkingSquareCount>GoalCount then                          {'True': some boxes require parking; calculate the distances from all squares to the parking squares; the parking squares are handled as pseudo goal squares}
-              CalculateSquareGoalDistances(Succ(GoalCount),GoalAndParkingSquareCount,0,False,SquareGoalDistance,GoalBoxSets); {'Succ(GoalCount)': calculate distances for parking squares}
+              CalculateSquareGoalDistances(Succ(GoalCount),GoalAndParkingSquareCount,0,False,Solver.SquareTargetDistance,GoalBoxSets); {'Succ(GoalCount)': calculate distances for parking squares}
            if ( 2 * GoalAndParkingSquareCount ) < High( TBoxNo ) then begin
               {the square->goal distance table is big enough to contain the
               distances calculated taking the packing order into account;
@@ -13796,7 +13916,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
               and penalties based on distances to goals and parking spaces to
               fill in the current game phase}
               DistancesBasedOnPackingOrder:=GoalAndParkingSquareCount; {offset from the normal distances where the packing order aware distances can be found}
-              CalculateSquareGoalDistances(1,GoalAndParkingSquareCount,DistancesBasedOnPackingOrder,True,SquareGoalDistance,GoalBoxSets); {calculate distances for real goal squares and for parking squares}
+              CalculateSquareGoalDistances(1,GoalAndParkingSquareCount,DistancesBasedOnPackingOrder,True,Solver.SquareTargetDistance,GoalBoxSets); {calculate distances for real goal squares and for parking squares}
               end;
 (*
            {the peeling algorithm has peeled smaller groups from the board}
@@ -13817,7 +13937,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                       //SquareToColRow(GoalPos[i],Col2,Row2);
                       GoalMinDistanceToNeighborGroup[GoalNo]:=Min(GoalMinDistanceToNeighborGroup[GoalNo],
                                                                   //Abs(Col1-Col2)+Abs(Row1-Row2)
-                                                                  Solver.PackingOrder.SquareGoalDistance[GoalPos[i],GoalNo]
+                                                                  Solver.PackingOrder.SquareTargetDistance[GoalPos[i],GoalNo]
                                                                  );
                       end;
                end;
@@ -13930,7 +14050,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
   begin {CalculatePackingOrder}
     {preconditions:
       * the board, the box positions, and the player position match the initial game state;
-      * 'CalculateSquareGoalDistances()' has been called in order to calculate packing order related information; ('CalculateDeadlockSets()' calls it);
+      * 'CalculateSquareTargetDistances()' has been called in order to calculate packing order related information; ('CalculateDeadlockSets()' calls it);
     }
     with Game do with Solver.PackingOrder do begin
       TimeMS:=GetTimeMS; {remember the start time; the field is updated to elapsed time upon exit from the funtion}
@@ -14772,7 +14892,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     LevelTimeLimitMS:TTimeMS;
     OriginalSearchLimits:TSearchLimits;
     OriginalSearchMethod:TSearchMethod;
-    PackingOrderSearchStatistics:TSearchStatistics;
+    PackingOrderStatistics:TSearchStatistics;
     {$IFDEF CONSOLE_APPLICATION}
       s:String;
     {$ENDIF}
@@ -14833,7 +14953,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
   begin // precondition : 'Position__' is a member of the transposition-table
        //  postcondition: if it's a forward search then 'Solver.SearchStates[Position__^.PushCount].PlayersReacableSquares.Calculated' has been set according to whether the calculation has been performed for the push number 'Position__^.PushCount'
     with Positions do begin
-      Inc(SearchStatistics.SetPosition1Count);
+      Inc(Statistics.SetPosition1Count);
 
       // find path back to common ancestor of new position and current position
       p:=Position__; Next:=nil;
@@ -14855,7 +14975,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              end
         else UndoPull(Move.BoxNo,Move.Direction);
         CurrentPosition:=Parent;
-        Inc(SearchStatistics.SetPosition2Count);
+        Inc(Statistics.SetPosition2Count);
 {
         if (CurrentPosition<>nil) and
            (CurrentPosition.HashValue<>Game.HashValue) then begin
@@ -14871,9 +14991,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
            with Next^ do begin
              if   not Game.ReverseMode then begin
                   Solver.SearchStates[PushCount].PlayersReachableSquares.Calculated:=False; {initialize 'Calculated' before calling 'DoPush()'}
-                  // check that the push is legal; it's unlikely that 2 different
-                  // positions accidentally have identical 64-bit hashvalues,
-                  // but if/when it happens it destroys the path chains;
+                  // check that the push is legal; it's seldom that two
+                  // different positions have identical 64-bit hashvalues, but
+                  // if/when it happens it destroys the path chains;
                   //
                   // a more common reason for an illegal push is that the path
                   // to a position has changed; in that case there is still a
@@ -14882,7 +15002,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                   if  (Game.Board[PlayerPos] and BOX)<>0 then begin
                       SquareNo:=Game.BoxPos[Move.BoxNo];
                       if   SquareNo<>PlayerPos then begin // '<>': the move leading to 'Position__' isn't legal anymore; check if pushing another box can lead to the position represented by 'Position__'
-                           if HasALegalPush(Next,NewBoxNo,NewDirection) then begin // 'True': substitute the old move with the new one
+                           if HasALegalPushOrPull(Next,NewBoxNo,NewDirection) then begin // 'True': substitute the old move with the new one
                               Move.BoxNo:=NewBoxNo;
                               UInt8(Move.Direction):=(UInt8(Move.Direction) and (not DIRECTION_BIT_MASK))+Ord(NewDirection);
                               //for NewBoxNo:=1 to Game.BoxCount do with Game do {repair the box numbers stored in the upper bits of the board squares}
@@ -14924,7 +15044,37 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                           TerminateSearch; // something is wrong, such as 2 different positions accidentally having identical hashvalues
                           end;
                   end
-             else DoPull(Move.BoxNo,Move.Direction);
+             else begin // reverse mode
+                // check that the pull is legal; it's seldom that two different
+                // positions have identical 64-bit hashvalues, but if/when it
+                // happens it destroys the path chains;
+                //
+                // a more common reason for an illegal pull is that the path
+                // to a position has changed; in that case there is still a
+                // pull leading to this position, but it may be a different
+                // box and a different direction;
+                if (Game.Board[PlayerPos] and BOX)=0 then begin
+                   SquareNo:=Game.BoxPos[Move.BoxNo];
+                   if   SquareNo<>PlayerPos-2*Game.SquareOffsetForward[TDirection(UInt8(Move.Direction) and DIRECTION_BIT_MASK)] then begin // '<>': the move leading to 'Position__' isn't legal anymore; check if pulling another box can lead to the position represented by 'Position__'
+                        if Move.BoxNo<>0 then begin
+                           if HasALegalPushOrPull(Next,NewBoxNo,NewDirection) then begin // 'True': substitute the old move with the new one
+                              Move.BoxNo:=NewBoxNo;
+                              UInt8(Move.Direction):=(UInt8(Move.Direction) and (not DIRECTION_BIT_MASK))+Ord(NewDirection);
+                              //for NewBoxNo:=1 to Game.BoxCount do with Game do {repair the box numbers stored in the upper bits of the board squares}
+                              //    Board[BoxPos[NewBoxNo]]:=Cardinal(Board[BoxPos[NewBoxNo]] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or Cardinal(NewBoxNo shl BOX_BIT_SHIFT_COUNT);
+                              end
+                           else begin
+                              TerminateSearch; // something is wrong, such as 2 different positions accidentally having identical hashvalues
+                              end;
+                           end
+                        else MovePlayer(PlayerPos);
+                        end;
+                   DoPull(Move.BoxNo,Move.Direction);
+                   end
+                else begin
+                    TerminateSearch; // something is wrong, such as 2 different positions accidentally having identical hashvalues
+                   end;
+                end;
 
              Inc(UInt8(Move.Direction),POSITION_PATH_TAG); // set 'on current path' tag; note that this is very dirty because 'Direction' is now out of bounds; use "TDirection(Ord(Direction__) and DIRECTION_BIT_MASK)" to extract the direction
 {
@@ -14944,7 +15094,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              Inc(Depth);
 
              Temp:=Parent; Parent:=CurrentPosition; CurrentPosition:=Next; Next:=Temp; // pointer reversal so 'Parent' again contains a parent list instead of a forward list
-             Inc(SearchStatistics.SetPosition2Count);
+             Inc(Statistics.SetPosition2Count);
              end;
          until Next=nil; // until all pushes on the path leading to 'Position__' have been performed
          end
@@ -14960,6 +15110,39 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          end;
       end;
   end; // Search.SetPosition
+
+  function  HasValidSolution : Boolean;
+  var NewSolutionPosition : PPosition;
+  begin {returns 'True' if a solution has been recorded, and if it hasn't been corrupted by changing paths between the positions stored in the transposition table;
+         side effect: on success, puts the solution position on the board;
+         precondition: 'Game.ReverseMode' is set correctly, i.e., it matches the positions on the solution path, if there is a solution}
+    with Positions do begin
+      Result := SolutionPosition <> nil;
+      if Result and ( StartPosition = SolutionPosition ) then begin
+         {start position = goal position; it's necessary to separate them in order to avoid infinite loops in 'SetPosition' when it walks up and down the path to the solution position}
+         with SolutionPosition^ do
+           if   TTAdd( HashValue, PlayerPos + 4 * MAX_BOARD_SIZE, PushCount, Score, Move.BoxNo, Move.Direction, Parent, NewSolutionPosition ) then begin {'4 * ...': to ensure that a new position is created}
+                NewSolutionPosition^.PlayerPos := SolutionPosition^.PlayerPos; {set the correct player position}
+                SolutionPosition := NewSolutionPosition;
+                with StartPosition^ do begin {cleanse the starting position for the solution position information}
+                  PushCount := Game.TubeFillingPushCount; Score := 0; Move.BoxNo := 0; Move.Direction := dUp; Parent := nil;
+                  PlayerPos := Solver.SearchStates[Game.TubeFillingPushCount].PlayersReachableSquares.MinPlayerPos;
+                  Inc( UInt8( Move.Direction ), POSITION_PATH_TAG );
+                  end;
+               end
+           else Result := False; {no memory available for the copy}
+         end;
+      if Result then begin
+         SetPosition( nil ); {reset the game, so all pushes/pulls are replayed when the solution position is put in the board by the next statement}
+         SetPosition( SolutionPosition ); {replay all pushes/pulls, and repair changed box numbers and push/pull directions, if necessary}
+         Result := CurrentPosition = SolutionPosition; {'True': all pushes/pulls are valid}
+         if not Result then
+            SetPosition( nil );
+         end;
+      if not Result then
+         SolutionPosition := nil;
+      end;
+  end; // Search.HasValidSolution
 
   procedure ShowPath(Position__:PPosition);
   var OldPlayerPos:Integer; p:PPosition;
@@ -15306,9 +15489,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                Write(Reader.LevelCount,': Depth: ',Position__^.PushCount);
                                if SuccessorScore<INFINITY then Write(' Score: ',SuccessorScore);
                                Write(' Pushes: ',Solver.PushCount div ONE_MILLION,' million');
-                               if   Positions.SearchStatistics.ReuseCount=0 then
+                               if   Positions.Statistics.ReuseCount=0 then
                                     Write(' Positions: ',Positions.Count)
-                               else Write(' Reused positions: ',Positions.SearchStatistics.ReuseCount);
+                               else Write(' Reused positions: ',Positions.Statistics.ReuseCount);
                                {Write(' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000);}
                                Writeln;
                             {$ENDIF}
@@ -15335,6 +15518,43 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                       Position__,                               {parent node}
                                       SuccessorPosition) then begin             {'SuccessorPosition' is the new saved position}
 
+                                if SuccessorPosition<>Positions.StartPosition then begin {'True': not a solution}
+                                   if (SuccessorScore>PositionScore)            {'True': the successor is less promising than the current position}
+                                      or
+                                      (SuccessorScore>Positions.OpenPositions.MinValue) {'True': the search has put at least one new position on the open-queue which is more promising than the current position}
+                                      then begin {put the successor position on the open-queue}
+                                      if    SuccessorPushCount<=Solver.BackwardSearchDepthLimit then begin {'True': backward search depth-limit not exceeded}
+                                            Inc(Positions.Statistics.EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); {'True' counter: the player's reachable squares have been calculated}
+                                            OPENAdd(SuccessorPosition);         {put the position on the open-queue}
+                                            end;
+                                      end
+                                   else with SuccessorPosition^ do begin
+                                          {the successor is just as promising as its}
+                                          {parent-node and belongs at the front of the}
+                                          {open-queue; therefore, it's better to recurse}
+                                          {immidiately, exploiting the fact that the game}
+                                          {state is already correct for this position}
+                                          if SuccessorPushCount<=Solver.BackwardSearchDepthLimit then begin {'True': backward search depth-limit not exceeded}
+                                             Inc(Positions.Statistics.Enqueue2Count);
+                                             if not Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated then {'True': 'TTAdd' didn't trigger the calculation; do it now}
+                                                CalculatePlayersReachableSquares(SuccessorPushCount); {find the player's reachable squares}
+                                             if   (UInt8(SuccessorPosition^.Move.Direction) and POSITION_PATH_TAG)=0 then begin
+                                                  Inc(UInt8(SuccessorPosition^.Move.Direction),POSITION_PATH_TAG); {mark the successor position as a member of the currently investigated path}
+                                                  Score:=Search(SuccessorPosition);
+                                                  Dec(UInt8(SuccessorPosition^.Move.Direction),POSITION_PATH_TAG); {remove the 'current path' tag}
+                                                  end
+                                             else Score:=Search(SuccessorPosition); {maybe this cannot happen, but better safe than sorry}
+                                             SuccessorScore:=Score;
+                                             end;
+                                          end;
+                                   end
+                                else begin                                      {a solution}
+                                    Positions.SolutionPosition:=SuccessorPosition;
+                                    TerminateSearch;
+                                    Positions.OpenPositions.Count:=0;           {'0': signals an exhaustive search, i.e., an optimal solution}
+                                    end;
+
+(*
                                 if    (SuccessorScore>PositionScore) then begin
                                       if    SuccessorPushCount<=Solver.BackwardSearchDepthLimit then begin {'True': backward search depth-limit not exceeded}
                                             Inc(Positions.SearchStatistics.EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); {'True' counter: the player's reachable squares have been calculated}
@@ -15362,6 +15582,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                          TerminateSearch;
                                          Positions.OpenPositions.Count:=0;      {'0': signals an exhaustive search, i.e., an optimal solution}
                                          end;
+*)
                                 end
                              else                                               {the position wasn't added to the transposition-table}
                                 if   SuccessorPosition<>nil then                {'True': the position already exists in the transposition-table}
@@ -15437,6 +15658,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       SetSokobanStatusText(TEXT_BACKWARD_SEARCH+SPACE+LEFT_PAREN+IntToStr(Positions.MemoryByteSize div ONE_MEBI)+SPACE+TEXT_MEBI_BYTES+RIGHT_PAREN);
     {$ENDIF}
     StartPositionReverseMode:=Game.ReverseMode; Game.ReverseMode:=True; Game.Rooms.Count:=Abs(Game.Rooms.Count);
+    MarkTargetSquares(True);
 
     if Game.TubeFillingPushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit then begin {'True': the level might be solvable with this search depth limit}
        OriginalCapacity := Positions.Capacity;                                  {remember the total transposition table capacity}
@@ -15483,6 +15705,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
        CalculateDistanceToNearestBoxStartPositionForAllSquares(1,Game.BoxCount,False,Game.DistanceToNearestBoxStartPosition);
        //ShowBoxDistanceToAllSquares(Game.DistanceToNearestBoxStartPosition); Readln;
+
+       CalculateSquareStartBoxPositionDistances(Solver.SquareTargetDistance,Solver.PackingOrder.GoalBoxSets); {'... .GoalBoxSets' isn't used in a backwards search. (ab)use them as receptacle here}
 
        CalculateTunnelSquares;
        {ShowTunnelSquares; Readln;}
@@ -15534,19 +15758,16 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
        while OPENRemoveNextPositionSelectedForExpansion(Position) do begin
          SetPosition(Position); {update the board so it matches this position}
          {ShowBoard; Write('Depth: ',Position^.PushCount); Readln;}
-         CalculatePlayersReachableSquares(Position^.PushCount);              {find the player's reachable squares; a precondition for 'Search'}
+         CalculatePlayersReachableSquares(Position^.PushCount);                 {find the player's reachable squares; a precondition for 'Search'}
          Search(Position);
          end;
 
-       if (Positions.SolutionPosition<>nil) then with Positions do begin
-          SetPosition(SolutionPosition);
-
+       if HasValidSolution then with Positions do begin
           for BoxNo:=1 to Game.BoxCount do                                      {map backward box-numbers to numbers used in the forward game}
               for i:=1 to Game.BoxCount do
                   if Game.BoxPos[i]=BoxStartPositions[BoxNo] then begin
                      ForwardBoxNo[i]:=BoxNo; break;
                      end;
-
           Result:=Game.TubeFillingPushCount+SolutionPosition^.PushCount;
           //FillChar(Game.History,SizeOf(Game.History),0);
           Game.History.Count:=Result;
@@ -15557,8 +15778,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                    end;
                  StartPosition:=Position;
                  Position:=Position^.Parent;
-          until  (Position^.Parent=nil) or
-                 (Position^.PushCount>=StartPosition^.PushCount)                {'>=': the positions form a circular list in case start-position = goal-position}
+          until  Position^.Parent=nil;
           end
        else
           if Positions.StartPosition<>nil then TTRemove(Positions.StartPosition);
@@ -15566,6 +15786,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
        {restore game start-position and forward game-play mode}
        SetBoard(PlayerStartPosition,BoxStartPositions,StartPositionReverseMode,PlayerStartPosition,BoxStartPositions,StartPositionReverseMode);
        Solver.ReuseNodesEnabled:=OriginalReuseNodesEnabled;                     {restore 'reuse nodes'}
+       Solver.SquareTargetDistance[0,0]:=Ord(False);                            {(ab)use element[0,0] to signal that distances have been calculated. square 0 is a wall outside the user's board, and box number 0 is unused}
+       MarkTargetSquares(False);                                                {mark goal squares as target squares for a forward search}
        //ShowBoard; Readln;
 
        {restore the maximum transposition table capacity in case the backward search was running with a smaller table}
@@ -15790,19 +16012,19 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_OPEN_TAG);
           end;
 
-        Inc(Positions.SearchStatistics.CalculateCorralDeadlockStatusCount);
+        Inc(Positions.Statistics.CalculateCorralDeadlockStatusCount);
 
         {$IFDEF CONSOLE_APPLICATION}
-          if (Positions.SearchStatistics.CalculateCorralDeadlockStatusCount and (ONE_KIBI-1))=0 then begin
+          if (Positions.Statistics.CalculateCorralDeadlockStatusCount and (ONE_KIBI-1))=0 then begin
              Write(Reader.LevelCount,': Depth: ',GamePosition__^.PushCount);
              if GamePosition__^.Score<DEAD_END_SCORE then Write(' Score: ',GamePosition__^.Score);
              Write(' Pushes: ');
              if   Solver.PushCount>=ONE_MILLION then
                   Write(Solver.PushCount div ONE_MILLION,' million')
              else Write(Solver.PushCount);
-             if   Positions.SearchStatistics.ReuseCount=0 then
+             if   Positions.Statistics.ReuseCount=0 then
                   Write(' Positions: ',Positions.Count)
-             else Write(' Reused positions: ',Positions.SearchStatistics.ReuseCount);
+             else Write(' Reused positions: ',Positions.Statistics.ReuseCount);
              {Write(' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000);}
              Writeln;
              end;
@@ -15882,12 +16104,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              1. the game position is a deadlock, i.e., there are no legal pushes in the currect game position;
              2. the player's reachable squares have been calculated for the current game state
                 and are available in the global 'Solver.SearchStates[GamePosition__^.PushCount].PlayersReachableSquares' vector;
-                furthermore, boxes which aren't candidates (e.g., not members of a corral) have 'zero' in their slot in that vector;
+                furthermore, boxes that aren't candidates (e.g., not members of a corral) have 'zero' in their slot in that vector;
              3. the player's reachable squares for index 'MAX_HISTORY_BOX_MOVES' in 'Solver.SearchStates[]' are free to use;
             }
         NoPushesDeadlockPosition__:=nil; //Result:=False; exit;
         SuccessorPushCount:=Succ(GamePosition__^.PushCount);
-        Inc(Positions.SearchStatistics.NoPushDeadEndsCount);
+        Inc(Positions.Statistics.NoPushDeadEndsCount);
 
         if SuccessorPushCount<MAX_HISTORY_BOX_MOVES then with Game do begin {'<': 'Solver.SearchStates[MAX_HISTORY_BOX_MOVES]' is used by this function}
            OldControllerAndFreezeSetPairsEnabled:=DeadlockSets.ControllerAndFreezeSetPairsEnabled;
@@ -15992,7 +16214,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                      Flags                    :=[dsfIsADeadlock,dsfPlayerMustBeOutsideSet,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence]; {'dsfIsADeadlock': the corral is a deadlock; no further analysis is necessary}
                      SquareOutsideFence       :=-SquaresOutsideFence.Squares[1]; {elevate one of the squares outside the fence to be the representative for the outside area; (the negated value makes 'CommitDeadlockSet' use the absolute value)}
                      SquaresOutsideFence.Count:=-SquaresOutsideFence.Count; {negate the count; it makes 'CommitDeadlockSet' use the absolute value instead of resetting the count}
-                     with Positions.SearchStatistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count);  {update statistics}
+                     with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count);  {update statistics}
 
                      OldHashValue:=Game.HashValue;
                      CalculateCorralDeadlockStatus(GamePosition__,NoPushesDeadlockPosition__,DeadlockSetCandidate);
@@ -16082,7 +16304,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             DeadlockSetCandidate.CenterSquare:=Corral__.MinPlayerPos;
             DeadlockSetCandidate.Flags:=[];
 
-            with Positions.SearchStatistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count);  {update statistics}
+            with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count);  {update statistics}
 {
             if CorralPosition.HashValue=1374239095250729304 then begin
 //          if Solver.PushCount=4383191 then begin
@@ -16236,7 +16458,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                   DeadlockSetCandidate.GoalCount:=0; {the number of goals is recalculated from scratch by 'CalculateDeadlockSets' when the candidate has a center square, but the number must be initialized with a proper value}
                   DeadlockSetCandidate.Flags:=[];
 
-                  with Positions.SearchStatistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count); {update statistics}
+                  with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count); {update statistics}
 {
                   if Game.HashValue=1391017276032698857 then begin
                      ShowBoard;
@@ -17209,7 +17431,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       with Game do with Solver.PackingOrder do
         for Index := FirstSetMemberIndex[ Position__^.PackingOrder.SetNo ] to
                      Pred( FirstSetMemberIndex[ Succ( Position__^.PackingOrder.SetNo ) ] ) do
-            Result := Min( Result,  SquareGoalDistance[ BoxPos[ Position__^.Move.BoxNo ], DistancesBasedOnPackingOrder + SetMembers[Index] ] );
+            Result := Min( Result, Solver.SquareTargetDistance[ BoxPos[ Position__^.Move.BoxNo ], DistancesBasedOnPackingOrder + SetMembers[Index] ] );
       if Result = High( Result ) then
          Result := -1;
     end;
@@ -17221,7 +17443,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     }
     const END_GAME_PHASE_LIMIT=2; {near the end of the game, be less strict about obeying the calculated packing order}
     var   Distance,EmptySquaresCount,FilledSquaresCount,FreezePenalty,GamePhase,GoalNo,
-          i,Index,LastSetMemberIndex,Score,SetMemberSquare,SetNo,Square,SquarePhase:Integer;
+          i,Index,LastSetMemberIndex,Score,Score2,SetMemberSquare,SetNo,Square,SquarePhase:Integer;
     begin {CalculatePackingOrderPhaseAndScore}
           {returns 'True' if the box reaches a target square for the game phase after the push}
       with Game do with Solver.PackingOrder do begin
@@ -17262,17 +17484,22 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
         LastSetMemberIndex:=Pred(FirstSetMemberIndex[Succ(GamePhase)]);         {the last goal/parking space member index for the current packing order phase}
 
-        Distance:=High(SquareGoalDistance[ToSquare__,GoalNo]);                  {initialize 'Distance' to 'INFINITY' which in this case with the byte-sized SquareGoalDistance[,]' array is '255'}
-        FilledSquaresCount:=0; EmptySquaresCount:=0;                            {calculate empty and filled squares for the phase}
+        Distance:=High(Solver.SquareTargetDistance[ToSquare__,GoalNo]);         {initialize 'Distance' to 'INFINITY', meaning no path exists. note the difference between the high value and the defined constant 'INFINITY'}
+        FilledSquaresCount:=0; EmptySquaresCount:=0; Score2:=0;                 {calculate empty and filled squares for the phase}
         for Index:=FirstSetMemberIndex[GamePhase] to LastSetMemberIndex do begin {for each target square for the current phase}
             GoalNo:=SetMembers[Index];                                          {get a target (goal or parking square) belonging to this phase}
             SetMemberSquare:=GoalPos[GoalNo];                                   {get the square number for the target}
             if (Board[SetMemberSquare] and (WALL+BOX))=0 then begin             {'True': no box at this square; 'WALL': parking squares abandoned during the search are overwritten by '0' in the packing order, in effect designating a wall square}
                Inc(EmptySquaresCount);
 
-               i  :=SquareGoalDistance[ToSquare__  ,DistancesBasedOnPackingOrder+GoalNo]; {the distance from the new box square to the target square}
+               i  :=Solver.SquareTargetDistance[ToSquare__  ,DistancesBasedOnPackingOrder+GoalNo]; {the distance from the new box square to the target square}
                if i<Distance then Distance:=i;                                  {'True': this is a new/first closest target; remember its distance}
-               if i<SquareGoalDistance[FromSquare__,DistancesBasedOnPackingOrder+GoalNo] then Inc(Score,2); {'True': pushing the box in this direction brings it closer to this goal/parking square}
+               if i<Solver.SquareTargetDistance[FromSquare__,DistancesBasedOnPackingOrder+GoalNo] then begin; {'True': pushing the box in this direction brings it closer to this goal/parking square}
+                  Inc(Score,2);
+                  if (SquarePhase>0) and
+                     (SquarePhase<GamePhase) then
+                     Inc(Score2);                                               {give a bonus for emptying a goal or parking square which first is to be filled later}
+                  end;
 
                Position__^.PackingOrder.SetMemberIndex:=Index;                  {update the 'last unfilled set member' index for the position}
 (*
@@ -17300,7 +17527,11 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                end;
             end;
 
-        Inc(Score,Solver.ProgressCheckPoint.BoxPushBonuses[BoxNo__]);           {give a bonus for pushing infrequently pushed boxes; if the solver doesn't make any progress, then the normal evaluation function isn't doing a good job}
+        Inc(Score,Solver.ProgressCheckPoint.BoxPushBonuses[BoxNo__]);           {bonus for pushing infrequently pushed boxes; if the solver doesn't make any progress, then the normal evaluation function isn't doing a good job}
+
+        if  Score2>0 then begin
+            //Inc(Score,Score2*2);                                              {bonus for moving a box away from a goal/parking square which should be filled later, e.g., when pushing a box through a goal area towards a final destination}
+            end;
 
         if  Score>0 then begin                                                  {'True': the push brought the box closer to one or more of the target squares for the current packing order phase, or the box got a bonus for being pushed}
             UInt8(Position__^.Move.Direction):=UInt8(Position__^.Move.Direction) or POSITION_PACKING_ORDER_TAG; {mark the position as the result of a packing order push; successive packing order pushes count as 1 push only}
@@ -17325,7 +17556,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                 *
                 EMPTY_GOAL_PENALTY);                                            {before this bonus is deducted, the score contains the penalty 'MAX_BOX_COUNT * EMPTY_GOAL_PENALTY'}
 
-            if Distance<High(SquareGoalDistance[ToSquare__,GoalNo]) then begin  {'True': the distance isn't 'INFINITY', where 'INFINITY' may just mean that the distance is too big to be recorded in the square->goal table with its byte-sized elements}
+            if Distance<High(Solver.SquareTargetDistance[ToSquare__,GoalNo])    {'True': the distance isn't 'INFINITY', where 'INFINITY' may just means that the distance is too big to be recorded in the square->goal table}
+               then begin
                {give a penalty for the distance to the nearest of the target
                 squares for this game phase;
 
@@ -17361,12 +17593,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                    for this game phase; numeric overflow/underflow is ignored;
                    if it happens it doesn't cause a crash; it just makes the
                    estimated position score more inaccurate;}
-                  Dec(Score,FreezePenalty div 2);                               
+                  Dec(Score,FreezePenalty div 2);
                   end
                else Dec(UInt8(Position__^.Move.Direction),POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG); {no prematurely frozen boxes at goal squares; remove the flag}
                end;
 
-            if   Score<=Position__^.Score then Dec(Position__^.Score,Score)     {give a bonus for getting closer to the target squares for this game phase}
+            if   Score<=Position__^.Score then Dec(Position__^.Score,Score)     {bonus for getting closer to the target squares for this game phase}
             else Position__^.Score:=1;                                          {this shouldn't happen}
 
             if Position__^.Score> High(Positions.OpenPositions.Buckets) then
@@ -17772,7 +18004,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     end;
 *)
     begin {Search.ForwardSearch.Search}
-      {$IFDEF CONSOLE_APPLICATION} //......
+      {$IFDEF CONSOLE_APPLICATION}
 //      if (Positions.Count>8*ONE_MILLION) and ((Positions.Count mod 100000)=0) then WritelnToLogFile(IntTostr(Positions.Count));
 //      if Position__=Positions.DebugPosition then Solver.DisplayPushCountdown:=-1;
 //      if Game.HashValue=4767988369080262767 then Solver.DisplayPushCountdown:=-1;
@@ -18118,7 +18350,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                          end;
                       end;
                   if   RoomPruningBoxCount<>0 then begin
-                       Inc(Positions.SearchStatistics.RoomPositionsCount);
+                       Inc(Positions.Statistics.RoomPositionsCount);
                        end
                   else RoomNo:=0; {no real room pruning; all the reachable boxes are inside the current room anyway}
 {
@@ -18169,21 +18401,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                        {extended checks for legal moves}
                        IsALegalPush(BoxNo,Direction,SuccessorPushCount) then begin
 
-                       //if solver.pushcount>=1999 then
-                       //   writeln(solver.pushcount);
-
                        Inc(Solver.ProgressCheckPoint.BoxPushCounts[BoxNo]);
 
                        if Solver.PushCount<Solver.SearchLimits.PushCountLimit then begin {limit not exceeded}
-{
-//                        if (Solver.PushCount>=0) then begin
-                          if Game.HashValue=3914083414399637035 then begin
-                             ShowBoard;
-                             Write(Solver.PushCount,SPACE,Game.SimpleLowerBound);
-                             Readln;
-                             //
-                             end;
-}
                           //Game.History.Moves[SuccessorPushCount].Direction:=Direction; {update game history}
                           DoPush(BoxNo,Direction,SuccessorPushCount);           {do the move, i.e., update the board}
 
@@ -18244,9 +18464,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                Write(Reader.LevelCount,': Depth: ',Position__^.PushCount);
                                Write(' Score: ',Position__^.Score);
                                Write(' Pushes: ',Solver.PushCount div ONE_MILLION,' million');
-                               if   Positions.SearchStatistics.ReuseCount=0 then
+                               if   Positions.Statistics.ReuseCount=0 then
                                     Write(' Positions: ',Positions.Count)
-                               else Write(' Reused positions: ',Positions.SearchStatistics.ReuseCount);
+                               else Write(' Reused positions: ',Positions.Statistics.ReuseCount);
                                {Write(' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000);}
                                Writeln;
                                //ShowBoard;
@@ -18293,10 +18513,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                    Readln;
                                    end;
 }
-                                // WriteBoardToLogFile(IntToStr(SuccessorPushCount)+'  '+IntToStr(Solver.PushCount));
-
-//                              WritelnToLogFile('New '+IntToStr(Positions.Count));
-
+                                // WritelnToLogFile( IntToStr( Positions.Count ) + SPACE + IntToStr( Solver.PushCount ) + SPACE + IntToStr( Game.HashValue) );
 
                                 SuccessorScore:=SuccessorPosition^.Score;       {'Score' is 0 for perimeter-nodes (leaf-nodes) from a search in the opposite direction, hence, retrieve the actually saved score for the position}
 
@@ -18369,7 +18586,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                          (CorralBoxCount<>0) then with SuccessorPosition^ do begin
                                          {expand corral box pushes recursively}
                                          Inc(Uint8(Move.Direction),POSITION_PATH_TAG); {mark the successor position as a member of the currently investigated path}
-                                         Inc(Positions.SearchStatistics.Enqueue2Count);
+                                         Inc(Positions.Statistics.Enqueue2Count);
                                          SuccessorPosition^.PackingOrder.SetNo:=Position__^.PackingOrder.SetNo;
                                          if not Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated then {'True': 'TTAdd' didn't trigger the calculation; do it now}
                                             CalculatePlayersReachableSquares(SuccessorPushCount); {find the player's reachable squares}
@@ -18393,13 +18610,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                             then begin {put the successor position on the open-queue}
                                             if (SuccessorPosition^.PushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit) and
                                                ((Ord(SuccessorPosition^.Move.Direction) and POSITION_OPEN_TAG)=0) then begin {'0': the packing order search hasn't put the position on the open-queue}
-                                               Inc(Positions.SearchStatistics.EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); {'True' counter: the player's reachable squares have been calculated}
+                                               Inc(Positions.Statistics.EnqueuedPositionsCount[Solver.SearchStates[SuccessorPushCount].PlayersReachableSquares.Calculated]); {'True' counter: the player's reachable squares have been calculated}
                                                OPENAdd(SuccessorPosition);      {put the position on the open-queue}
                                                end;
                                             end
                                          else with SuccessorPosition^ do begin {expand the successor position immediately}
                                             Inc(UInt8(Move.Direction),POSITION_PATH_TAG); {mark the successor position as a member of the currently investigated path}
-                                            Inc(Positions.SearchStatistics.Enqueue2Count);
+                                            Inc(Positions.Statistics.Enqueue2Count);
 
                                             {the successor is just as promising as}
                                             {its parent-node, hence, it belongs at}
@@ -18526,6 +18743,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                          PushCount        :=SuccessorPushCount;
                                          Score            :=SuccessorPushCount;
                                          Parent           :=Position__;         {handle with care: if this is the start-position, then the solution is now a circular list}
+                                         PlayerPos        :=Game.PlayerPos;
                                          Move.BoxNo       :=BoxNo;
                                          Move.Direction   :=Direction;
                                          end;
@@ -18808,7 +19026,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
     Positions.BestScore:=High(Positions.BestScore);
     Positions.BestPosition:=nil;
-    Positions.SearchStatistics.NewBestPositionCount:=0;
+    Positions.Statistics.NewBestPositionCount:=0;
 
     //LogFile.Enabled:=True;
     //CreateLogFile('t1.txt');
@@ -18920,10 +19138,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          end
       else begin {the current path leads to a a deadlocked position}
          Game.DeadlockSets.NewDynamicDeadlockSets:=True; {ensure that all deadlock-sets are taken into account when the next position is selected and put on the board}
-         Inc(Positions.SearchStatistics.DeadlockedOpenPositionsCount);
+         Inc(Positions.Statistics.DeadlockedOpenPositionsCount);
          //Solver.ProgressCheckPoint.BestGamePhase:=Solver.PackingOrder.SetCount; {the best found game phase and score may have been found by following a deadlocked path; reset them so they will be updated with values from non-deadlocked positions}
          //Solver.ProgressCheckPoint.BestScore:=High(Solver.ProgressCheckPoint.BestScore);
-         if (Positions.SearchStatistics.DeadlockedOpenPositionsCount and ((10*ONE_KIBI)-1))=0 then begin
+         if (Positions.Statistics.DeadlockedOpenPositionsCount and ((10*ONE_KIBI)-1))=0 then begin
             {$IFDEF CONSOLE_APPLICATION}
               Write('Forward  ');
               Write('Depth: ',Position^.PushCount,SPACE,Position^.PushCount-Positions.CurrentPosition^.PushCount,SPACE,Game.PackingOrderPushCount,
@@ -18954,7 +19172,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
     //CloseLogFile;
 
-    if Positions.SolutionPosition<>nil then with Positions do begin             {put the pushes into the game history}
+    if HasValidSolution then with Positions do begin
        Result:=SolutionPosition^.PushCount;
        Game.History.Count:=Result; Position:=SolutionPosition;
        repeat with Game.History.Moves[Position^.PushCount] do begin
@@ -18962,10 +19180,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                 Direction:=TDirection(Ord(Position^.Move.Direction) and DIRECTION_BIT_MASK);
                 end;
               Position:=Position^.Parent;
-       until  Position=StartPosition;
-       //if Reader.LevelCount=85 then
-       //   TTSave( 'zzzzzz.zzz' );
-       //SetPosition(nil); ShowPathForwards(SolutionPosition); SetPosition(SolutionPosition); Readln;
+       until  (Position=StartPosition) or (Position=nil);
+       SetPosition(nil);
        end;
 
     if Positions.StartPosition<>nil then SetPosition(Positions.StartPosition);
@@ -18980,7 +19196,7 @@ begin {Search}
   Solver.TimeMS:=0; Optimizer.TimeMS:=0;
   Solver.LastCallBackTimeMS:=0; Solver.TimeCheckCount:=0;
   Solver.MoveCount:=0; Solver.PushCount:=0; Solver.LimitExceededPushCount:=0;
-  FillChar(PackingOrderSearchStatistics,SizeOf(PackingOrderSearchStatistics),0);
+  FillChar(PackingOrderStatistics,SizeOf(PackingOrderStatistics),0);
   Game.History.Count:=Game.TubeFillingPushCount;
   Game.History.Moves[0].BoxNo:=1; Game.IsAnOptimalSolution:=False;
   OriginalSearchLimits:=Solver.SearchLimits;
@@ -19053,16 +19269,16 @@ begin {Search}
 
                  if   //False and
                       (Solver.SearchLimits.TimeLimitMS>0) and (not Solver.Terminated) then begin {perform a second search without packing order moves}
-                      Solver.PackingOrder.SetCount                      :=-Abs(Solver.PackingOrder.SetCount);
-                      Solver.SearchMethod                               :=smPerimeter;                {run backward search + forward search}
-                      Solver.SearchLimits.DepthLimit                    :=OriginalSearchLimits.DepthLimit; {restore depth limit}
-                      Solver.SearchLimits.PushCountLimit                :=OriginalSearchLimits.PushCountLimit; {restore pushes limit}
-                      with Positions.SearchStatistics do DroppedCount   :=DroppedCount+Positions.Count;  {update statistics}
-                      PackingOrderSearchStatistics                      :=Positions.SearchStatistics; {save the statistics so some of them can be resurrected after calling 'TTClear' as part of the preparation for the next search; see below}
-                      Positions.SearchStatistics.ForwardPositionCount   :=0;    {clear the totals that will be updated with the packingorder statistics later; see further down}
-                      Positions.SearchStatistics.CorralPositionsCount   :=0;
-                      Positions.SearchStatistics.CorralPositionsBoxCount:=0;
-                      Positions.SearchStatistics.RoomPositionsCount     :=0;
+                      Solver.PackingOrder.SetCount                :=-Abs(Solver.PackingOrder.SetCount);
+                      Solver.SearchMethod                         :=smPerimeter;                {run backward search + forward search}
+                      Solver.SearchLimits.DepthLimit              :=OriginalSearchLimits.DepthLimit; {restore depth limit}
+                      Solver.SearchLimits.PushCountLimit          :=OriginalSearchLimits.PushCountLimit; {restore pushes limit}
+                      with Positions.Statistics do DroppedCount   :=DroppedCount+Positions.Count;  {update statistics}
+                      PackingOrderStatistics                      :=Positions.Statistics; {save the statistics so some of them can be resurrected after calling 'TTClear' as part of the preparation for the next search; see below}
+                      Positions.Statistics.ForwardPositionCount   :=0;    {clear the totals that will be updated with the packingorder statistics later; see further down}
+                      Positions.Statistics.CorralPositionsCount   :=0;
+                      Positions.Statistics.CorralPositionsBoxCount:=0;
+                      Positions.Statistics.RoomPositionsCount     :=0;
                       end
                  else Solver.SearchLimits.DepthLimit:=0;                        {'0': don't try another search}
                  end;
@@ -19077,7 +19293,7 @@ begin {Search}
               {the packing order search are added to the totals after the}
               {forward search and the backward search have completed; see}
               {further down}
-              Positions.SearchStatistics.DroppedCount:=PackingOrderSearchStatistics.DroppedCount;
+              Positions.Statistics.DroppedCount:=PackingOrderStatistics.DroppedCount;
 
               case Solver.SearchMethod of
                 smBackward              : BackwardSearch();
@@ -19120,11 +19336,11 @@ begin {Search}
   else SetSokobanStatusText(TEXT_LEVEL_UNSOLVABLE);
 
   {add statistics from the packing order search, if any}
-  with Positions.SearchStatistics do begin
-    ForwardPositionCount   :=ForwardPositionCount   +PackingOrderSearchStatistics.ForwardPositionCount;
-    CorralPositionsCount   :=CorralPositionsCount   +PackingOrderSearchStatistics.CorralPositionsCount;
-    CorralPositionsBoxCount:=CorralPositionsBoxCount+PackingOrderSearchStatistics.CorralPositionsBoxCount;
-    RoomPositionsCount     :=RoomPositionsCount     +PackingOrderSearchStatistics.RoomPositionsCount;
+  with Positions.Statistics do begin
+    ForwardPositionCount   :=ForwardPositionCount   +PackingOrderStatistics.ForwardPositionCount;
+    CorralPositionsCount   :=CorralPositionsCount   +PackingOrderStatistics.CorralPositionsCount;
+    CorralPositionsBoxCount:=CorralPositionsBoxCount+PackingOrderStatistics.CorralPositionsBoxCount;
+    RoomPositionsCount     :=RoomPositionsCount     +PackingOrderStatistics.RoomPositionsCount;
     end;
 
   //WritelnToLogFile('');
@@ -19490,7 +19706,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
        CurrentPosition:=PreviousPosition^.Successor;
        while (CurrentPosition<>nil) and Result do with POptimizerPosition(CurrentPosition)^ do with Position do
          with Solver.SearchStates[0].PlayersReachableSquares do begin
-           if HasALegalPush(PPosition(Addr(Position)),NewBoxNo,NewDirection) then begin
+           if HasALegalPushOrPull(PPosition(Addr(Position)),NewBoxNo,NewDirection) then begin
               Move.BoxNo:=NewBoxNo; {update the move with the box number; it may differ from the original one}
               Move.Direction:=TDirection((Ord(Move.Direction) and (not DIRECTION_BIT_MASK)) or Ord(NewDirection)); {update the move with the direction, but keep the move flags, if any}
               //CalculatePlayersDistanceToReachableSquares(0);
@@ -19802,7 +20018,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                     end
             else if False and                                                   {'False': recycling the nodes one by one is disabled; the time overhead is too big, so it's better to purge all positions and start a new search based upon the best position}
                     (OpenPositions.Count<>0) and
-                    (SearchStatistics.ReuseCount<High(SearchStatistics.ReuseCount)) then begin
+                    (Statistics.ReuseCount<High(Statistics.ReuseCount)) then begin
                     Position__:=OPENWorstUnprotected;
 
                     if (Position__<>nil)
@@ -19822,7 +20038,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                           TTLookup(Depth__,ppmExact,dUp,NextInHashChain__);     {find new 'NextInHashChain__'}
                           end;
 
-                       Inc(SearchStatistics.ReuseCount);
+                       Inc(Statistics.ReuseCount);
 
                        Position__:=FreeList;                                    {get next free item ('TTRemove' may recurse, in effect putting several nodes on the free-list}
                        FreeList  :=FreeList^.HashBucket.Next;                   {the free-list uses 'HashBucket.Next' for linking}
@@ -20135,8 +20351,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         end;
       if Position__<>nil then with Solver.SearchStates[Depth__].PlayersReachableSquares do begin
          ResultPosition:=nil; ResultPositionPlayerDistance:=0;
-         Inc(SearchStatistics.Lookup1Count);
-         repeat Inc(SearchStatistics.Lookup2Count);
+         Inc(Statistics.Lookup1Count);
+         repeat Inc(Statistics.Lookup2Count);
 
                 if        Position__^.HashValue=Game.HashValue then
                           if (Position__^.PlayerPos=Game.PlayerPos)
@@ -20248,7 +20464,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
     {     ascending memory address order;                                       }
 
     Result:=0;
-    with Positions do with SearchStatistics do
+    with Positions do with Statistics do
       if (BestPosition<>nil) and                                                {'<>nil': this also ensures that the transposition table really exists, meaning that memory has been allocated and that the table vector isn't a nil-pointer}
          (Optimizer.PurgeCount<High(Optimizer.PurgeCount)) and
          (AlignedItemsCount__>0) then begin
@@ -20493,7 +20709,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   var NewBoxNo,SquareNo:Integer; NewDirection:TDirection; p,Next,Temp:PPosition;
   begin // precondition: 'Position__' is a member of the transposition-table
     with Positions do begin
-      Inc(SearchStatistics.SetPosition1Count);
+      Inc(Statistics.SetPosition1Count);
 
       // find path back to common ancestor of new position and current position
       p:=Position__; Next:=nil;
@@ -20512,37 +20728,58 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         //if   Move.BoxNo<>0 then
         //     Dec(Optimizer.MovesFromSquare[Game.BoxPos[Move.BoxNo],TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK)]); // update move map
         CurrentPosition:=CurrentPosition^.Parent;
-        Inc(SearchStatistics.SetPosition2Count);
+        Inc(Statistics.SetPosition2Count);
         end;
 
       // perform new moves, starting with common ancestor's successor
       if Next<>nil then begin
          repeat
            with Next^ do begin
-             if  (Game.Board[PlayerPos] and BOX)<>0 then begin
-                 SquareNo:=Game.BoxPos[Move.BoxNo];
-                 if   SquareNo<>PlayerPos then begin
-                      if HasALegalPush(PPosition(Addr(POptimizerPosition(Next)^.Position)),NewBoxNo,NewDirection) then begin
-                         Move.BoxNo:=NewBoxNo;
-                         UInt8(Move.Direction):=(UInt8(Move.Direction) and (not DIRECTION_BIT_MASK))+Ord(NewDirection);
-                         //SquareNo:=Game.BoxPos[NewBoxNo]; // set the correct square number for updating 'MovesFromSquare' below
-                         end
-                      else begin
-                        //Msg(TEXT_INTERNAL_ERROR,'SetPosition');
-                        TerminateSearch; Optimizer.Result:=prFailed;
+             SquareNo:=Game.BoxPos[Move.BoxNo];
+             if not Game.ReverseMode then begin
+                if  (Game.Board[PlayerPos] and BOX)<>0 then begin
+                    if   SquareNo<>PlayerPos then begin // '<>': the move leading to 'Position__' isn't legal anymore; check if pushing another box can lead to the position represented by 'Position__'
+                         if HasALegalPushOrPull(PPosition(Addr(POptimizerPosition(Next)^.Position)),NewBoxNo,NewDirection) then begin
+                            Move.BoxNo:=NewBoxNo;
+                            UInt8(Move.Direction):=(UInt8(Move.Direction) and (not DIRECTION_BIT_MASK))+Ord(NewDirection);
+                            //SquareNo:=Game.BoxPos[NewBoxNo]; // set the correct square number for updating 'MovesFromSquare' below
+                            end
+                         else begin
+                           //Msg(TEXT_INTERNAL_ERROR,'SetPosition');
+                           TerminateSearch; Optimizer.Result:=prFailed;
+                           end;
+                         end;
+                    with Move do YASS.DoPush(BoxNo,Direction,-1);
+                    end
+                else if Move.BoxNo<>0 then begin
+                        TerminateSearch; Optimizer.Result:=prFailed; // something is wrong, such as 2 different positions accidentally having identical hashvalues
                         end;
-                      end;
-                 //Inc(Optimizer.MovesFromSquare[SquareNo,TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK)]); // update move map; note the updating in the line "SquareNo:=Game.BoxPos[NewBoxNo];" above
-                 if   not Game.ReverseMode then
-                      with Move do YASS.DoPush(BoxNo,Direction,-1)
-                 else with Move do YASS.DoPull(BoxNo,Direction);
-                 end
-             else if Move.BoxNo<>0 then begin
-                     TerminateSearch; Optimizer.Result:=prFailed;               {something is wrong, such as 2 different positions accidentally having identical hashvalues}
-                     end;
+                end
+             else begin // reverse mode
+                if (Game.Board[PlayerPos] and BOX)=0 then begin
+                   if   SquareNo<>PlayerPos-2*Game.SquareOffsetForward[TDirection(UInt8(Move.Direction) and DIRECTION_BIT_MASK)] then begin // '<>': the move leading to 'Position__' isn't legal anymore; check if pulling another box can lead to the position represented by 'Position__'
+                        if Move.BoxNo<>0 then begin
+                           if HasALegalPushOrPull(PPosition(Addr(POptimizerPosition(Next)^.Position)),NewBoxNo,NewDirection) then begin // 'True': substitute the old move with the new one
+                              Move.BoxNo:=NewBoxNo;
+                              UInt8(Move.Direction):=(UInt8(Move.Direction) and (not DIRECTION_BIT_MASK))+Ord(NewDirection);
+                              //SquareNo:=Game.BoxPos[NewBoxNo]; // set the correct square number for updating 'MovesFromSquare' below
+                              end
+                           else begin
+                              //Msg(TEXT_INTERNAL_ERROR,'SetPosition');
+                              TerminateSearch; Optimizer.Result:=prFailed; // something is wrong, such as 2 different positions accidentally having identical hashvalues
+                              end;
+                           end
+                        else MovePlayer(PlayerPos);
+                        end;
+                   with Move do YASS.DoPull(BoxNo,Direction);
+                   end
+                else begin
+                   TerminateSearch; Optimizer.Result:=prFailed; // something is wrong, such as 2 different positions accidentally having identical hashvalues
+                   end;
+                end;
              Inc(UInt8(Move.Direction),POSITION_PATH_TAG); // set 'on current path' tag; note that this is very dirty because 'Direction' is now out of bounds; use "TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK)" to extract the direction
              Temp:=Parent; Parent:=CurrentPosition; CurrentPosition:=Next; Next:=Temp; // pointer reversal so 'Parent' again contains a parent list instead of a forward list
-             Inc(SearchStatistics.SetPosition2Count);
+             Inc(Statistics.SetPosition2Count);
              end;
          until Next=nil;
          end
@@ -21852,7 +22089,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                            if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
                               {$IFDEF CONSOLE_APPLICATION}
                                 Writeln(SearchStatePromptText,
-                                        'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',Positions.Count,'+',Positions.SearchStatistics.DroppedCount
+                                        'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',Positions.Count,'+',Positions.Statistics.DroppedCount
                                         {$IFDEF WINDOWS}
                                           ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
                                         {$ENDIF}
@@ -21936,7 +22173,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                           if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
                              {$IFDEF CONSOLE_APPLICATION}
                                Writeln(SearchStatePromptText,
-                                       'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',Positions.Count,'+',Positions.SearchStatistics.DroppedCount
+                                       'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',Positions.Count,'+',Positions.Statistics.DroppedCount
                                        {$IFDEF WINDOWS}
                                          ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
                                        {$ENDIF}
@@ -22416,7 +22653,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                                        {$IFDEF CONSOLE_APPLICATION}
                                          if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
                                             Writeln(SearchStatePromptText,
-                                                   'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',YASS.Positions.Count,'+',YASS.Positions.SearchStatistics.DroppedCount,
+                                                   'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',YASS.Positions.Count,'+',YASS.Positions.Statistics.DroppedCount,
                                                    ' Open: ',YASS.Positions.OpenPositions.Count
                                                    {$IFDEF WINDOWS}
                                                      ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
@@ -22821,7 +23058,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                                      {$IFDEF CONSOLE_APPLICATION}
                                        if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
                                           Writeln(SearchStatePromptText,
-                                                 'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',YASS.Positions.Count,'+',YASS.Positions.SearchStatistics.DroppedCount,
+                                                 'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',YASS.Positions.Count,'+',YASS.Positions.Statistics.DroppedCount,
                                                  ' Open: ',YASS.Positions.OpenPositions.Count
                                                  {$IFDEF WINDOWS}
                                                    ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
@@ -23018,7 +23255,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
              {$IFDEF CONSOLE_APPLICATION}
                if (Solver.PushCount and (ONE_MEBI-1))=0 then begin
                   Writeln(SearchStatePromptText,
-                          'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',YASS.Positions.Count,'+',YASS.Positions.SearchStatistics.DroppedCount,
+                          'Pushes: ',Solver.PushCount div ONE_MILLION,' million Positions: ',YASS.Positions.Count,'+',YASS.Positions.Statistics.DroppedCount,
                           ' Open: ',YASS.Positions.OpenPositions.Count
                           {$IFDEF WINDOWS}
                             ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
@@ -23956,7 +24193,7 @@ A---B-
                 BoxSquareNo:=ChangedBoxSquares__[Index];
                 if ((Game.Board[BoxSquareNo] and BOX)<>0) and
                    IsAFreezingMove(0,BoxSquareNo,False) then begin
-                   Inc(Positions.SearchStatistics.FreezeTestDeadlockCount);
+                   Inc(Positions.Statistics.FreezeTestDeadlockCount);
                    //if Positions.SearchStatistics.FreezeTestDeadlockCount mod 100000=0 then begin
                    //   Writeln(Positions.SearchStatistics.FreezeTestDeadlockCount);
                    //   ShowBoard; Readln;
@@ -24239,7 +24476,7 @@ A---B-
         PreallocatedTreeItemsMemoryBlock.ByteSize:=0;                           // reset the binary tree item pool
         BTInitialize(Tree);                                                     // initialize the binary tree
         FillChar(BoxConfigurations,SizeOf(BoxConfigurations),0);                // clear the box configurations
-        Positions.SearchStatistics.FreezeTestDeadlockCount:=0;
+        Positions.Statistics.FreezeTestDeadlockCount:=0;
 
         if SliceStartPosition__=POptimizerPosition(YASS.Positions.StartPosition) then // 'True': this is the first/only slice of the game
            Result:=CalculateBoxSquareVicinitySquares(VicinitySquares);          // for each square on the board, calculate its vicinity squares
@@ -27009,7 +27246,7 @@ begin {ProcessLevels}
                            and
                            (Solver.LimitExceededPushCount=0) {'True': no positions were dropped because of a depth limit or a push count limit}
                            and
-                           (Positions.SearchStatistics.RoomPositionsCount=0) {'True': no room pruning has been performed, i.e., all boxes have been taken into account during node expansion}
+                           (Positions.Statistics.RoomPositionsCount=0) {'True': no room pruning has been performed, i.e., all boxes have been taken into account during node expansion}
                            and
                            (Positions.PerimeterListCount<>High(Positions.PerimeterListCount)) {'True': no file error while saving perimeter nodes to disk}
                           ) then begin
@@ -27047,8 +27284,8 @@ begin {ProcessLevels}
              if not Solver.Terminated then begin
                 LevelStatisticsFlags:=[];
                 if      Game.IsAnOptimalSolution then Include(LevelStatisticsFlags,lsfOptimalSolution);
-                if      High(Positions.Count)-Positions.SearchStatistics.DroppedCount>=Positions.Count then
-                        Positions.Count:=Positions.Count+Positions.SearchStatistics.DroppedCount
+                if      High(Positions.Count)-Positions.Statistics.DroppedCount>=Positions.Count then
+                        Positions.Count:=Positions.Count+Positions.Statistics.DroppedCount
                 else    Positions.Count:=High(Positions.Count);
                 if      Solver.Enabled then begin
                         i:=Game.History.Count; j:=i;
@@ -27085,19 +27322,19 @@ begin {ProcessLevels}
                   i,j,
                   Solver.LowerBound,
                   Positions.Count,
-                  Positions.SearchStatistics.CorralPositionsCount,
-                  Positions.SearchStatistics.CorralPositionsBoxCount,
-                  Positions.SearchStatistics.ForwardPositionCount,
+                  Positions.Statistics.CorralPositionsCount,
+                  Positions.Statistics.CorralPositionsBoxCount,
+                  Positions.Statistics.ForwardPositionCount,
                   Solver.MoveCount,Solver.PushCount,
-                  Positions.SearchStatistics.DeadlockedOpenPositionsCount,
-                  Positions.SearchStatistics.DeadlockPositionsCount,
+                  Positions.Statistics.DeadlockedOpenPositionsCount,
+                  Positions.Statistics.DeadlockPositionsCount,
                   Game.DeadlockSets.PrecalculatedSetsCount,
                   Game.DeadlockSets.DynamicSetsCount,
                   Game.DeadlockSets.LevelTotalPushCount,
-                  Positions.SearchStatistics.NewPathCount,
-                  Positions.SearchStatistics.RoomPositionsCount,
-                  Positions.SearchStatistics.EnqueuedPositionsCount[False],
-                  Positions.SearchStatistics.EnqueuedPositionsCount[True ],
+                  Positions.Statistics.NewPathCount,
+                  Positions.Statistics.RoomPositionsCount,
+                  Positions.Statistics.EnqueuedPositionsCount[False],
+                  Positions.Statistics.EnqueuedPositionsCount[True ],
                   Game.InitializationTimeMS,
                   Game.DeadlockSets.TimeMS,
                   Solver.PackingOrder.TimeMS,
@@ -27345,13 +27582,13 @@ end;
     {$WARNINGS ON}
 
     if Result then begin
-       Result:=(SizeOf(TPosition) mod 4)=0;
+       Result:=(SizeOf(TPosition) mod SizeOf(Pointer))=0;
        if not Result then
-          Writeln(TEXT_APPLICATION_TITLE+': Internal error: Positions are not 4-byte aligned (Size=',SizeOf(TPosition),').');
+          Writeln(TEXT_APPLICATION_TITLE+': Internal error: Positions are not pointer-size aligned (Size=',SizeOf(TPosition),').');
        if Result then begin
-          Result:=(SizeOf(TOptimizerPosition) mod 4)=0;
+          Result:=(SizeOf(TOptimizerPosition) mod SizeOf(Pointer))=0;
           if not Result then
-             Writeln(TEXT_APPLICATION_TITLE+': Internal error: Optimizer positions are not 4-byte aligned (Size=',SizeOf(TOptimizerPosition),').');
+             Writeln(TEXT_APPLICATION_TITLE+': Internal error: Optimizer positions are not pointer-size aligned (Size=',SizeOf(TOptimizerPosition),').');
           end;
        end
     else begin
