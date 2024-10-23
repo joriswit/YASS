@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.146 - July 6, 2021
+Version 2.147 - December 1, 2021
 Copyright (c) 2021 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -544,7 +544,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.146';
+                           = '2.147';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -1335,6 +1335,9 @@ function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var
 {Operating System Constants, Datatypes, and Functions}
 
 {$IFDEF WINDOWS}
+  const
+    CSIDL_APPDATA                = 26;
+    CSIDL_LOCAL_APPDATA          = 28;
   type
     UInt64                       = Int64; {Delphi 4: no unsigned 64-bit integer}
     DWORDLONG                    = UInt64;
@@ -1353,6 +1356,10 @@ function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var
 
   procedure GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx); stdcall;
             external 'kernel32.dll' name 'GlobalMemoryStatusEx';
+  {$IFDEF PLUGIN_MODULE}
+    function SHGetFolderPath(hwn:HWND; csidl:Integer; hToken:THANDLE; dwFlags:DWORD; pszPath:LPSTR):HRESULT; stdcall;
+             external 'shell32.dll' name 'SHGetFolderPathA';
+  {$ENDIF}
 {$ENDIF}
 
 {-----------------------------------------------------------------------------}
@@ -1552,7 +1559,7 @@ begin // precondition: 0 <= 'Number__' < ( BITS_PER_INTEGER - 1 )
   Result:=1 shl Number__;
 end;
 
-function  Random(Range__:Integer; var RandomState__:TRandomState):Integer; {own random function so results are reproducable}
+function  Random(Range__:Integer; var RandomState__:TRandomState):Integer; {own random function so results are reproducible}
 const a=1366; c=150889; m=714025; {don't modify these values unless you know what you are doing}
 begin
   RandomState__.RandomNumber:=(a * (RandomState__.RandomNumber mod m) + c) mod m;
@@ -1560,6 +1567,23 @@ begin
        Result:=RandomState__.RandomNumber
   else Result:=RandomState__.RandomNumber mod Range__;
 end;
+{$IFDEF WINDOWS}
+  {$IFDEF PLUGIN_MODULE}
+    function  GetFolderPath(FolderID__:Integer):String;
+    const
+      SHGFP_TYPE_CURRENT = 0;
+      SHGFP_TYPE_DEFAULT = 1;
+    var
+      PathCharBuffer     :array[0..MAX_PATH+1] of Char;
+    begin
+      PathCharBuffer[Low (PathCharBuffer)]:=NULL_CHAR;
+      PathCharBuffer[High(PathCharBuffer)]:=NULL_CHAR;
+      if   SHGetFolderPath(0,FolderID__,0,SHGFP_TYPE_CURRENT,PathCharBuffer)=S_OK then
+           Result:=PathCharBuffer
+      else Result:='';
+    end;
+  {$ENDIF}
+{$ENDIF}
 
 function  StrStartsWith(const Text__,Prefix__:String):Boolean;
 begin
@@ -2536,18 +2560,39 @@ begin {$I-}
 end; {$I+}
 
 function  CreateGraphFile(const FileName__:String):Boolean;
+{$IFDEF PLUGIN_MODULE}
+  {$IFDEF WINDOWS}
+    var s:String;
+  {$ENDIF}
+{$ENDIF}
 begin {$I-}
   Result:=False;
   if CloseGraphFile then with GraphFile do begin
      FileName:=FileNameWithExtension(FileName__,GRAPH_FILE_EXT);
+
      {$IFDEF PLUGIN_MODULE}
        {$IFDEF WINDOWS}
-         if ExtractFileDir(FileName)='' then
-            FileName:=StrWithTrailingPathDelimiter(GetCurrentDir)+FileName;
+         if ExtractFileDir(FileName)='' then begin
+            s:=StrWithTrailingPathDelimiter(GetCurrentDir)+FileName;
+            Assign(GraphFile,s); Rewrite(GraphFile);
+            Result:=IOResult=0;
+
+            if not Result then begin {there is probably no write access to the current folder. try harder}
+               s:=StrWithTrailingPathDelimiter(GetFolderPath(CSIDL_LOCAL_APPDATA))+FileName;
+               Assign(GraphFile,s); Rewrite(GraphFile);
+               Result:=IOResult=0;
+               end;
+
+            if Result then
+               FileName:=s;
+            end;
        {$ENDIF}
      {$ENDIF}
-     Assign(GraphFile,FileName); Rewrite(GraphFile);
-     Result:=IOResult=0;
+
+     if not Result then begin
+        Assign(GraphFile,FileName); Rewrite(GraphFile);
+        Result:=IOResult=0;
+        end;
      if not Result then begin
         Msg('Save game states to disk: Create file failed: '+FileName,TEXT_APPLICATION_TITLE);
         FileName:='';
@@ -20896,8 +20941,20 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
          until   q=p;
 
          CurrentPosition^.Successor:=p^.Successor;
-         if CurrentPosition^.Successor<>nil then CurrentPosition^.Successor^.Parent:=CurrentPosition;
-         Result:=True;                                                          // return 'True' if one or more cycles are removed
+         if CurrentPosition^.Successor<>nil then
+            CurrentPosition^.Successor^.Parent:=CurrentPosition
+         else begin                                                             // the cycle was at the end of the path
+            if p=YASS.Positions.BestPosition then begin
+               with YASS.Positions.BestPosition^.Move do
+                 Direction:=TDirection(Ord(Direction) and (not POSITION_TARGET_TAG)); // remove the 'target' tag from the best existing position
+               YASS.Positions.BestPosition:=CurrentPosition;                    // update the best found path
+               with YASS.Positions.BestPosition^.Move do
+                 Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_TARGET_TAG); // ensure that the last position on the best path is tagged as a target position
+               end;
+            if p=YASS.Positions.SolutionPosition then
+               YASS.Positions.SolutionPosition:=CurrentPosition;                // update the best found solution
+            end;
+         Result:=True;                                                          // return 'True' when one or more cycles have been removed
          end;
       end;
   end; // OptimizeGame.RemoveCyclesFromBestPath
@@ -21110,6 +21167,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                  // CalculateMetricsForPositionsOnBestPath()' recalculates them
                  // provided the path hasn't been destroyed by the cycle removal;
 
+                 LastPosition:=YASS.Positions.BestPosition;
                  while (LastPosition<>nil) and (LastPosition<>CurrentPosition__) do LastPosition:=LastPosition^.Parent; // check if the current position still is a member of the path
                  if LastPosition=nil then CurrentPosition__:=Positions.StartPosition^.Successor; // if the current position dropped out of the path then re-start the optimization from the first position
                  end;
@@ -23419,7 +23477,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       MAX_BOX_CONFIGURATION_COUNT=10*ONE_MILLION;                               // the vicinity search is a simple breadth-first search so it's best to limit the number of nodes to a reasonable small number
       MEMORY_ALIGNMENT_BYTES=8;                                                 // must be a 2^n number where 'n' is an integer > 0 so '2^n-1' can be used as a bit mask ('n>0', not 'n>=0' because the minimum alignment is 2 bytes here)
       NONE=-1;                                                                  // note that even though 'NONE' is defined as a symbolic constant, its value cannot change; the value must be '-1'
-      RED_BLACK_TREE_ITEM_COLOR_RED=1;                                          // the 'red' flag is stored in the 'left' link pointer for binary search tree item, i.e., 'TBinaryTreeItem.Left'
+      RED_BLACK_TREE_ITEM_COLOR_RED=1;                                          // the 'red' flag is stored in the 'left' link pointer for binary search tree items, i.e., 'TBinaryTreeItem.Left'
     type
       PByte=^Byte;
       TByteVector=array[0..MaxInt-1] of Byte;
@@ -23959,7 +24017,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
             if Result<>nil then with Result^ do begin                           // 'True': there is enough memory for the new item
                Cardinal(Memory):=Cardinal(Memory)+SizeOf(TBinaryTreeItem);      // allocate the new tree item from the bottom of the memory block
                ByteSize:=ByteSize-Cardinal(SizeOf(TBinaryTreeItem))-Cardinal(BoxConfigurationByteSize); // reserve bytes for the tree item as well as the box configuration
-               BoxConfiguration:=PBoxConfiguration(Cardinal(Memory)+ByteSize);  // allocate memory for the box configuration from the top of the memory block; that way, proper aligment of tree items nodes aren't destroyed by the box configurations
+               BoxConfiguration:=PBoxConfiguration(Cardinal(Memory)+ByteSize);  // allocate memory for the box configuration from the top of the memory block; that way, box configurations don't destroy the proper alignment of the tree item nodes
                Move(BoxConfiguration__,BoxConfiguration^,BoxConfigurationByteSize); // store the box configuration belonging to this tree item
                Left :=nil;                                                      // 'nil': the new item is a leaf node
                Right:=nil;                                                      // 'nil': the new item is a leaf node
