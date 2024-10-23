@@ -66,10 +66,8 @@ updates.
 
 Compiling the Program
 ---------------------
-You need FreePascal 3.3.1 (development version) to build the native Pascal
-module. I expect it will also work with the upcoming 3.2 version.
-It does not work with FPC 3.0.4 because Android 8.0 has blocked various
-syscalls which are used by that version.
+You need FreePascal 3.2 to build the native Pascal module. Make sure to
+download the package containing the cross-compiler for Android.
 
-The paths to the Android NDK must be configured in the Lazarus project
-file (yassjni.lpi).
+The gradle build searches for the FreePascal compiler in the PATH
+environment variable.
