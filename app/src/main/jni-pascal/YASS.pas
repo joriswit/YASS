@@ -1,7 +1,7 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.149 - October 18, 2022
-Copyright (c) 2022 by Brian Damgaard, Denmark
+Version 2.150 - January 23, 2024
+Copyright (c) 2024 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
@@ -539,12 +539,12 @@ const
 {Texts}
 
   TEXT_APPLICATION_COPYRIGHT
-                           = 'Copyright (c) 2022 by Brian Damgaard';
+                           = 'Copyright (c) 2024 by Brian Damgaard';
   TEXT_APPLICATION_TITLE   = 'YASS';
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.149';
+                           = '2.150';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -1513,10 +1513,11 @@ begin
   Str(Number__,Result);
 end;
 
-function  IntToStrWithPluralDependentText(Number__:Integer; const Text__:String):String;
-begin
-  if   Number__<>1 then Result:=IntToStr(Number__)+SPACE+Text__+'s'
-  else Result:=IntToStr(Number__)+SPACE+Text__;
+function  IntToStrWithUnitName(Number__:Integer; const UnitName__:String):String;
+begin {precondition: the plural form of the unit name is 'UnitName__' + 's'}
+  if   Number__<>1 then
+       Result:=IntToStr(Number__)+SPACE+UnitName__+'s'
+  else Result:=IntToStr(Number__)+SPACE+UnitName__;
 end;
 
 {$IFDEF WINDOWS}
@@ -5256,6 +5257,11 @@ begin {$I-}
                   end;
         until  not NextPushToText(PushNo,s1);
      if s<>'' then Writeln(F,s);
+     {$IFDEF WINDOWS}
+       Write(F,'Time: ');
+       s:=IntToStrWithUnitName((Game.InitializationTimeMS+Solver.TimeMS+Optimizer.TimeMS+500) div 1000,'second');
+       Writeln(F,s);
+     {$ENDIF}
      end
   else if (not Solver.Enabled) and
           Optimizer.Enabled and
@@ -6156,7 +6162,7 @@ begin {$I-}
        TimeMS:=CalculateElapsedTimeMS(TimeMS,GetTimeMS);
 
        if TimeMS>=500 then begin
-          s:=IntToStrWithPluralDependentText((TimeMS+500) div 1000,'second');
+          s:=IntToStrWithUnitName((TimeMS+500) div 1000,'second');
           Write(' Time: ',s);
           end;
        Writeln;
@@ -19867,7 +19873,7 @@ begin {Search}
 
   {$IFDEF CONSOLE_APPLICATION}
     if Game.InitializationTimeMS+Solver.TimeMS+Optimizer.TimeMS<>0 then begin
-       s:=IntToStrWithPluralDependentText((Game.InitializationTimeMS+Solver.TimeMS+Optimizer.TimeMS+500) div 1000,'second');
+       s:=IntToStrWithUnitName((Game.InitializationTimeMS+Solver.TimeMS+Optimizer.TimeMS+500) div 1000,'second');
        Writeln('Time: ',s);
        end;
   {$ENDIF}
