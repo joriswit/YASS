@@ -1,7 +1,7 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.147 - December 1, 2021
-Copyright (c) 2021 by Brian Damgaard, Denmark
+Version 2.148 - January 7, 2022
+Copyright (c) 2022 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
 
@@ -539,12 +539,12 @@ const
 {Texts}
 
   TEXT_APPLICATION_COPYRIGHT
-                           = 'Copyright (c) 2021 by Brian Damgaard';
+                           = 'Copyright (c) 2022 by Brian Damgaard';
   TEXT_APPLICATION_TITLE   = 'YASS';
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.147';
+                           = '2.148';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -837,6 +837,8 @@ type
     SimpleLowerBound       : Integer;
     StartBoxPos            : TBoxSquares; {box starting positions after board normalization by 'FillTubes'}
     StartPlayerPos         : Integer; {player's starting position after board normalization by 'FillTubes'}
+    StartPositionSimpleLowerBound
+                           : TScore; {simple pushes lower bound after board normalization by 'FillTubes'}
     SolutionPathHashValues : array[0..MAX_HISTORY_BOX_MOVES+1] of THashValue;
     SortedBoxSquares       : TBoxArrayOfIntegers;
     SquareOffsetForward    : TDirectionArrayOfIntegers;
@@ -5573,8 +5575,8 @@ begin {transposition table: add new item unless it already is in the table}
        * 'Solver.SearchStates[PushCount__].PlayersReachableSquares.Calculated' is set correctly;}
   Result:=False; Position__:=nil;
   with Positions do
-    if (not TTLookup(HashValue__,PlayerPos__,PushCount__,Position__)) then begin{'True': it's a new item}
-
+    if (not TTLookup(HashValue__,PlayerPos__,PushCount__,Position__))           {'True': it's a new item}
+       then begin
        NextPosition:=Position__;                                                {save next position in the hash-chain}
        if Parent__<>nil then Inc(Parent__^.SuccessorCount);                     {update count before any pruning of the items in the transposition table takes place}
 
@@ -14425,6 +14427,7 @@ begin {InitializeGame}
     OriginalBoard:=Board; OriginalBoxPos:=BoxPos; OriginalPlayerPos:=PlayerPos;
     FillTubes;
     Game.StartPlayerPos:=Game.PlayerPos; Game.StartBoxPos:=Game.BoxPos;
+    Game.StartPositionSimpleLowerBound:=0; {not calculated yet}
     Game.EndPlayerPos:=0;
     Solver.PackingOrder.GoalAndParkingSquareCount:=Game.GoalCount;
     FillChar(SolutionPathHashValues,SizeOf(SolutionPathHashValues),0);
@@ -14461,6 +14464,7 @@ begin {InitializeGame}
 
           if not CalculateDeadlockSets(nil,DeadlockSetCandidate) then SimpleLowerBound:=INFINITY; {'INFINITY': the level is unsolvable or the time-limit was exceeded}
           if SimpleLowerBound<>INFINITY then SimpleLowerBound:=CalculateSimpleLowerBound;
+          StartPositionSimpleLowerBound:=SimpleLowerBound;
           if SimpleLowerBound<>INFINITY then begin
              CalculateRooms;
              if Game.OriginalSolution<>'' then
@@ -20562,7 +20566,17 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                 BasePosition:=HashBuckets^[HashBucketIndex];
                 q:=BasePosition; NextInHashChain:=nil;
                 if q<>nil then
-                   repeat if        (p^.HashValue=q^.HashValue) and (p^.PlayerPos=q^.PlayerPos) then begin
+                   repeat if        (p^.HashValue=q^.HashValue)
+                                    and
+                                    (p^.PlayerPos=q^.PlayerPos)
+                                    and
+                                    (not                                        {allow the optimizer to create identical start positions and end positions}
+                                      ((Game.StartPositionSimpleLowerBound=0)   {'True': the game starting position is a solution position, i.e., all boxes are located at goal squares}
+                                       and
+                                       (q=YASS.Positions.StartPosition)         {'True': the position already registered in the table is the start position}
+                                       and
+                                       (p^.Successor=nil)))                     {'nil': this is the last position on the path}
+                                    then begin
                                     q:=p; Result:=-1;                           {there are two identical positions on the path, or two different positions with the same hash value and player position. terminate with failure}
                                     end
                           else if   p^.HashValue>=q^.HashValue then begin
@@ -20573,16 +20587,16 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                    until  (p=q) or (q=BasePosition);                            {see the body of the loop for pointer manipulations that terminate the loop}
 
                 if p<>q then begin                                              {'<>': the position isn't already in the table}
-                   if    NextInHashChain<>nil then begin                        {'True': insert the new position before 'NextInHashChain__'}
-                         p^.HashBucket.Prev :=NextInHashChain^.HashBucket.Prev;
-                         p^.HashBucket.Next :=NextInHashChain;
-                         p^.HashBucket.Prev^.HashBucket.Next:=p;
-                         NextInHashChain^.HashBucket.Prev:=p;
-                         if HashBuckets^[HashBucketIndex]=NextInHashChain then  {'True': 'NextInHashChain__' is the first item in its bucket}
-                            HashBuckets^[HashBucketIndex]:=p;                   {set the new item to be the first item in its bucket}
-                         end
-                   else
-                        if HashBuckets^[HashBucketIndex]=nil then begin         {'True': the bucket is empty}
+                   if      NextInHashChain<>nil then begin                      {'True': insert the new position before 'NextInHashChain__'}
+                           p^.HashBucket.Prev :=NextInHashChain^.HashBucket.Prev;
+                           p^.HashBucket.Next :=NextInHashChain;
+                           p^.HashBucket.Prev^.HashBucket.Next:=p;
+                           NextInHashChain^.HashBucket.Prev:=p;
+                           if HashBuckets^[HashBucketIndex]=NextInHashChain     {'True': 'NextInHashChain__' is the first item in its bucket}
+                              then
+                              HashBuckets^[HashBucketIndex]:=p;                 {set the new item to be the first item in its bucket}
+                           end
+                   else if HashBuckets^[HashBucketIndex]=nil then begin         {'True': the bucket is empty}
                            HashBuckets^[HashBucketIndex]:=p;                    {put this item in the bucket}
                            p^.HashBucket.Prev :=p;                              {make single-item circular list}
                            p^.HashBucket.Next :=p;
@@ -20931,7 +20945,11 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       while (p<>nil) and
             ( (p^.PlayerPos<>CurrentPosition^.PlayerPos) or (p^.HashValue<>CurrentPosition^.HashValue)) do // search for a duplicate position on the remaining part of the path; matching values are not 100% trustworthy though
             p:=p^.Successor;
-      if p=nil then begin                                                       // 'True': no duplicate position was found on the remaining part of the path, hence, advance to the next position on the best path
+      if (p=nil)                                                                // 'True': no duplicate position was found on the remaining part of the path, hence, advance to the next position on the best path
+         or
+         ((p^.Successor=nil)
+          and                                                                   // 'True': the start position and the end position have identical hash values and player positions. don't remove the cycle
+          (CurrentPosition=YASS.Positions.StartPosition)) then begin
          CurrentPosition:=CurrentPosition^.Successor;                           // when the 'while' loop terminates, 'CurrentPosition' contains the last position on the path
          end
       else begin                                                                // a cycle has been detected, i.e., a duplicate position; remove the redundant pushes from the path now
@@ -20975,7 +20993,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       BestPosition:=BestPosition__;
       if BestPosition<>nil then with BestPosition^ do begin
          if (Ord(Move.Direction) and POSITION_OPEN_TAG)<>0 then OPENRemove(BestPosition); {ensure that the best position isn't on the open-queue because its members may be candidates for recycling}
-         Successor:=nil; //to do: consider what happens here if the best position happens to be (a loop back to) the starting position
+         Successor:=nil; 
          Optimizer.PruningNode:=BestPosition;
          end;
       end;
@@ -21273,7 +21291,9 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
            MakePerBoxPositionChains(CurrentPosition,NextBoxPosition);
            ////FillChar(SquareVisitedByPushes,SizeOf(SquareVisitedByPushes),0); // all code lines related to the visited squares are commented out with "////"
 
-           while (CurrentPosition^.Successor<>nil)                              // for each position on the best path...
+           while (CurrentPosition<>nil)
+                 and
+                 (CurrentPosition^.Successor<>nil)                              // for each position on the best path...
                  and
                  (Solver.SearchLimits.DepthLimit>=0) do begin                   // '>=0': the search hasn't been terminated
 
