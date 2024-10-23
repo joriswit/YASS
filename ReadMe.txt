@@ -1,6 +1,6 @@
 =====================================================================
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Puzzles
-Version 2.148 - January 7, 2022
+Version 2.149 - October 18, 2022
 Copyright (c) 2022 by Brian Damgaard, Denmark
 =====================================================================
 
@@ -44,15 +44,14 @@ The program offers two independent features:
 * Search for solutions of Sokoban puzzles.
 * Search for improvements of existing solutions.
 
-Solving and optimizing Sokoban puzzles are complicated tasks for a 
-computer program, so the program can only handle small puzzles.
+Solving and optimizing Sokoban puzzles are complicated tasks for a computer
+program, so the program can only handle small puzzles.
 
-The solver can find push-optimal solutions for some small puzzles,
-whereas other puzzles may be solved without a push-optimality guarantee.
-
-Please note that the found push-optimal solutions are not optimized
-for moves, i.e., there may be other solutions with the same number of
-pushes, but with fewer non-pushing moves.
+In versions prior to version 2.149, the solver's backward search and forward
+search methods could find push-optimal solutions for some small puzzles by
+using A* search. Version 2.149 changed from A* search to greedy search. All
+comments in the source code regarding push-optimality are obsolete but have
+been left intact for nostalgic reasons.
 
 YASS for Android
 ----------------
