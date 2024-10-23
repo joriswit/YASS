@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.150 - January 23, 2024
+Version 2.151 - March 19, 2024
 Copyright (c) 2024 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -372,6 +372,8 @@ const
   DIRECTION_TO_TUNNEL_FLAGS: Cardinal=FLAG_TUNNEL_UP+FLAG_TUNNEL_LEFT+FLAG_TUNNEL_DOWN+FLAG_TUNNEL_RIGHT;
   DISTANCE_SCALE_FACTOR    = 10;               {scale factor when distances are used as heuristic estimates}
   EMPTY_GOAL_PENALTY       = {64} 32;          {penalty for each unfilled target square (goal or parking space) during a packing order search; preferably a 2^n number for fast multiplications}
+  EXPLORED_POSITIONS_TIME_CHECK_INTERVAL                                        {perform time checks at regular intervals during the search, based on the number of explored game states.}
+                           = 20000;                                             {the number of generated pushes or pulls is also used as a time check trigger}
   FLAG_POSITION_BASE       = 1;
   FLAG_POSITION_VISITED    = 2;
   FROZEN_GOALS_PATTERN_THRESHOLD
@@ -544,7 +546,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.150';
+                           = '2.151';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -1358,6 +1360,8 @@ function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var
     end;
     PMemoryStatusEx              = ^TMemoryStatusEx;
 
+  function  GetConsoleWindow() : HWND; stdcall;
+            external 'kernel32.dll' name 'GetConsoleWindow';    
   procedure GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx); stdcall;
             external 'kernel32.dll' name 'GlobalMemoryStatusEx';
   {$IFDEF PLUGIN_MODULE}
@@ -1394,6 +1398,17 @@ end;
 procedure DN; {do nothing}
 begin
 end;
+
+{$IFDEF CONSOLE_APPLICATION}
+function  ExtractFileName(const FileName__:String):String;
+var i:Integer;
+begin
+  i:=Length(FileName__);
+  while (i>0) and (FileName__[i]<>BACKSLASH) and (FileName__[i]<>COLON) do
+    Dec(i);
+  Result:=Copy(FileName__,Succ(i),MaxInt);
+end;
+{$ENDIF}
 
 function  FileNameWithExtension(const FileName__,Extension__:String):String;
 var i:Integer;
@@ -1610,12 +1625,20 @@ begin
   Val(s__,i__,ErrorPos); Result:=ErrorPos=0;
 end;
 
+
 {$IFDEF WINDOWS}
+  var
+    ConsoleWindowHandle : HWND = 0;
+
   function  WasKeyPressed( VirtualKeyCode__ : Integer ) : Boolean;
-  begin // returns 'True' if the given key has been pressed
-    Result := ( GetASyncKeyState( VirtualKeyCode__ ) and
-                Succ( 1 shl ( ( SizeOf( SHORT ) * BITS_PER_BYTE ) - 1 ) ) ) <>
-              0;
+  begin // returns 'True' if the given key has been pressed and this application
+        // has focus
+    Result := ( ( GetASyncKeyState( VirtualKeyCode__ ) and
+                  Succ( 1 shl ( ( SizeOf( SHORT ) * BITS_PER_BYTE ) - 1 ) ) ) <>
+                0
+              )
+              and
+              ( GetForegroundWindow = ConsoleWindowHandle );
     if Result then // wait until the key isn't pressed
        repeat
        until ( GetASyncKeyState( VirtualKeyCode__ ) and
@@ -2455,6 +2478,7 @@ begin
   Writeln('  -optimize  <moves|pushes|pushesonly|boxlines/m|boxlines/p> : default "pushes"');
   Writeln('  -packingorder <number>       : packing order threshold, default ',DEFAULT_PACKING_ORDER_BOX_COUNT_THRESHOLD,' boxes');
   Writeln('  -pretty    <no|yes>          : do small solver optimizations, default "yes"');
+  Writeln('  -prompt    <no|yes>          : wait for user response after error messages');
   Writeln('  -search    <method>          : backward/forward/optimize/perimeter (def.)');
 //Writeln('  -stop      <no|yes>          : stop when solved, default "yes"');
   Writeln('Tip:');
@@ -3247,7 +3271,7 @@ begin // CalculateLowerBound: calculates a pushes lower bound by using an auctio
                    if not IsALegalAndBoxReachableSquare(GoalPos[GoalNo]) then
                       Result:=DISTANCE_INFINITY;
                end
-            else begin // backwards search
+            else begin // backward search
                for BoxNo:=1 to BoxCount do // are all box starting positions reachable? fix me: this test should be made only once at level load time, not for each lower bound calculation
                    if not IsALegalAndBoxReachableSquare(StartBoxPos[BoxNo]) then
                       Result:=DISTANCE_INFINITY;
@@ -6065,7 +6089,11 @@ begin {$I-}
         and
         ((GraphFile.FileName<>'')                                               {'<>': the file is already open}
          or
-         CreateGraphFile(TEXT_APPLICATION_TITLE+GRAPH_FILE_EXT)
+         {$IFDEF CONSOLE_APPLICATION}
+           CreateGraphFile(ExtractFileName(ParamStr(0)))
+         {$ELSE}
+           CreateGraphFile(TEXT_APPLICATION_TITLE+GRAPH_FILE_EXT)
+         {$ENDIF}           
         ) then begin
         LastItemIndex:=Integer(Pred(Capacity-Cardinal(UninitializedItemCount)));
 
@@ -15756,7 +15784,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
   function  BackwardSearch:Integer;
   {precondition: the transposition-table has been initialized before calling 'BackwardSearch'}
-  var i,BoxNo,PlayerStartPosition,Square:Integer;
+  var i,BoxNo,ExploredPositionsCountdownToTimeCheck,PlayerStartPosition,Square:Integer;
       OriginalCapacity:Cardinal;
       OriginalReuseNodesEnabled:Boolean;
       StartPositionReverseMode:Boolean; Position:PPosition;
@@ -15773,6 +15801,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       //ShowBoard; Write('Expand position: Depth: ',Position__^.PushCount,' Score: ',Position__^.Score,' Simple lower bound: ',Game.SimpleLowerBound,' Positions: ',Positions.Count);
       //Readln;
       Result:=DEAD_END_SCORE;
+
+      Dec(ExploredPositionsCountdownToTimeCheck);
+      if ExploredPositionsCountdownToTimeCheck<=0 then begin
+         ExploredPositionsCountdownToTimeCheck:=EXPLORED_POSITIONS_TIME_CHECK_INTERVAL;
+         TimeCheck;
+         end;
 
       if Position__^.PushCount<Solver.SearchLimits.DepthLimit then begin
          Positions.OpenPositions.WorstRover:=nil;
@@ -15857,8 +15891,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                else Write(' Reused positions: ',Positions.Statistics.ReuseCount);
                                Write(' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000);
                                Writeln;
-                            {$ENDIF}
+                             {$ENDIF}
 
+                             ExploredPositionsCountdownToTimeCheck:=EXPLORED_POSITIONS_TIME_CHECK_INTERVAL; {reset}
                              TimeCheck;
 
                              //ShowBoard;
@@ -16036,6 +16071,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     {$ENDIF}
     StartPositionReverseMode:=Game.ReverseMode; Game.ReverseMode:=True; Game.Rooms.Count:=Abs(Game.Rooms.Count);
     MarkTargetSquares(True);
+    ExploredPositionsCountdownToTimeCheck:=EXPLORED_POSITIONS_TIME_CHECK_INTERVAL;
 
     if Game.TubeFillingPushCount+Game.SimpleLowerBound<=Solver.SearchLimits.DepthLimit then begin {'True': the level might be solvable with this search depth limit}
        OriginalCapacity := Positions.Capacity;                                  {remember the total transposition table capacity}
@@ -16083,7 +16119,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
        CalculateDistanceToNearestBoxStartPositionForAllSquares(1,Game.BoxCount,False,Game.DistanceToNearestBoxStartPosition);
        //ShowBoxDistanceToAllSquares(Game.DistanceToNearestBoxStartPosition); Readln;
 
-       CalculateSquareStartBoxPositionDistances(Solver.SquareTargetDistance,Solver.SquareTargetDistanceScaleFactor,Solver.PackingOrder.GoalBoxSets); {'... .GoalBoxSets' isn't used in a backwards search. (ab)use them as receptacle here}
+       CalculateSquareStartBoxPositionDistances(Solver.SquareTargetDistance,Solver.SquareTargetDistanceScaleFactor,Solver.PackingOrder.GoalBoxSets); {'... .GoalBoxSets' isn't used in a backward search. (ab)use them as receptacle here}
 
        CalculateTunnelSquares;
        {ShowTunnelSquares; Readln;}
@@ -16180,7 +16216,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
   function  ForwardSearch:Integer;
   {precondition: the transposition-table has been initialized before calling 'ForwardSearch'}
-  var SquareNo,GoalNo,Distance:Integer;
+  var SquareNo,GoalNo,Distance,ExploredPositionsCountdownToTimeCheck:Integer;
       Position:PPosition;
       {$IFDEF PLUGIN_MODULE}
         s:String;
@@ -18472,6 +18508,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          Halt;
          end;
 //}
+
+      Dec(ExploredPositionsCountdownToTimeCheck);
+      if ExploredPositionsCountdownToTimeCheck<=0 then begin
+         ExploredPositionsCountdownToTimeCheck:=EXPLORED_POSITIONS_TIME_CHECK_INTERVAL;
+         TimeCheck;
+         end;
+
       if Position__^.PushCount>Solver.HighestSearchDepth then
          Solver.HighestSearchDepth:=Position__^.PushCount;
 
@@ -18850,6 +18893,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                //Readln;
                              {$ENDIF}
 
+                             ExploredPositionsCountdownToTimeCheck:=EXPLORED_POSITIONS_TIME_CHECK_INTERVAL; {reset}
                              TimeCheck;
                              end;
 
@@ -19390,6 +19434,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     Game.Rooms.Count:=Abs(Game.Rooms.Count);
     Solver.HighestSearchDepth:=0; Solver.CorralSearchDepth:=0;
     Solver.DisplayPushCountdown:=0;
+    ExploredPositionsCountdownToTimeCheck:=EXPLORED_POSITIONS_TIME_CHECK_INTERVAL;
     InitializeProgressCheckPoint;
 
     if (Game.Board[0] and DIRECTION_TO_TUNNEL_FLAGS)<>DIRECTION_TO_TUNNEL_FLAGS then {'True': tunnel squares haven't been calculated yet}
@@ -27979,6 +28024,10 @@ end;
   function  InitializeApplication:Boolean;
   var FirstLevelNo,LastLevelNo:Cardinal; InputFileName:String;
   begin
+    {$IFDEF WINDOWS}
+      ConsoleWindowHandle := GetConsoleWindow;
+    {$ENDIF}
+
     ShowTitle;
 
     SAT(0); // for debugging convenience, ensure that the abbreviated 'SquareToColRowAsText()' function is included in the compiled program
