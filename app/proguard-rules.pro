@@ -15,3 +15,8 @@
 #-keepclassmembers class fqcn.of.javascript.interface.for.webview {
 #   public *;
 #}
+
+-keepnames class yass.ProgressDialogFragment$SolverTask
+-keepclassmembers class yass.ProgressDialogFragment$SolverTask {
+   public *;
+}
