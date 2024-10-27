@@ -4,10 +4,6 @@ YASS offers two independent features:
 
 Solving and optimizing Sokoban puzzles are complicated tasks for a computer program, so the program can only handle small puzzles.
 
-The solver can find push-optimal solutions for some small puzzles, whereas other puzzles may be solved without a push-optimality guarantee.
-
-Please note that the found push-optimal solutions are not optimized for moves, i.e., there may be other solutions with the same number of pushes, but with fewer non-pushing moves.
-
-YASS for Android can integrate with any Sokoban clone that supports solver plug-ins, like Soko++.
+YASS for Android can integrate with any Sokoban clone that supports solver plug-ins, like Soko++ or BoxMan.
 
 YASS for Android is based on YASS for Windows and other operating systems made by Brian Damgaard. See the official download page: <a href="https://sourceforge.net/projects/sokobanyasc/">https://sourceforge.net/projects/sokobanyasc/</a>
