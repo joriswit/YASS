@@ -9,8 +9,6 @@ import android.widget.NumberPicker;
 import android.widget.Switch;
 import android.widget.TextView;
 
-import net.sourceforge.sokobanyasc.joriswit.yass.R;
-
 public class VicinitySearchPreference extends DialogPreference {
 
     private int mDefaultValue;

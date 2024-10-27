@@ -9,8 +9,6 @@ import android.os.AsyncTask;
 import android.os.Bundle;
 import android.view.WindowManager;
 
-import net.sourceforge.sokobanyasc.joriswit.yass.R;
-
 import java.lang.ref.WeakReference;
 
 public class ProgressDialogFragment extends DialogFragment {

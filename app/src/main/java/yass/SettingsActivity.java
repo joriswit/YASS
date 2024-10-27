@@ -9,8 +9,6 @@ import android.preference.PreferenceGroup;
 import android.preference.PreferenceManager;
 import android.view.MenuItem;
 
-import net.sourceforge.sokobanyasc.joriswit.yass.R;
-
 public class SettingsActivity extends PreferenceActivity implements
         SharedPreferences.OnSharedPreferenceChangeListener {
     @Override

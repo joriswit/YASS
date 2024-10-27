@@ -13,8 +13,6 @@ import android.widget.CheckedTextView;
 import android.widget.ImageButton;
 import android.widget.ListView;
 
-import net.sourceforge.sokobanyasc.joriswit.yass.R;
-
 public class OptimizerMethodPreference extends DialogPreference {
 
     private Context mContext;

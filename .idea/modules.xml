@@ -4,6 +4,9 @@
     <modules>
       <module fileurl="file://$PROJECT_DIR$/YASS.iml" filepath="$PROJECT_DIR$/YASS.iml" />
       <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/YASS.app.iml" filepath="$PROJECT_DIR$/.idea/modules/app/YASS.app.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/YASS.app.androidTest.iml" filepath="$PROJECT_DIR$/.idea/modules/app/YASS.app.androidTest.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/YASS.app.main.iml" filepath="$PROJECT_DIR$/.idea/modules/app/YASS.app.main.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/modules/app/YASS.app.unitTest.iml" filepath="$PROJECT_DIR$/.idea/modules/app/YASS.app.unitTest.iml" />
     </modules>
   </component>
 </project>

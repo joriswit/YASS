@@ -3,8 +3,6 @@ package yass;
 import android.content.Context;
 import androidx.annotation.NonNull;
 
-import net.sourceforge.sokobanyasc.joriswit.yass.R;
-
 import java.util.ArrayList;
 import java.util.Collections;
 

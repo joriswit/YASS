@@ -8,8 +8,6 @@ import android.util.AttributeSet;
 import android.view.MotionEvent;
 import android.view.View;
 
-import net.sourceforge.sokobanyasc.joriswit.yass.R;
-
 public class BoardView extends View {
 
     private Board board;

@@ -23,8 +23,6 @@ import android.widget.ImageButton;
 import android.widget.TextView;
 import android.widget.Toast;
 
-import net.sourceforge.sokobanyasc.joriswit.yass.R;
-
 public class YASSActivity extends Activity implements ProgressDialogFragment.SolverStatusUpdate {
 
     private static boolean mNativeLibLoaded = false;
