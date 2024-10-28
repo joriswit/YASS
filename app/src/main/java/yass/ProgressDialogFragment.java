@@ -6,6 +6,7 @@ import android.app.DialogFragment;
 import android.app.ProgressDialog;
 import android.content.DialogInterface;
 import android.os.AsyncTask;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.WindowManager;
 
@@ -99,13 +100,7 @@ public class ProgressDialogFragment extends DialogFragment {
         @Override
         protected String doInBackground(Object... params) {
 
-            int transpositionTableSize = (int)(mAvailMem / 1024 / 1024 / 2);
-
-            if (transpositionTableSize > 1536) {
-                // Prevent allocation of more than 1.5 GiB
-                // Because YASS is a 32 bit app, it might crash on 64 bit devices with lots of free memory
-                transpositionTableSize = 1536;
-            }
+            int transpositionTableSize = getTranspositionTableSize();
 
             if (!mOptimizer) {
                 return solve(
@@ -136,6 +131,25 @@ public class ProgressDialogFragment extends DialogFragment {
                 );
             }
         }
+
+        private int getTranspositionTableSize() {
+            // Start with half of available memory
+            int transpositionTableSize = (int)(mAvailMem / 1024 / 1024 / 2);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP && Build.SUPPORTED_64_BIT_ABIS.length > 0) {
+                // On a 64-bit device, limit to 4 GB, unless that would drop below a quarter of available memory
+                if (transpositionTableSize > 4096) {
+                    transpositionTableSize = Math.max(transpositionTableSize / 2, 4096);
+                }
+            } else {
+                // On a 32 bit device, limit to 1.5 GiB
+                if (transpositionTableSize > 1536) {
+                    transpositionTableSize = 1536;
+                }
+            }
+            return transpositionTableSize;
+        }
+
         @Override
         protected void onProgressUpdate(String... progress) {
             mMessage = progress[0];
