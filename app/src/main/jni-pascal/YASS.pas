@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.151 - March 19, 2024
+Version 2.152 (64-bit) - October 27, 2024
 Copyright (c) 2024 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -67,21 +67,22 @@ You should have received a copy of the GNU General Public License along with thi
 {$IFDEF DELPHI}
   {$APPTYPE CONSOLE}                           {use this with DELPHI only}
   {$UNDEF FPC}                                 {for safety}
-  {$M 1048576,2097152}                         {stack size, minimum 1 MiB}
+  {$M 2097152,4194304}                         {stack size, minimum 2 MiB}
   {///$STACKCHECKS ON}                         {stack checks, only for debugging}
 {$ENDIF}
 
 {$IFDEF FPC}
   {$MODE DELPHI} {$PACKENUM 1}                 {use this with FPC only}
   {$UNDEF DELPHI}                              {for safety}
-  {$M 1048576,0}                               {stack size, minimum 1 MiB}
+  {$M 2097152,0}                               {stack size, minimum 2 MiB}
 {$ENDIF}
 
 {$DEFINE LIGHTWEIGHT_DEADLOCK_GENERATION}      {this generates a reasonable number of deadlocks and works pretty fast}
 
-{$DEFINE SINGLE_LINE_STATUS_TEXT}              {this generates single line status texts for a plug-in module, as opposed to multi-line status texts separated by CR+LF newlines}
+{///$DEFINE SINGLE_LINE_STATUS_TEXT}           {this generates single line status texts for a plug-in module, as opposed to multi-line status texts separated by CR+LF newlines}
 
 {$R-}                                          {'R-': range checking disabled}
+{$Q-}                                          {'Q-': overflow checking disabled}
 
 {$IFDEF CONSOLE_APPLICATION}
   Program YASS;                                {YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels}
@@ -138,6 +139,8 @@ const
   ONE_MEBI                 = ONE_KIBI*ONE_KIBI;                                 {"mebi" used to be "mega" before year 2000}
   ONE_MILLION              = ONE_THOUSAND*ONE_THOUSAND;
 
+  ONE_GIBI                 = ONE_KIBI * ONE_MEBI;
+
   SIXTEEN_KIBI             = 16*ONE_KIBI;
 
   WINDOWS_FILE_NAME_PATH_DELIMITER
@@ -146,18 +149,25 @@ const
 {Constants and type declarations required before declaring other constants and other types}
 
 type                                           {first some number types}
-  Int8                     = ShortInt;         {nobody can remember that 'SmallInt'  means signed   16 bit integer in Delphi4, hence, this alias comes in handy}
-  UInt8                    = Byte;             {'byte' is ambiguous; in Delphi4 it's an unsigned 8-bit number, but some other languages have different conventions; therefore, the 'UInt8' alias comes in handy}
-  Int16                    = SmallInt;         {nobody can remember that 'SmallInt'  means signed   16 bit integer in Delphi4, hence, this alias comes in handy}
-  UInt16                   = Word;             {for historical reasons,  'Word'      means unsigned 16 bit integer in Delphi4, but it's problematic to use a term like that with newer processors}
-  UInt32                   = Cardinal;         {for historical reasons,  'Cardinal'  means unsigned 32 bit integer in Delphi4, but it's problematic to use a term like that with newer processors}
-  UInt                     = Cardinal;         {unsigned machine word integer; must be the same size as a pointer}
+//Int8                     = ShortInt;         {nobody can remember that 'SmallInt'  means signed   16 bit integer in Delphi4, hence, this alias comes in handy}
+//UInt8                    = Byte;             {'byte' is ambiguous; in Delphi4 it's an unsigned 8-bit number, but some other languages have different conventions; therefore, the 'UInt8' alias comes in handy}
+//Int16                    = SmallInt;         {nobody can remember that 'SmallInt'  means signed   16 bit integer in Delphi4, hence, this alias comes in handy}
+  Int                      = NativeInt;        {signed machine word integer; must be the same size as a pointer}
+//UInt16                   = Word;             {for historical reasons,  'Word'      means unsigned 16 bit integer in Delphi4, but it's problematic to use a term like that with newer processors}
+//UInt32                   = UInt32;           {for historical reasons,  'Cardinal'  means unsigned 32 bit integer in Delphi4, but it's problematic to use a term like that with newer processors}
+  UInt                     = NativeUInt;       {unsigned machine word integer; must be the same size as a pointer}
 
-  TTimeMS                  = {$IFDEF WINDOWS} DWORD; {$ELSE} UInt32; {$ENDIF}
+  PInt                     = ^Int;
+  PUInt                    = ^UInt;
+
+  TTimeMS                  = UInt64;
+
+  Char8                    = AnsiChar;         {8-bit characters, possibly multibyte characters or UTF-8 code units}
+  PChar8                   = ^Char8;
 
 const
   BITS_PER_BYTE            = 8;
-  BITS_PER_INTEGER         = BITS_PER_BYTE*SizeOf(Integer);
+  BITS_PER_INTEGER         = BITS_PER_BYTE*SizeOf(Int);
   BITS_PER_UNSIGNED_INTEGER= BITS_PER_BYTE*SizeOf(UInt);
   MAX_BOARD_WIDTH          = 50;
   MAX_BOX_COUNT            = High(UInt8);      {limited by the field 'BoxNo' in 'TMove'; must be a 2^N-1 number where 'N' is an integer > 0, so the value can be used as a bit mask to isolate a box number or a goal number}
@@ -205,12 +215,12 @@ type
   PBoxNo                   = ^TBoxNo;
   TBoxSet                  = set of TBoxNo;
   TBoxSetWithCount         = record
-    Count                  : Integer; {number of boxes in the set}
+    Count                  : Int; {number of boxes in the set}
     BoxSet                 : TBoxSet; {box number bit set}
                              end;
   TDirection               = (dUp,dLeft,dDown,dRight); {order must not change, e.g., the directions must be listed in alternate axis order; see also 'TDeadlockSetFlag' for more constraints}
   TDirectionArrayOfIntegers
-                           = array[TDirection] of Integer;
+                           = array[TDirection] of Int;
   TDirectionMap            = array[TDirection] of TDirection;
   TDirectionSet            = set of TDirection;
   {caution: if more directions are added to 'TDirection' (e.g., for the Hexoban variant), then 'TDeadlockSetFlag' must be updated accordingly}
@@ -237,7 +247,7 @@ type
   TMove                    = packed record BoxNo:TBoxNo; Direction:TDirection; end; {'packed': sequence of unaligned fields, without gaps}
   THashValue               = Int64;
   THistory                 = record
-    Count                  : Integer;
+    Count                  : Int;
     Moves                  : array[0..MAX_HISTORY_BOX_MOVES] of TMove;
                              end;
   TOptimization            = (opMovesPushes,opPushesMoves,opPushesOnly,opBoxLinesMoves,opBoxLinesPushes); {order must not change, and the two boxlines optimizations must be the last ones; see also 'OPTIMIZATIONS_TO_SOKOBAN_PLUGIN_FLAGS'}
@@ -259,15 +269,15 @@ type
   TRoomNo                  = 0..MAX_ROOM_COUNT;
   TScore                   = UInt16;   {e.g., scores and pushes in a position stored in the transposition table; see 'TPosition'}
   TSearchLimits            = record    {limits controlling the currently running search; solving or optimizing a level may require multiple searches with different limits}
-    DepthLimit             : Integer;  {maximum search depth}
+    DepthLimit             : Int;      {maximum search depth}
     PushCountLimit         : Int64;    {maximum number of pushes}
     TimeLimitMS            : TTimeMS;  {maximum search time, milliseconds}
                              end;
   TSearchMethod            = (smBackward,smForward,smOptimize,smPerimeter);
   TSmallBoxSet             = set of 0..MAX_SMALL_BOX_SET_COUNT-1; {game box numbers [1..n] are mapped to set box numbers [0..n-1]}
   TSquareColor             = (scWhite,scLightGray,scDarkGray,scBlack); {order must not change; meaning in deadlock-set calculation: outside square, floor, box, wall}
-  TTimeStamp               = UInt32;
-  TVicinitySettings        = array[0..MAX_VICINITY_BOX_COUNT+1] of Integer;     {the vicinity settings are right-justified and in descending order with first and last element as zero-value sentinels}
+  TTimeStamp               = UInt64;
+  TVicinitySettings        = array[0..MAX_VICINITY_BOX_COUNT+1] of Int;         {the vicinity settings are right-justified and in descending order with first and last element as zero-value sentinels}
 
 {Constants}
 
@@ -318,7 +328,7 @@ const
   DEADLOCK_SCORE           = High(TScore);               {must be 'TScore' high value}
   DEAD_END_SCORE           = DEADLOCK_SCORE-1;           {must be 1 less than 'DEADLOCK_SCORE'}
   DEFAULT_BOXES_NOT_ON_BEST_PATH_LIMIT
-                           = MaxInt div 2;
+                           = High(Int) div 2;
   DEFAULT_DEADLOCK_SETS_ADJACENT_OPEN_SQUARES_LIMIT      {limits the search for expanded deadlock-sets}
                            = 1;
   DEFAULT_DEADLOCK_SETS_BOX_LIMIT_FOR_PRECALCULATED_SETS
@@ -328,7 +338,7 @@ const
   DEFAULT_SIMPLE_LOWER_BOUND_PUSHES_COUNT                {initially, try to use the simple lower bound as heuristic score, instead of the more accurate lower bound calculated by the time-consuming bipartite matching algorithm}
                            = 250000;
   DEFAULT_LOG_FILE_ENABLED = False;
-  DEFAULT_MEMORY_BYTE_SIZE = 64*ONE_MEBI;                {64 MiB}
+  DEFAULT_MEMORY_BYTE_SIZE = 128*ONE_MEBI;               {128 MiB}
   DEFAULT_OPEN_LIST_ESCAPE_INTERVAL
                            = 7;                          {must be a 2^N-1 integer, where N is a positive integer}
   DEFAULT_PUSH_COUNT_LIMIT : Int64 = High(Int64);        {number of pushes to generate before giving up; high-value of a 64-bit integer amounts to 'unlimited'; if the value is lowered, then the text in 'ShowHelp()' must change accordingly}
@@ -366,10 +376,10 @@ const
                            = (dsfUp,dsfLeft,dsfDown,dsfRight);
   DIRECTION_TO_TEXT        : array[TDirection] of String
                            = ('up','left','down','right');
-  DIRECTION_TO_TUNNEL_FLAG : array[TDirection] of Cardinal
+  DIRECTION_TO_TUNNEL_FLAG : array[TDirection] of UInt
                            = (FLAG_TUNNEL_UP,FLAG_TUNNEL_LEFT,FLAG_TUNNEL_DOWN,FLAG_TUNNEL_RIGHT);
   {caution: if more directions are added to 'TDirection' (e.g., for the Hexoban variant), then 'DIRECTION_TO_TUNNEL_FLAGS' must be updated accordingly}
-  DIRECTION_TO_TUNNEL_FLAGS: Cardinal=FLAG_TUNNEL_UP+FLAG_TUNNEL_LEFT+FLAG_TUNNEL_DOWN+FLAG_TUNNEL_RIGHT;
+  DIRECTION_TO_TUNNEL_FLAGS: UInt=FLAG_TUNNEL_UP+FLAG_TUNNEL_LEFT+FLAG_TUNNEL_DOWN+FLAG_TUNNEL_RIGHT;
   DISTANCE_SCALE_FACTOR    = 10;               {scale factor when distances are used as heuristic estimates}
   EMPTY_GOAL_PENALTY       = {64} 32;          {penalty for each unfilled target square (goal or parking space) during a packing order search; preferably a 2^n number for fast multiplications}
   EXPLORED_POSITIONS_TIME_CHECK_INTERVAL                                        {perform time checks at regular intervals during the search, based on the number of explored game states.}
@@ -381,7 +391,7 @@ const
   GAME_LINE_LENGTH         = 70;               {print line length for games, i.e., solutions and snapshots}
   GOAL_BIT_SHIFT_COUNT     = 24;               {each square on the board contains its goal number or packing order set number, if any, in the upper bits}
   GRAPH_FILE_EXT           = '.tmp';           {the nodes from the backward search are temporarilty saved to a disk file when the solver performs a perimeter search, i.e., a backward search followed by a forward search}
-  INFINITY                 = (MaxInt div 2)-1; {(-INFINITY), (2*INFINITY), and (2*(-INFINITY)) must be legal integer values}
+  INFINITY                 = (High(Int) div 2)-1; {(-INFINITY), (2*INFINITY), and (2*(-INFINITY)) must be legal integer values}
   INITIAL_PARKING_POSITION_COUNT_LIMIT         {the point at which to abandon the initial parking operations calculated by the packing order, if the search so far has been unsuccessful}
                            = 5*ONE_MILLION;
   LAZY_BOX_BOX_COUNT_PERCENTILE
@@ -397,7 +407,7 @@ const
   MIN_OPEN_LIST_ESCAPE_INTERVAL
                            = 7;
   MAX_BACKWARD_SEARCH_POSITIONS                {saving the entire game graph to disk can be a time-consuming task; in order to reserve time for a subsequent forward search, the backward search doesn't necessarily use all the available memory}
-                           = High(Integer);    {'High': unlimited, i.e., use all the available memory, also for the backward search}
+                           = High(Int);        {'High': unlimited, i.e., use all the available memory, also for the backward search}
   MAX_BOARD_HEIGHT         = MAX_BOARD_WIDTH;
   MAX_BOARD_SIZE           = (MAX_BOARD_WIDTH+2) * (MAX_BOARD_HEIGHT+2); {'0' left/top border; '+1': right/bottom border}
   MAX_BOX_CHANGES_OPTIMIZATION_TIME_LIMIT_MS
@@ -415,29 +425,33 @@ const
                            = 8*ONE_KIBI;
   MAX_DEADLOCK_SETS_SEARCH_TIME_MS
                            = 5 * 60 * ONE_THOUSAND; {arbitrary limit but should provide a reasonable bound on the running time}
+  MAX_DEFAULT_MEMORY_BYTE_SIZE
+                           : Int64 = Int64(ONE_GIBI) * 4;
   MAX_EXPAND_DEADLOCK_SET_PUSH_COUNT
                            = 10000;            {limit the number of pushes for attempts to derive new deadlock patterns after having proved that a pattern is a deadlock}
+  MAX_GLOBAL_OPTIMIZATION_PUSH_COUNT           {limit the number of pushes for the global optimization method. it's a weak optimization method, hence don't spend too much time on it}
+                           = 50 * ONE_MILLION;
   MAX_HISTORY_PLAYER_MOVES = Pred(High(TScore)); {limited by the field 'Height' in 'TPosition'}
   MAX_OPTIMIZER_BACKWARD_SEARCH_POSITIONS_COUNT
                            = 100*ONE_THOUSAND; {the size is rather critical; the backward search only plays a supporting role, and a too large limit will waste time as well as positions in the transposition table}
   MAX_OPTIMIZER_SEARCH_DEPTH_FOR_ADDING_BEST_PATH_PERMUTATIONS
                            = 50;               {'50': a rather arbitrary depth limit (push count limit), but it must be small enough to guard against stack overflow and to ensure that the transposition table isn't filled with best path permutations}
   MAX_OPTIMIZER_SUCCESSIVE_GLOBAL_OPTIMIZATION_SEARCHES
-                           = 1;                {the optimizer performs this number of successful global-optimization searches before it changes optimization method}
+                           = 1;                {the optimizer performs this number of successful global optimization searches before it changes optimization method}
   MAX_PACKING_ORDER_CALCULATION_TIME_MS        {maximum time for precalculation of a packing order; a somewhat arbitrary limit, but the precalculation should not take up too large a fraction of the total running time}
                            = 90 {seconds} * ONE_THOUSAND; {milliseconds}
   MAX_PACKING_ORDER_PARK_BOXES_ATTEMPTS        {maximum park-box attempts for the packing order calculation; the number should be small enough to guarantee a reasonably small running time upper bound}
                            = 500*ONE_KIBI;
   MAX_SCORE_VALUE          = { (High(TScore) div 2)-1 } MAX_HISTORY_BOX_MOVES+(1+MAX_BOX_COUNT)*EMPTY_GOAL_PENALTY;
-  MAX_SEARCH_TIME_LIMIT_MS = High(Integer)-1001; {'-1001': high-values are reserved for meaning 'unlimited'}
+  MAX_SEARCH_TIME_LIMIT_MS = High(Int)-1001;   {'-1001': high-values are reserved for meaning 'unlimited'}
   MAX_SINGLE_STEP_MOVES    = MAX_BOARD_WIDTH*MAX_BOARD_HEIGHT+DIRECTION_COUNT*MAX_BOX_COUNT;
   MAX_TRANSPOSITION_TABLE_BYTE_SIZE            {limit the transposition table byte size to a signed integer and leave some memory free for other purposes}
-                           : Integer
+                           : Int
                            =
                            {$IFDEF PLUGIN_MODULE}
-                             ((MaxInt div 4) + 1) * 3; {use only 75% of the total memory address space; the host program might run other memory-consuming tasks in parallel with the plug-in}
+                             ((High(Int) div 4) + 1) * 3; {use only 75% of the total memory address space; the host program might run other memory-consuming tasks in parallel with the plug-in}
                            {$ELSE}
-                             ((MaxInt div 4) + 1) * 3; {use only 75% of the total memory address space; this leaves some memory for other purposes}
+                             ((High(Int) div 4) + 1) * 3; {use only 75% of the total memory address space; this leaves some memory for other purposes}
                            {$ENDIF}
   MAX_VICINITY_SQUARES     = {MAX_BOARD_WIDTH*MAX_BOARD_HEIGHT} 999; {the only reason for the 999-limit is that it allows a settings window to operate with 3-digits only for the spin-edit controls}
   MIN_BOX_LIMIT_FOR_DYNAMIC_DEADLOCK_SETS      {calculating and storing dynamic deadlock-sets are time-consuming operations; the minimum box limit must be reasonably small}
@@ -456,7 +470,7 @@ const
                            : array[TOptimizationMethod] of Char
                            = ('B','P','R','V','G'); {Box permutations, Box permutations with time limit, Rearrangement, Vicinity search, Global search}
   OPTIMIZATIONS_TO_SOKOBAN_PLUGIN_FLAGS
-                           : array[TOptimization] of Integer
+                           : array[TOptimization] of Int
                            = (SOKOBAN_PLUGIN_FLAG_MOVES    +SOKOBAN_PLUGIN_FLAG_SECONDARY_PUSHES,  {opMovesPushes}
                               SOKOBAN_PLUGIN_FLAG_PUSHES   +SOKOBAN_PLUGIN_FLAG_SECONDARY_MOVES,   {opPushesMoves}
                               SOKOBAN_PLUGIN_FLAG_PUSHES,                                          {opPushesOnly}
@@ -504,7 +518,7 @@ const
   POSITION_VISITED_TAG     : UInt8 = 1 shl (DIRECTION_BIT_COUNT+3); {flag-bit in 'TPosition.Move.Direction'; optimizer only}
 
 { POSITION_POINTER_FLAGS   = FLAG_POSITION_BASE+FLAG_POSITION_VISITED;}
-{ POSITION_POINTER_MASK    : Integer = (not POSITION_POINTER_FLAGS);}
+{ POSITION_POINTER_MASK    : Int = (not POSITION_POINTER_FLAGS);}
   PREVIOUS_DIRECTION       : TDirectionMap {previous anti-clockwise direction}
                            = (dRight,dUp,dLeft,dDown);
   REARRANGEMENT_OPTIMIZATION_KEEP_EXISTING_BOX_SESSIONS_PATH_LENGTH_THRESHOLD
@@ -546,7 +560,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.151';
+                           = '2.152 (64-bit)';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -643,32 +657,32 @@ const
 type
   TBoardSquareValue        = UInt; {the contents of a board square, as opposed to a square index}
   TBoard                   = array[0..MAX_BOARD_SIZE]   of TBoardSquareValue;
-  TBoardAsTextLines        = array[0..MAX_BOARD_HEIGHT] of String[255]; //String[MAX_BOARD_WIDTH];
+  TBoardAsTextLines        = array[0..MAX_BOARD_HEIGHT] of String;
   TBoardOfBooleans         = array[0..MAX_BOARD_SIZE]   of Boolean;
   TBoardOfBoxSets          = array[0..MAX_BOARD_SIZE]   of TBoxSet;
   TBoardOfBytes            = array[0..MAX_BOARD_SIZE]   of UInt8;
   TBoardOfDirections       = array[0..MAX_BOARD_SIZE]   of TDirection;
   TBoardOfDirectionSets    = array[0..MAX_BOARD_SIZE]   of TDirectionSet;
   TBoardOfGoalSets         = array[0..MAX_BOARD_SIZE]   of TGoalSet;
-  TBoardOfIntegers         = array[0..MAX_BOARD_SIZE]   of Integer;
+  TBoardOfIntegers         = array[0..MAX_BOARD_SIZE]   of Int;
   TBoardOfSquareColors     = array[0..MAX_BOARD_SIZE]   of TSquareColor;
   TBoardOfTimeStamps       = array[0..MAX_BOARD_SIZE]   of TTimeStamp;
   TBoardOfUnsignedIntegers = array[0..MAX_BOARD_SIZE]   of UInt;
   TBoardSquareSet          = record
-    Count                  : Integer;
+    Count                  : Int;
     Squares                : TBoardOfIntegers;
                              end;
   TBoardTimeStamps         = record
     Squares                : TBoardOfTimeStamps;
     TimeStamp              : TTimeStamp;
                              end;
-  TBoxArrayOfIntegers      = array[TBoxNo] of Integer;
+  TBoxArrayOfIntegers      = array[TBoxNo] of Int;
   TBoxArrayOfUnsignedIntegers
-                           = array[TBoxNo] of Cardinal;
+                           = array[TBoxNo] of UInt;
   TBoxGoalAssignments      = array[0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND] of TBoxNo;
   TBoxGoalSets             = array[TBoxNo] of TBoxSetWithCount; {for each box/goal, a set of box/goal numbers, e.g., for a mapping from goal numbers to pull-reachable box starting positions for each goal}
   TBoxNumbers              = array[TBoxNo] of TBoxNo;
-  TBoxSquare               = Integer; {must be a signed integer-type value so negated values can indicate a flag value for the square}
+  TBoxSquare               = Int; {must be a signed integer-type value so negated values can indicate a flag value for the square}
   PBoxSquare               = ^TBoxSquare;
   TBoxSquare2              = Int16; {for compact box square vectors, e.g., TCorralPositions.BoxSquare'}
   PBoxSquare2              = ^TBoxSquare2;
@@ -677,33 +691,33 @@ type
   PBoxSquares              = ^TBoxSquares;
   TBoxSquaresMemoryBlock   = record {corral box squares stored in the transposition table together with the normal game positions}
     BoxSquare              : PBoxSquare2; {next free box square       in the memory block allocated for the box squares}
-    BoxSquaresCountDown    : Integer;     {number of free box squares in the memory block allocated for the box squares}
+    BoxSquaresCountDown    : Int;         {number of free box squares in the memory block allocated for the box squares}
                              end;
   TBoxNumberSet            = record
-    Count                  : Integer;
+    Count                  : Int;
     Numbers                : TBoxNumbers;
                              end;
   TBoxSquareSet            = record
-    Count                  : Integer;
+    Count                  : Int;
     Squares                : TBoxSquares;
                              end;
   TBoxSquareValues         = array[TBoxNo] of TBoardSquareValue; {board square values for the boxes, as opposed to box square indices}
   TGoalSquareValues        = TBoxSquareValues;
   TSquareDirectionArrayOfInteger
-                           = array[0..MAX_BOARD_SIZE,TDirection] of Integer;
+                           = array[0..MAX_BOARD_SIZE,TDirection] of Int;
   TColRow                  = packed record Col,Row: UInt8; end;
   TNeighborSquareSet       = record
-    Count                  : Integer;
-    Squares                : array[0..DIRECTION_COUNT] of Integer; {element 0 not used}
+    Count                  : Int;
+    Squares                : array[0..DIRECTION_COUNT] of Int; {element 0 not used}
     end;
   TDeadlockSearchHistoryGameState
                            = record
     BoxNo                  : TBoxNo; {last pushed box leading to this position}
     BoxPos                 : TBoxSquares2;
     HashValue              : THashValue;
-    PlayerPos              : Integer; {normalized player position}
+    PlayerPos              : Int; {normalized player position}
     TableItemBoxesOnBoardCount
-                           : Integer;
+                           : Int;
   end;
   TDeadlockSearchHistory   = array[0..MAX_DEADLOCK_SEARCH_DEPTH]
                              of TDeadlockSearchHistoryGameState;
@@ -713,81 +727,81 @@ type
    non-negative integer; the size must be small because each game state produced
    during the search is matched against each item in the transposition table}
                            = array[ 0 .. 127 ] of TDeadlockSearchHistoryGameState;
-  TDeadlockSetCapacities   = array[0..MAX_DEADLOCK_SETS] of Integer;
+  TDeadlockSetCapacities   = array[0..MAX_DEADLOCK_SETS] of Int;
   TDeadlockSetFlagsSet     = set of TDeadlockSetFlag;
   TDeadlockSetCandidate    = record
     Boxes                  : TBoardSquareSet;                           {the numbers of the squares containing boxes}
-    Capacity               : Integer;
-    CenterSquare           : Integer;
-    EscapedBoxesCountDown  : Integer;
+    Capacity               : Int;
+    CenterSquare           : Int;
+    EscapedBoxesCountDown  : Int;
     Flags                  : TDeadlockSetFlagsSet;
     Floors                 : TBoardSquareSet;                           {not necessarily including the center square and its adjacent squares}
-    GoalCount              : Integer;
-    PaintedFloorCount      : Integer;
-    MaxBoxCount            : Integer;                                   {max. allowed number of boxes; may differ from 'Game.BoxCount'}
+    GoalCount              : Int;
+    PaintedFloorCount      : Int;
+    MaxBoxCount            : Int;                                       {max. allowed number of boxes; may differ from 'Game.BoxCount'}
     SquareColors           : TBoardOfSquareColors;
-    SquareOutsideFence     : Integer;                                   {for a fence-type (corral-type) deadlock, a square which is known to be outside the fence}
+    SquareOutsideFence     : Int;                                       {for a fence-type (corral-type) deadlock, a square which is known to be outside the fence}
     SquaresOutsideFence    : TBoardSquareSet;                           {more squares known to be outside the fence}
                              end;
   TDeadlockSetNo           = UInt16;                                    {a deadlock-set number}
-  TDeadlockSetNumbers      = array [ 0 .. ( MaxInt div SizeOf( TDeadlockSetNo ) ) - 1 ] of TDeadlockSetNo; {vector with deadlock-set numbers}
+  TDeadlockSetNumbers      = array [ 0 .. ( MaxInt div SizeOf( TDeadlockSetNo ) ) - 1 ] of TDeadlockSetNo; {vector with deadlock-set numbers. the declared size limit is merely a formality. range checking is disabled}
   PDeadlockSetNumbers      = ^TDeadlockSetNumbers;
   TSquareDeadlockSetNumbers
                            = array[0..MAX_BOARD_SIZE] of PDeadlockSetNumbers; {for each square, the deadlock-set numbers it's a part of}
   TDeadlockSets            = record
     AdjacentOpenSquaresLimit                                            {limits the search for expanded deadlock-sets}
-                           : Integer;
-    BoxLimitForDynamicSets : Integer;                                   {limits the storage and computation of dynamic deadlock-sets during level solving}
+                           : Int;
+    BoxLimitForDynamicSets : Int;                                       {limits the storage and computation of dynamic deadlock-sets during level solving}
     BoxLimitForPrecalculatedSets                                        {limits the search for expanded deadlock-sets}
-                           : Integer;
-    CandidatePushCount     : Integer;                                   {number of generated pushes for current deadlock-set candidate}
+                           : Int;
+    CandidatePushCount     : Int;                                       {number of generated pushes for current deadlock-set candidate}
     Capacity               : TDeadlockSetCapacities;                    {number of boxes that can be pushed to a deadlock-set without causing an overflow}
     CenterSquare           : array[0..MAX_DEADLOCK_SETS] of Int16;
     ControllerAndFreezeSetPairsEnabled                                  {'True': 'IsALegalPush' takes controller/freeze-set deadlock pairs into account; 'False': 'IsALegalPush' ignores them}
                            : Boolean;
-    Count                  : Integer;
-    DynamicSetsCount       : Integer;                                   {number of dynamically calculated deadlock-sets}
-    PathDeadlockCount      : Integer;                                   {number of deadlocked positions on the current path}
+    Count                  : Int;
+    DynamicSetsCount       : Int;                                       {number of dynamically calculated deadlock-sets}
+    PathDeadlockCount      : Int;                                       {number of deadlocked positions on the current path}
     Flags                  : array[0..MAX_DEADLOCK_SETS] of TDeadlockSetFlagsSet;
     FloorCount             : array[0..MAX_DEADLOCK_SETS] of Int16;
     HashKey                : array[0..MAX_DEADLOCK_SETS] of THashValue;
     History                : TDeadlockSearchHistory;                    {contains all pushes along the current path in the depth-first deadlock search which tries to prove that a game state is a deadlock; allocated globally to reduce runtime stack size}
     IsALegalPushOverflowingSetsCount                                    {global result value for 'IsALegalPush'}
-                           : Integer;
+                           : Int;
     IsALegalPushOverflowingSets                                         {global result value for 'IsALegalPush'}
-                           : array[0..MAX_DEADLOCK_SETS] of Integer;
-    LevelTotalPushCount    : Integer;                                   {total number of generated pushes for all tested candidates for current level}
+                           : array[0..MAX_DEADLOCK_SETS] of Int;
+    LevelTotalPushCount    : Int;                                       {total number of generated pushes for all tested candidates for current level}
     NewDynamicDeadlockSets : Boolean;                                   {'True': the solver main loop must backtrack to the start position so new deadlocks are considered when a position is selected for expansion}
     NoProgressDeadlockCheckTimeMS                                       {time spent on checking for deadlocks at the "no progress" checkpoints}
                            : TTimeMS;
-    OverflowSetsCount      : Integer;
-    PrecalculatedSetsCount : Integer;                                   {number of precalculated deadlock-sets, as opposed to the dynamic deadlock-sets}
-    RedundantSetsCount     : Integer;                                   {newcoming sets may make previously found sets redundant}
-    SequenceNo             : Integer;                                   {sequential deadlock-set numbers for printing; internal numbers differ from sequence numbers when redundant deadlocks are pruned}
-    SequenceNumbers        : array[0..MAX_DEADLOCK_SETS] of Integer;    {deadlock-sets are sequentially numbered in the log-file, but redundant sets are pruned, hence, 'Index' and 'SequenceNumbers' may defer}
+    OverflowSetsCount      : Int;
+    PrecalculatedSetsCount : Int;                                       {number of precalculated deadlock-sets, as opposed to the dynamic deadlock-sets}
+    RedundantSetsCount     : Int;                                       {newcoming sets may make previously found sets redundant}
+    SequenceNo             : Int;                                       {sequential deadlock-set numbers for printing; internal numbers differ from sequence numbers when redundant deadlocks are pruned}
+    SequenceNumbers        : array[0..MAX_DEADLOCK_SETS] of Int;        {deadlock-sets are sequentially numbered in the log-file, but redundant sets are pruned, hence, 'Index' and 'SequenceNumbers' may defer}
     SessionDeadlockSetsCount                                            {total number of deadlock-sets for all processed levels}
-                           : Integer;
+                           : Int;
     SessionDeadlockSetsTableOverflowCount                               {total number of deadlock-sets not saved because of table overflows for all processed levels}
-                           : Integer;
+                           : Int;
     SessionPlayerMustBeOutsideSetCount
-                           : Integer;
+                           : Int;
     SessionTestedGamesCount
-                           : Integer;                                   {total number of tested original games}
-    SquaresCount           : array[0..MAX_DEADLOCK_SETS] of Integer;    {number of squares for each set}
-    SquareSetCount         : array[0..MAX_BOARD_SIZE]    of Integer;    {for each square, the number of deadlock-sets it's a part of}
+                           : Int;                                       {total number of tested original games}
+    SquaresCount           : array[0..MAX_DEADLOCK_SETS] of Int;        {number of squares for each set}
+    SquareSetCount         : array[0..MAX_BOARD_SIZE]    of Int;        {for each square, the number of deadlock-sets it's a part of}
     SquareSetNumbers       : TSquareDeadlockSetNumbers;                 {for each square, the deadlock-sets it's a part of}
     SquareOutsideFence     : array[0..MAX_DEADLOCK_SETS] of TBoxSquare2;{for single-room corral-type deadlocks, the most recent player position that has been proved to be outside the fence}
     SquaresOutsideFence    : array[0..MAX_DEADLOCK_SETS_SQUARES_OUTSIDE_FENCE] of TBoxSquare2; {'outside-fence' squares are only saved for some deadlock-sets}
     SquaresOutsideFenceIndex
                            : array[0..MAX_DEADLOCK_SETS] of Int16;      {index into the 'SquaresOutsideFence' vector; the indexed cell contains the square count, and the actual squares follow in the cells 'index+1' .. 'index+n'}
-    SquaresOutsideFenceTop : Integer;                                   {the last used item in 'SquaresOutsideFence', i.e., the next free index is 'SquaresOutsideFenceTop' + 1}
-    Statistics             : array[0..MAX_DEADLOCK_SETS] of Cardinal;   {number of times each deadlock has been triggered}
-    TestedCandidatesCount  : Integer;
+    SquaresOutsideFenceTop : Int;                                       {the last used item in 'SquaresOutsideFence', i.e., the next free index is 'SquaresOutsideFenceTop' + 1}
+    Statistics             : array[0..MAX_DEADLOCK_SETS] of UInt;       {number of times each deadlock has been triggered}
+    TestedCandidatesCount  : Int;
     TimeLimitMS            : TTimeMS;
     TimeMS                 : TTimeMS;
     {the small transposition table defined here contains selected game states during the depth-first deadlock search which tries to prove that a game state is a deadlock; it's allocated globally to reduce runtime stack size}
     TranspositionTable     : TDeadlockSearchTranspositionTable;
-    UnderflowSetsCount     : Integer;
+    UnderflowSetsCount     : Int;
                              end;
   TRoomSquare              = record
      RoomNo                : TRoomNo; {the number of the room to which this square belongs, if any}
@@ -795,29 +809,29 @@ type
                            : array[TDirection] of Byte; {for each line emanating from the square, the distance to the nearest square outside the room in that direction, if any}
                              end;
   TRooms                   = record
-    Count                  : Integer;
+    Count                  : Int;
 //  RoomBoxCount           : array[TRoomNo] of UInt8; {number of boxes in each room for the current game state; not in production}
     Squares                : array[0..MAX_BOARD_SIZE] of TRoomSquare;
                              end;
   TGame                    = record
     Board                  : TBoard; {current game state; 'Board' = 'BoxPos' + 'PlayerPos'}
-    BoardHeight            : Integer;
+    BoardHeight            : Int;
     BoxReachableSquaresCount {number of squares on the board which at least one of the boxes can reach}
-                           : Integer;
-    BoardSize              : Integer; {(Width+2)*(Height*2): the extra 2 is for a wall-filled border}
-    BoardWidth             : Integer;
-    BoxCount               : Integer;
+                           : Int;
+    BoardSize              : Int; {(Width+2)*(Height*2): the extra 2 is for a wall-filled border}
+    BoardWidth             : Int;
+    BoxCount               : Int;
     BoxGoalAssignments     : TBoxGoalAssignments;
     BoxPos                 : TBoxSquares; {current game state; 'Board' = 'BoxPos' + 'PlayerPos'}
     DeadlockSets           : TDeadlockSets;
     DistanceToNearestGoal  : TBoardOfIntegers;
     DistanceToNearestBoxStartPosition
                            : TBoardOfIntegers;
-    EndPlayerPos           : Integer; {player's end position in the original snapshot/solution}
-    FloorCount             : Integer; {number of floor squares on the board}
+    EndPlayerPos           : Int; {player's end position in the original snapshot/solution}
+    FloorCount             : Int; {number of floor squares on the board}
     FreezeTestTimeStamps   : TBoardTimeStamps; {timestamps for visited squares/axis during a freeze-test}
     GoalBoxAssignments     : TBoxGoalAssignments;
-    GoalCount              : Integer;
+    GoalCount              : Int;
     GoalPos                : TBoxSquares;
     HashValue              : THashValue;
     History                : THistory;
@@ -825,20 +839,20 @@ type
     IsAnOptimalSolution    : Boolean; {is the game stored in 'History' an optimal solution?}
     OriginalBoard          : TBoard;  {original board, i.e., before pre-processing operations like tube-filling}
     OriginalBoxPos         : TBoxSquares; {matching 'OriginalBoard'}
-    OriginalPlayerPos      : Integer; {matching 'OriginalBoard'}
+    OriginalPlayerPos      : Int; {matching 'OriginalBoard'}
     OriginalSolution       : String;  {solution from inputfile, not the solution found by this application}
     OriginalSolutionMoveCount
-                           : Integer;
+                           : Int;
     OriginalSolutionPushCount
-                           : Integer;
-    PackingOrderPushCount  : Integer; {number of pushes on current path which stem from packing-order search}
-    PlayerPos              : Integer; {current game state; 'Board' = 'BoxPos' + 'PlayerPos'}
+                           : Int;
+    PackingOrderPushCount  : Int; {number of pushes on current path which stem from packing-order search}
+    PlayerPos              : Int; {current game state; 'Board' = 'BoxPos' + 'PlayerPos'}
     ReverseMode            : Boolean;
     Rooms                  : TRooms;
     ShowDeadlockSetsEnabled: Boolean;
-    SimpleLowerBound       : Integer;
+    SimpleLowerBound       : Int;
     StartBoxPos            : TBoxSquares; {box starting positions after board normalization by 'FillTubes'}
-    StartPlayerPos         : Integer; {player's starting position after board normalization by 'FillTubes'}
+    StartPlayerPos         : Int; {player's starting position after board normalization by 'FillTubes'}
     StartPositionSimpleLowerBound
                            : TScore; {simple pushes lower bound after board normalization by 'FillTubes'}
     SolutionPathHashValues : array[0..MAX_HISTORY_BOX_MOVES+1] of THashValue;
@@ -847,9 +861,9 @@ type
     SquareOffsetLeft       : TDirectionArrayOfIntegers;
     SquareOffsetRight      : TDirectionArrayOfIntegers;
     Title                  : String;
-    TubeFillingMoveCount   : Integer; {player moves}
-    TubeFillingPlayerLines : Integer; {player lines}
-    TubeFillingPushCount   : Integer; {box pushes}
+    TubeFillingMoveCount   : Int; {player moves}
+    TubeFillingPlayerLines : Int; {player lines}
+    TubeFillingPushCount   : Int; {box pushes}
                              end;
   POptimizerPosition       = ^TOptimizerPosition;
   PPosition                = ^TPosition;
@@ -863,7 +877,7 @@ type
     FileName               : String;
     GraphFile              : file of Byte;
                              end;
-  THashValueVector         = array[ 0 .. ( MaxInt div SizeOf( THashValue ) ) - 1 ] of THashValue;
+  THashValueVector         = array[ 0 .. ( MaxInt div SizeOf( THashValue ) ) - 1 ] of THashValue; {the declared size limit is merely a formality. range checking is disabled}
   PHashValueVector         = ^THashValueVector;
   TLegend                  = record
     CharToItem             : array[Low(Char)..High(Char)] of UInt8;
@@ -885,9 +899,9 @@ type
     ForwardPositionCount   : Int64;
     GeneratedMovesCount    : Int64;
     GeneratedPushesCount   : Int64;
-    Height                 : Cardinal;
+    Height                 : UInt;
     InitializationTimeMS   : TTimeMS;
-    LowerBound             : Cardinal;
+    LowerBound             : UInt;
     Name                   : String;
     MoveCount              : Int64;
     NewPathCount           : Int64;
@@ -900,7 +914,7 @@ type
     PushCount              : Int64;
     RoomPositionCount      : Int64;
     SolverTimeMS           : TTimeMS;
-    Width                  : Cardinal;
+    Width                  : UInt;
                              end;
   TLogFile                 = record
     Enabled                : Boolean;
@@ -908,21 +922,21 @@ type
     TextFile               : TextFile;
                              end;
   TOptimizerGameMetrics    = record
-    BoxChanges             : Integer;
-    BoxLines               : Integer;
+    BoxChanges             : Int;
+    BoxLines               : Int;
     HasPlayerLines         : Boolean; {'True': the player lines metric has been calculated}
     LastPlayerDirection    : TDirection;
-    LastPushedBoxNo        : Integer;
+    LastPushedBoxNo        : Int;
     LastPushedDirection    : TDirection;
-    LastPushingMoveNo      : Integer;
-    MoveCount              : Integer;
-    PlayerLines            : Integer;
-    PushCount              : Integer;
-    PushingSessions        : Integer;
+    LastPushingMoveNo      : Int;
+    MoveCount              : Int;
+    PlayerLines            : Int;
+    PushCount              : Int;
+    PushingSessions        : Int;
                              end;
-  TMovesFromSquare         = array[0..MAX_BOARD_SIZE - 1,TDirection] of Integer;
+  TMovesFromSquare         = array[0..MAX_BOARD_SIZE - 1,TDirection] of Int;
   TOptimizer               = record
-    BoxesNotOnBestPathLimit: Cardinal; {for forward pruning; maximum number of boxes allowed to deviate from the set of squares belonging to the best path}
+    BoxesNotOnBestPathLimit: UInt; {for forward pruning; maximum number of boxes allowed to deviate from the set of squares belonging to the best path}
     BoxPermutationsSearchTimeLimitMS
                            : TTimeMS;
 //  ByteBitCount           : array[Byte] of Byte; {number of bits for each bit pattern in a byte}
@@ -936,7 +950,7 @@ type
     Optimization           : TOptimization; {optimize moves/pushes, pushes/moves, etc.}
     OriginalMetrics        : TOptimizerGameMetrics; {game metrics for the caller's solution/snapshot, before it is optimized}
     PruningNode            : PPosition;
-    PurgeCount             : Cardinal;
+    PurgeCount             : UInt;
     QuickVicinitySearchEnabled
                            : Boolean;  {'True': start vicinity-search with a 1-box 999/0 search (this often speeds up a 2-box search)}
     Result                 : TPluginResult;
@@ -951,25 +965,25 @@ type
                              end;
   TSquareTargetDistance    = array[0..MAX_BOARD_SIZE,TBoxNo] of UInt16; {'UInt16': otherwise, the table gets unreasonable large; the high-value is reserved for meaning 'INFINITY', i.e., no path exists. real distances are truncated to high-value - 1}
   TPackingOrder            = record
-    BoxCountThreshold      : Integer;  {threshold for trying to use a packing-order for solving the level}
+    BoxCountThreshold      : Int;      {threshold for trying to use a packing-order for solving the level}
     DistancesBasedOnPackingOrder       {when non-zero, square->goal distances taking the packing order into account have been calculated and are available in the table at index 'normal goal number' + 'DistancesBasedOnPackingOrder' for each of the goals}
-                           : Integer;
+                           : Int;
     Enabled                : Boolean;  {packing-order enabled/disabled}
-    FirstSetMemberIndex    : array[0..MAX_BOX_COUNT+1] of Integer; {index of first goal member in 'SetMembers' for each set number, i.e., for each phase}
+    FirstSetMemberIndex    : array[0..MAX_BOX_COUNT+1] of Int; {index of first goal member in 'SetMembers' for each set number, i.e., for each phase}
     GoalBoxSets            : TBoxGoalSets; {for each goal, the set of reachable box starting positions from the goal}
     GoalSetNo              : TBoxNumbers; {mapping each goal number to its packing order set number, i.e., its phase}
     GoalAndParkingSquareCount {total number of goals and parking squares; during packing order search, a box may be parked somewhere on the board before the box is brought to its final goal square}
-                           : Integer;
+                           : Int;
     LastPhaseWithABoxParkedInASmallArea {the last (lowest) game phase where a box is parked because a goal square must be filled with a box coming from a relatively small area of the board}
-                           : Integer;
+                           : Int;
     NextGoalAtSameSquare   : TBoxNumbers; {circular linked lists for goals/parking places sharing the same square; a square can at the same time be a real goal square and used as parking space one or more times}
     ParkedBoxDestinationGoalSetNo
                            : TBoxNumbers; {for each parked box, the set number of the goal the parked box came from; a parked box should preferably stay at its parking square until it's time to fill the goal the parked box originally came from}
-    SetCount               : Integer;  {number of packing-order goal-sets, i.e., game phases when the packing order is used by the search for a solution}
+    SetCount               : Int;      {number of packing-order goal-sets, i.e., game phases when the packing order is used by the search for a solution}
     SetMembers             : TBoxNumbers; {goal sets, e.g., sets A,B, and C with 2,3, and 2 members look like: [0,a1,a2,b1,b2,b3,c1,c2] (vector element 0 is unused); the corresponding 'FirstSetMemberIndex' vector is: [0,1,3,6,8]; '8' is a sentinel}
 (*
     SquareDirectionTimestamp
-                           : Integer; {for path calculations while trying to push boxes to goals and parking spaces}
+                           : Int; {for path calculations while trying to push boxes to goals and parking spaces}
     SquareDirectionTimestamps
                            : TSquareDirectionArrayOfInteger; {for path calculations while trying to push boxes to goals and parking spaces}
 *)
@@ -984,138 +998,185 @@ type
     SetMemberIndex         : UInt8;
                              end;
   TPositionType            = (ptNull,ptCorral,ptOpen,ptClosed,ptOptimizer,ptPerimeter);
-  TPosition                = packed record  {'packed': literal sequence of unaligned fields, without gaps (they must be carefully aligned manually)}
-    HashValue              : THashValue;    {must be the first field for fast addressing}
-    HashBucket             : TPositionLinks;{double-linked list of positions that hash into the same bucket; the positions in the bucket are sorted in ascending order on 'HashValue'}
-    Parent                 : PPosition;     {predecessor position}
-    PlayerPos              : UInt16;        {'0' marks an unused position}
-    Move                   : TMove;         {the move leading to this position; note that 'Move.Direction' is 'dirty', it contains flags as well as the direction. the field cannot be accessed as a normal field of type 'TDirection'}
-    PushCount              : TScore;        {for the solver, this is the also the search-depth; for the optimizer it's only a metric}
-    Score                  : TScore;        {node cost; normally 'heuristic estimate' or 'pushes + heuristic estimate'. special case: perimeter-nodes from a preceding search in the opposite direction have 'Score' = 0}
-{   Unused                 : UInt16;}       {so the record size is n*SizeOf(Integer)}
-{   TimeStamp              : TPositionTimeStamp;} {field removed in order to save space; high-value marks locked positions, e.g., nodes on current path}
-    case TPositionType of                   {node-type dependent information for open nodes, closed nodes, and perimeter nodes}
+//  TPosition                = packed record  {'packed': literal sequence of unaligned fields, without gaps (they must be carefully aligned manually)}
+//    HashValue              : THashValue;    {must be the first field for fast addressing}
+//    HashBucket             : TPositionLinks;{double-linked list of positions that hash into the same bucket; the positions in the bucket are sorted in ascending order on 'HashValue'}
+//    Parent                 : PPosition;     {predecessor position}
+//    PlayerPos              : UInt16;        {'0' marks an unused position}
+//    Move                   : TMove;         {the move leading to this position; note that 'Move.Direction' is 'dirty', it contains flags as well as the direction. the field cannot be accessed as a normal field of type 'TDirection'}
+//    PushCount              : TScore;        {for the solver, this is the also the search-depth; for the optimizer it's only a metric}
+//    Score                  : TScore;        {node cost; normally 'heuristic estimate' or 'pushes + heuristic estimate'. special case: perimeter-nodes from a preceding search in the opposite direction have 'Score' = 0}
+//{   Unused                 : UInt16;}       {so the record size is n*SizeOf(Int)}
+//{   TimeStamp              : TPositionTimeStamp;} {field removed in order to save space; high-value marks locked positions, e.g., nodes on current path}
+//    case TPositionType of                   {node-type dependent information for open nodes, closed nodes, and perimeter nodes}
+//      ptNull:
+//        (GameState         : Uint32;        {the optimizer method 'vicinity search' stores the game state for each position on the best path; the game state is a [box-configuration-index, player-square] tuple}
+//         Unused3           : Int;
+//         PackingOrderAndSuccessorCount      {must cover 'PackingOrder' and 'SuccessorCount'}
+//                           : Int);
+//      ptCorral:                             {corral nodes, i.e., "box-fences" stored in the transposition table together with the normal game positions}
+//        (Unused4           : TPositionLinks;
+//         BoxSquare         : PBoxSquare2);  {points to the first element in the vector with the box squares belonging to the corral; the number of squares is stored in 'TPosition.Move.BoxNo'}
+//      ptOpen:                               {open nodes, i.e., nodes on the open-list; precondition: open nodes have no successors, i.e., no 'Parent' pointers back to an open node}
+//        (ScoreBucket       : TPositionLinks;{double-linked list of positions on the open-list having the same score}
+//         PackingOrder      : TPositionPackingOrder;
+//         SuccessorCount    : UInt16);       {number of immediate successors stored in the transposition table, i.e., nodes having this node as parent}
+//      ptClosed:                             {closed nodes (interior nodes), i.e., nodes stored in the transposition table but not on the open-list and not on the perimeter-list}
+//        (BestForgottenScore: TScore;        {best score for pruned successors, if any}
+//         Unused5           : UInt16;
+//         NextPartiallyExpandedPosition
+//                           : PPosition;     {the list root for partially expanded positions is 'Positions.PartiallyExpandedPositionsList'}
+//         PackingOrder2     : TPositionPackingOrder; {must be located at the same offset as 'PackingOrder'; this "same address" naming convention applies to all 'TPosition' record fields ending with a number}
+//         SuccessorCount2   : UInt16);       {number of immediate successors stored in the transposition table, i.e., nodes having this node as parent}
+//      ptPerimeter:                          {perimeter nodes, i.e., nodes from a previous search in the opposite direction; identified by 'Score' = 0 even though the position itself isn't a solution state}
+//        (ListLinks         : TPositionLinks;{double-linked list with all perimeter positions; must match the 'ScoreBucket' field}
+//         PathLengthToSolution
+//                           : UInt16;        {number of pushes to reach the solution from this position}
+//         SuccessorCount3   : UInt16);       {= 0}
+//      ptOptimizer:                          {see 'TOptimizerPosition' for more optimizer fields}
+//        (SmallBoxSet       : TSmallBoxSet;  {only available for nodes not on the open-queue which uses the overlapping 'ScoreBucket'}
+//         Successor         : PPosition;     {only available for nodes not on the open-queue which uses the overlapping 'ScoreBucket'}
+//         PlayerLines       : UInt16;
+//         SuccessorCount4   : UInt16);
+//                             end;
+  TPosition = packed record  // 64 bytes
+    HashValue              : THashValue;            // 0  (8 bytes)
+    HashBucket             : TPositionLinks;        // 8  (16 bytes)
+    Parent                 : PPosition;             // 24 (8 bytes)
+    PlayerPos              : UInt16;                // 32 (2 bytes)
+    Move                   : TMove;                 // 34 (2 bytes)
+    PushCount              : TScore;                // 36 (2 bytes)
+    Score                  : TScore;                // 38 (2 bytes)
+
+    case TPositionType of
       ptNull:
-        (GameState         : Uint32;        {the optimizer method 'vicinity search' stores the game state for each position on the best path; the game state is a [box-configuration-index, player-square] tuple}
-         Unused3           : Integer;
-         PackingOrderAndSuccessorCount      {must cover 'PackingOrder' and 'SuccessorCount'}
-                           : Integer);
-      ptCorral:                             {corral nodes, i.e., "box-fences" stored in the transposition table together with the normal game positions}
-        (Unused4           : TPositionLinks;
-         BoxSquare         : PBoxSquare2);  {points to the first element in the vector with the box squares belonging to the corral; the number of squares is stored in 'TPosition.Move.BoxNo'}
-      ptOpen:                               {open nodes, i.e., nodes on the open-list; precondition: open nodes have no successors, i.e., no 'Parent' pointers back to an open node}
-        (ScoreBucket       : TPositionLinks;{double-linked list of positions on the open-list having the same score}
-         PackingOrder      : TPositionPackingOrder;
-         SuccessorCount    : UInt16);       {number of immediate successors stored in the transposition table, i.e., nodes having this node as parent}
-      ptClosed:                             {closed nodes (interior nodes), i.e., nodes stored in the transposition table but not on the open-list and not on the perimeter-list}
-        (BestForgottenScore: TScore;        {best score for pruned successors, if any}
-         Unused5           : UInt16;
-         NextPartiallyExpandedPosition
-                           : PPosition;     {the list root for partially expanded positions is 'Positions.PartiallyExpandedPositionsList'}
-         PackingOrder2     : TPositionPackingOrder; {must be located at the same offset as 'PackingOrder'; this "same address" naming convention applies to all 'TPosition' record fields ending with a number}
-         SuccessorCount2   : UInt16);       {number of immediate successors stored in the transposition table, i.e., nodes having this node as parent}
-      ptPerimeter:                          {perimeter nodes, i.e., nodes from a previous search in the opposite direction; identified by 'Score' = 0 even though the position itself isn't a solution state}
-        (ListLinks         : TPositionLinks;{double-linked list with all perimeter positions; must match the 'ScoreBucket' field}
-         PathLengthToSolution
-                           : UInt16;        {number of pushes to reach the solution from this position}
-         SuccessorCount3   : UInt16);       {= 0}
-      ptOptimizer:                          {see 'TOptimizerPosition' for more optimizer fields}
-        (SmallBoxSet       : TSmallBoxSet;  {only available for nodes not on the open-queue which uses the overlapping 'ScoreBucket'}
-         Successor         : PPosition;     {only available for nodes not on the open-queue which uses the overlapping 'ScoreBucket'}
-         PlayerLines       : UInt16;
-         SuccessorCount4   : UInt16);
-                             end;
-  TPositionPointersVector  = array[0..(MaxInt div SizeOf(PPosition))-1] of PPosition;
+        (GameState         : UInt32;                // 40 (4 bytes)
+         Padding1          : array[0.. 15] of Byte; // 44 (16 bytes)
+         PackingOrderAndSuccessorCount: UInt32);    // 60 (4 bytes)
+
+      ptCorral:
+        (Padding2          : TPositionLinks;        // 40 (16 bytes)
+         BoxSquare         : PBoxSquare2);          // 56 (8 bytes)
+
+      ptOpen:
+        (ScoreBucket       : TPositionLinks;        // 40 (16 bytes)
+         Padding3          : UInt32;                // 56 (4 bytes)
+         PackingOrder      : TPositionPackingOrder; // 60 (2 bytes)
+         SuccessorCount    : UInt16);               // 62 (2 bytes)
+
+      ptClosed:
+        (BestForgottenScore: TScore;                // 40 (2 bytes)
+         Padding4          : UInt16;                // 42 (2 bytes)
+         Padding5          : UInt32;                // 44 (4 bytes)
+         NextPartiallyExpandedPosition: PPosition;  // 48 (8 bytes)
+         Padding6          : UInt32;                // 56 (4 bytes)
+         PackingOrder2     : TPositionPackingOrder; // 60 (2 bytes)
+         SuccessorCount2   : UInt16);               // 62 (2 bytes)
+
+      ptPerimeter:
+        (ListLinks         : TPositionLinks;        // 40 (16 bytes)
+         PathLengthToSolution: UInt16;              // 56 (2 bytes)
+         Padding8          : UInt32;                // 58 (4 bytes)
+         SuccessorCount3   : UInt16);               // 62 (2 bytes)
+
+      ptOptimizer:
+        (SmallBoxSet       : TSmallBoxSet;          // 40 (8 bytes)
+         Successor         : PPosition;             // 48 (8 bytes)
+         PlayerLines       : UInt16;                // 56 (2 bytes)
+         Padding9          : UInt32;                // 58 (4 bytes)
+         SuccessorCount4   : UInt16);               // 62 (2 bytes)
+  end;
+  TPositionPointersVector  = array[0..(MaxInt div SizeOf(PPosition))-1] of PPosition; {the declared size limit is merely a formality. range checking is disabled}
   PPositionPointersVector  = ^TPositionPointersVector;
-  TPositionVector          = array[0..(MaxInt div SizeOf(TPosition))-1] of TPosition;
+  TPositionVector          = array[0..(MaxInt div SizeOf(TPosition))-1] of TPosition; {the declared size limit is merely a formality. range checking is disabled}
   PPositionVector          = ^TPositionVector;
   TOpenPositions           = record
     Buckets                : array[0..MAX_SCORE_VALUE] of PPosition; {bucket-sorting open positions means that sorting is O(1), i.e., as fast as possible}
-    Count                  : Cardinal;      {number of open positions}
-    HighValueItemCount     : Cardinal;      {number of positions with the highest possible score (used for a special list by the optimizer)}
-    MaxValue               : Integer;       {highest stored score}
-    MinValue               : Integer;       {lowest  stored score}
-    NoProgressRover        : Integer;       {sometimes choose a game state from this bucket for expansion, instead of taking a game state with the minimum score}
-    SortCount              : Cardinal;
+    Count                  : UInt;      {number of open positions}
+    HighValueItemCount     : UInt;      {number of positions with the highest possible score (used for a special list by the optimizer)}
+    MaxValue               : Int;       {highest stored score}
+    MinValue               : Int;       {lowest  stored score}
+    NoProgressRover        : Int;       {sometimes choose a game state from this bucket for expansion, instead of taking a game state with the minimum score}
+    SortCount              : UInt;
     WorstRover             : PPosition;
     WorstUnprotectedPosition
                            : PPosition;
                              end;
   TSearchStatistics        = record     {statistics and debugging info}
-    BackwardMoveCount      : Cardinal;
-    BackwardPositionCount  : Cardinal;
-    BackwardPullCount      : Cardinal;
+    BackwardMoveCount      : UInt;
+    BackwardPositionCount  : UInt;
+    BackwardPullCount      : UInt;
     CalculateCorralDeadlockStatusCount
-                           : Cardinal;
-    CorralPositionsCount   : Cardinal;
-    CorralPositionsBoxCount: Cardinal;
+                           : UInt;
+    CorralPositionsCount   : UInt;
+    CorralPositionsBoxCount: UInt;
     DeadlockedOpenPositionsCount
-                           : Cardinal;
-    DeadlockPositionsCount : Cardinal;
-    DroppedCount           : Cardinal;   {number of dropped positions}
-    DuplicatesCount        : Cardinal;
-    EnqueuedPositionsCount : array[Boolean] of Cardinal; {'True' counter: the player's reachable squares have been calculated}
-    Enqueue2Count          : Cardinal;
-    ForwardPositionCount   : Cardinal;
-    FreezeTestDeadlockCount: Cardinal;
-    Lookup1Count           : Cardinal;
-    Lookup2Count           : Cardinal;
-    Lookup3Count           : Cardinal;
-    MoveCount              : Cardinal;
-    NewBestPositionCount   : Cardinal;
-    NewPathCount           : Cardinal;
-    NoPushDeadEndsCount    : Cardinal;
-    ReuseCount             : Cardinal;
-    RoomPositionsCount     : Cardinal;
-    SetPosition1Count      : Cardinal;
-    SetPosition2Count      : Cardinal;
+                           : UInt;
+    DeadlockPositionsCount : UInt;
+    DroppedCount           : UInt;   {number of dropped positions}
+    DuplicatesCount        : UInt;
+    EnqueuedPositionsCount : array[Boolean] of UInt; {'True' counter: the player's reachable squares have been calculated}
+    Enqueue2Count          : UInt;
+    ForwardPositionCount   : UInt;
+    FreezeTestDeadlockCount: UInt;
+    Lookup1Count           : UInt;
+    Lookup2Count           : UInt;
+    Lookup3Count           : UInt;
+    MoveCount              : UInt;
+    NewBestPositionCount   : UInt;
+    NewPathCount           : UInt;
+    NoPushDeadEndsCount    : UInt;
+    ReuseCount             : UInt;
+    RoomPositionsCount     : UInt;
+    SetPosition1Count      : UInt;
+    SetPosition2Count      : UInt;
                              end;
   TPositions               = record      {transposition-table and open-queue}
     BackwardPositionsList  : PPosition;  {linked list of positions generated backwards} {not in production}
     BackwardPositionsListCount
-                           : Cardinal;   {number of positions on 'BackwardPositionsList'}
+                           : UInt;       {number of positions on 'BackwardPositionsList'}
     BestPosition           : PPosition;
-    BestScore              : Cardinal;   {best score; the score stored in the best position is unreliable because it may be overwritten with a backup score}
-    Capacity               : Cardinal;   {size of the transposition table measured in 'TPosition' records by the solver, and measured in 'TOptimizerPosition' records by the optimizer}
-    Count                  : Cardinal;   {number of game positions stored in the transposition table}
+    BestScore              : UInt;       {best score; the score stored in the best position is unreliable because it may be overwritten with a backup score}
+    Capacity               : UInt;       {size of the transposition table measured in 'TPosition' records by the solver, and measured in 'TOptimizerPosition' records by the optimizer}
+    Count                  : UInt;       {number of game positions stored in the transposition table}
     CorralBoxSquares       : TBoxSquaresMemoryBlock; {box squares belonging to the corrals stored in the transposition table together with the normal game positions}
     CurrentPosition        : PPosition;  {current position during the search, i.e., the game board state matches this position}
-    DebugHashValueCount    : Integer;
-    DebugHashValueIndex    : Integer;
+    DebugHashValueCount    : Int;
+    DebugHashValueIndex    : Int;
     DebugHashValues        : PHashValueVector;
     DebugPosition          : PPosition;  {global variable for debugging}
     DebugPositionScore     : TScore;
     FreeList               : PPosition;  {linked list of unused positions}
-    HashBucketCount        : Integer;    {vector-length of 'HashBuckets'; it must must be a power of 2 so masking with ('HashBucketCount'-1) produces a proper hash-bucket index}
-    HashBucketMask         : Integer;    {'HashBucketCount' - 1}
+    HashBucketCount        : Int;        {vector-length of 'HashBuckets'; it must must be a power of 2 so masking with ('HashBucketCount'-1) produces a proper hash-bucket index}
+    HashBucketMask         : Int;        {'HashBucketCount' - 1}
     HashBuckets            : PPositionPointersVector; {the vector length must be a power of 2}
     HighWaterMark          : Pointer;    {address past end of the transposition table items in the 'Positions' vector; starting from that address, the memory block contains reserved areas like the hash buckets and the precalculated deadlock-sets}
-    MemoryByteSize         : Cardinal;   {total memory size in bytes, including 'Positions', 'HashBuckets' and precalculated deadlock-sets}
+    MemoryByteSize         : UInt;       {total memory size in bytes, including 'Positions', 'HashBuckets' and precalculated deadlock-sets}
     OpenPositions          : TOpenPositions;
     PartiallyExpandedPositionsList       {linked list of positions not fully expanded by the solver search; if the search doesn't find a solution, it may try a full expansion of these positions later}
                            : PPosition;
     PerimeterList          : PPosition;  {linked list of positions from a previous search in the opposite direction}
-    PerimeterListCount     : Cardinal;   {number of positions on 'PerimeterList'; high-value: file error while saving perimeter nodes to disk}
+    PerimeterListCount     : UInt;       {number of positions on 'PerimeterList'; high-value: file error while saving perimeter nodes to disk}
     Positions              : PPositionVector;
     SolutionPosition       : PPosition;
     StartPosition          : PPosition;  {start position for the search}
-    Statistics             : TSearchStatistics;    
+    Statistics             : TSearchStatistics;
     SquareHashValues       : array[0..MAX_BOARD_SIZE] of THashValue; {constants for calculating Zobrist hash-keys}
-    UninitializedItemCount : Integer;    {start-value = 'Capacity'}
+    UninitializedItemCount : Int;    {start-value = 'Capacity'}
                              end;
-  TRandomState             = record RandomNumber:Integer; end;
+  TRandomState             = record RandomNumber:Int; end;
   TReader                  = record
     CurrentTextLine        : String;
-    FirstLevelNo           : Cardinal;
-    LastLevelNo            : Cardinal;
+    FirstLevelNo           : UInt;
+    LastLevelNo            : UInt;
     InputFile              : TextFile;
     InputFileName          : String;
-    LevelCount             : Cardinal;
+    LevelCount             : UInt;
     PreviousTextLine       : String;    {not always the previous line; for instance, it may also be the most recently parsed line which might be a game title}
                              end;
   TPlayersReachableSquares = record
     Calculated             : Boolean;   {updated by 'CalculatePlayersReachableSquares'; the caller is responsible for proper initialization before calling 'TTAdd' and 'TTlookup'}
-    MinPlayerPos           : Integer;   {the top-left reachable square is used as normalized player position}
+    MinPlayerPos           : Int;       {the top-left reachable square is used as normalized player position}
     Squares                : TBoardOfTimeStamps; {the player's reachable squares have the value 'TimeStamp'; squares with neighboring boxes have the value 'TimeStamp' + 1}
     TimeStamp              : TTimeStamp;{incremented by 2 on each call to 'CalculatePlayersReachableSquares'}
     UsePlayersReachableSquaresFromPredecessor
@@ -1125,7 +1186,7 @@ type
     case Boolean of False  : (PlayersReachableSquares : TPlayersReachableSquares);
                              end;
   TSingleStepMoves         = array[0..MAX_SINGLE_STEP_MOVES] of TMove;
-  TSokobanCallBackFunction = function:Integer; stdcall;
+  TSokobanCallBackFunction = function:Int32; stdcall;
   TSokobanStatus           = packed record {for plugin interface functions like "SolveEx" and its accompanying call-back function}
     Size                   : UInt32;    {size filled in by caller; record size = SizeOf(record)}
     Flags                  : UInt32;
@@ -1135,31 +1196,31 @@ type
    {$IFDEF CONSOLE_APPLICATION}
       StatusText           : String;
     {$ELSE}                             {when the source-file is compiled as a plugin module, the status text is a string buffer inside the status record}
-      StatusText           : array[0..(SOKOBAN_PLUGIN_STATUS_TEXT_BUFFER_SIZE div SizeOf(Char))-1] of Char; {null-terminated string}
+      StatusText           : array[0..(SOKOBAN_PLUGIN_STATUS_TEXT_BUFFER_SIZE div SizeOf(Char8))-1] of Char8; {null-terminated string}
     {$ENDIF}
     TimeMS                 : UInt32;    {milli seconds}
                              end;
   PSokobanStatus           = ^TSokobanStatus;
   TProgressCheckPoint      = record     {check solver progress each time a certain number of positions have been expanded}
-    BestGamePhase          : Integer;
-    BestScore              : Integer;
+    BestGamePhase          : Int;
+    BestScore              : Int;
     BoxPushCounts          : TBoxArrayOfUnsignedIntegers;
     BoxPushBonuses         : array[ TBoxNo ] of Byte;
     BoxTimeStamps          : TBoxArrayOfUnsignedIntegers; {the last time the box was pushed}
-    LazyBoxPushBonus       : Integer; {the boxes with the fewest pushes since the last progress checkpoint get a bonus for being pushed during the next checkpoint interval}
+    LazyBoxPushBonus       : Int; {the boxes with the fewest pushes since the last progress checkpoint get a bonus for being pushed during the next checkpoint interval}
     LastCheckPointPushCount  {the number of pushes performed by the solver at the last progress checkpoint (the value of 'Solver.PushCount')}
-                           : Integer;
-    NoProgressCount        : Integer;
-    OpenListEscapeInterval : Integer; {a 2^N-1 integer, where N is a positive integer}
-    PushCountDown          : Integer; {countdown to next checkpoint}
+                           : Int;
+    NoProgressCount        : Int;
+    OpenListEscapeInterval : Int; {a 2^N-1 integer, where N is a positive integer}
+    PushCountDown          : Int; {countdown to next checkpoint}
     RandomState            : TRandomState;
-    Score                  : Integer;   {score at checkpoint time}
+    Score                  : Int;   {score at checkpoint time}
     SortedBoxes            : TBoxNumberSet; {boxes sorted on number of pushes; the count denotes how many of the least frequently pushed boxes which get a bonus for being pushed during the next checkpoint interval}
                              end;
   TSolver                  = record
     AddedCorralBoxesCount  : Int64;
     BackwardSearchDepthLimit
-                           : Integer;   {maximum backward search limit (may differ from 'DepthLimit' in a perimeter-search, that is, first a backward search and then a forward search}
+                           : Int;       {maximum backward search limit (may differ from 'DepthLimit' in a perimeter-search, that is, first a backward search and then a forward search}
     CalculateLowerboundCount
                            : Int64;
     CalculateLowerboundFailedCount      {time limit exceeded, or maximum auction bid count exceeded}
@@ -1169,8 +1230,8 @@ type
     CalculateSquareTargetDistancesTimeMS
                            : TTimeMS;
     CorralCount            : Int64;
-    CorralSearchDepth      : Cardinal;
-    DisplayPushCountdown   : Integer;
+    CorralSearchDepth      : UInt;
+    DisplayPushCountdown   : Int;
     DeadEndCount           : Int64;
     DeadEndDuplicatesCount : Int64;
     Enabled                : Boolean;   {'True': solve levels; 'False': optimize existing solutions only}
@@ -1179,9 +1240,9 @@ type
                            : Int64;
     FindPushOptimalSolution: Boolean;   {solving for A) box pushes, or B) player moves (not implemented)} {a misnomer. YASS 2.149 changed its backward search and forward search methods from A* search to greedy search. the greedy search finds many more solutions}
     LastCallBackTimeMS     : TTimeMS;   {milliseconds}
-    HighestSearchDepth     : Cardinal;  {highest search depth during the forward search}
+    HighestSearchDepth     : UInt;      {highest search depth during the forward search}
     LimitExceededPushCount : Int64;     {number of positions that exceed one of the search limits, e.g., depth limit and positions limit}
-    LowerBound             : Cardinal;
+    LowerBound             : UInt;
     PackingOrder           : TPackingOrder; {packing-order info}
     MoveCount              : Int64;     {search statistics}
     ProgressCheckPoint     : TProgressCheckPoint; {check progress each time a certain number of positions have been expanded}
@@ -1194,18 +1255,18 @@ type
     SearchStates           : array[0..SEARCH_STATE_INDEX_CORRAL_PRUNING] of TSearchState;
     ShowBestPosition       : Boolean;   {show best found position when the solver doesn't find a solution (for testing)}
     SimpleLowerBoundPushesCountdown     {initially, try to use the simple lower bound as heuristic score, instead of the more accurate lower bound calculated by the time-consuming bipartite matching algorithm}
-                           : Integer;
+                           : Int;
     SokobanCallBackFunction
                            : TSokobanCallBackFunction;
     SokobanStatus          : TSokobanStatus; {only used if the caller doesn't provide a pointer to its own status record}
     SokobanStatusPointer   : PSokobanStatus; {status info; points to 'SokobanStatus' if the caller doesn't provide its own record}
     SquareTargetDistance   : TSquareTargetDistance; {for each square, the distance to each target square (start box square or goal square, depending on whether it's a backward search or a forward search}
     SquareTargetDistanceScaleFactor     {scale factor for the distances in 'SquareTargetDistance'}
-                           : Integer;    
+                           : Int;
     StartTimeMS            : TTimeMS;   {search time start; defined global here for slightly faster access}
     StopWhenSolved         : Boolean;   {'True': stop when a solution has been found, i.e., don't search for shorter solutions}
     Terminated             : Boolean;   {'True' indicates that the solver has been requested to terminate; stopping the currently running search only is done by calling 'TerminateSearch'}
-    TimeCheckCount         : Integer;
+    TimeCheckCount         : Int;
     TimeMS                 : TTimeMS;   {time, milliseconds}
                              end;
   TUserInterface           = record
@@ -1219,7 +1280,7 @@ type
     PushingSessions        : UInt16;
                              end;
 //POptimizerPosition       = ^TOptimizerPosition;
-  TOptimizerPositionVector = array[0..(MaxInt div SizeOf(TOptimizerPosition))-1] of TOptimizerPosition;
+  TOptimizerPositionVector = array[0..(MaxInt div SizeOf(TOptimizerPosition))-1] of TOptimizerPosition; {the declared size limit is merely a formality. range checking is disabled}
   POptimizerPositionVector = ^TOptimizerPositionVector;
 
 {Global Variables}
@@ -1242,23 +1303,23 @@ var
   {exported functions}
 
   function  BoardToText(const LineTerminator__:String):String;
-  function  CalculateDefaultMemoryByteSize:Integer;
-  function  ColRowToSquare(Col__,Row__:Integer):Integer;
+  function  CalculateDefaultMemoryByteSize:Int;
+  function  ColRowToSquare(Col__,Row__:Int):Int;
   function  CreateLogFile(const FileName__:String):Boolean;
   procedure Finalize;
   function  GameHistoryMovesAsText:String;
-  function  GetPhysicalMemoryByteSize:UInt32;
-  procedure InitializeBoard(BoardWidth__,BoardHeight__:Integer; FillSquares__:Boolean);
+  function  GetPhysicalMemoryByteSize:UInt;
+  procedure InitializeBoard(BoardWidth__,BoardHeight__:Int; FillSquares__:Boolean);
   function  InitializeGame(var PluginResult__:TPluginResult; var ErrorText__:String):Boolean;
-  function  Initialize(MemoryByteSize__:Cardinal;
+  function  Initialize(MemoryByteSize__:UInt;
                        PushCountLimit__:Int64;
                        DepthLimit__,
-                       BackwardSearchDepthLimit__:Cardinal;
+                       BackwardSearchDepthLimit__:UInt;
                        OptimizerPushCountLimit__:Int64;
                        OptimizerDepthLimit__,
                        DeadlockSetsAdjacentOpenSquaresLimit__,
                        DeadlockSetsBoxLimitForDynamicSets__,
-                        DeadlockSetsBoxLimitForPrecalculatedSets__:Cardinal;
+                        DeadlockSetsBoxLimitForPrecalculatedSets__:UInt;
                        SearchMethod__:TSearchMethod;
                        SolverEnabled__,
                        OptimizerEnabled__,
@@ -1269,7 +1330,7 @@ var
                        ReuseNodesEnabled__,
                        LogFileEnabled__,
                        PackingOrderEnabled__:Boolean;
-                       PackingOrderBoxCountThreshold__:Integer;
+                       PackingOrderBoxCountThreshold__:Int;
                        TimeLimitMS__,
                        OptimizerTimeLimitMS__,
                        BoxPermutationsSearchTimeLimitMS__:TTimeMS;
@@ -1280,11 +1341,11 @@ var
                        SokobanCallBackFunction__:TSokobanCallBackFunction;
                        SokobanStatusPointer__:PSokobanStatus
                       ):Boolean;
-  function  Max(a__,b__:Integer):Integer;
-  function  Min(a__,b__:Integer):Integer;
+  function  Max(a__,b__:Int):Int;
+  function  Min(a__,b__:Int):Int;
   function  OptimizationMethodOrderToString(const OptimizationMethodOrder__:TOptimizationMethodOrder):String;
-  function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar):Boolean;
-  function  PathToText(Position__:PPosition; TextBufferSize__:Integer; MovesAsText__:PChar; var IsASolution__:Boolean; var Result__:TPluginResult):Boolean;
+  function  OptimizeGame(MovesAsTextBufferByteSize__:Int; MovesAsText__:PChar):Boolean;
+  function  PathToText(Position__:PPosition; TextBufferSize__:Int; MovesAsText__:PChar; var IsASolution__:Boolean; var Result__:TPluginResult):Boolean;
   function  Search:Boolean;
   procedure Terminate;
 
@@ -1299,40 +1360,40 @@ var
   function  BoardToText(const LineTerminator__:String):String; forward;
 {$ENDIF}
 procedure BoardToTextLines(var BoardAsTextLines__:TBoardAsTextLines); forward;
-function  CalculatePlayerPath(ToSquare__:Integer; PreferredFinalDirection__:TDirection; MakeMoves__:Boolean; var MoveCount__,LineCount__:Integer; var FinalDirection__:TDirection; var Moves__:TSingleStepMoves):Boolean; forward;
-function  CalculatePlayersReachableSquares(Index__:Integer):Integer; forward;
-procedure ClearPlayersReachableSquares(Index__:Integer); forward;
-function  FirstPushToText(var PushNo__:Integer; var Text__:String):Boolean; forward;
+function  CalculatePlayerPath(ToSquare__:Int; PreferredFinalDirection__:TDirection; MakeMoves__:Boolean; var MoveCount__,LineCount__:Int; var FinalDirection__:TDirection; var Moves__:TSingleStepMoves):Boolean; forward;
+function  CalculatePlayersReachableSquares(Index__:Int):Int; forward;
+procedure ClearPlayersReachableSquares(Index__:Int); forward;
+function  FirstPushToText(var PushNo__:Int; var Text__:String):Boolean; forward;
 {$IFDEF PLUGIN_MODULE}
-  function GetAvailableUserMemoryByteSize:UInt32; forward;
+  function GetAvailableUserMemoryByteSize:UInt; forward;
 {$ELSE} {if the module is compiled as a plugin (a dll), then 'InitializeBoard' and 'InitializeGame' are declared in the interface section}
-  procedure InitializeBoard(BoardWidth__,BoardHeight__:Integer; FillSquares__:Boolean); forward;
+  procedure InitializeBoard(BoardWidth__,BoardHeight__:Int; FillSquares__:Boolean); forward;
   function  InitializeGame(var PluginResult__:TPluginResult; var ErrorText__:String):Boolean; forward;
 {$ENDIF}
-function  IsAFreezingMove(FromSquareNo__,ToSquareNo__:Integer; ABoxFreezingOnAGoalSquareCountsAsAFreezingMove__:Boolean):Boolean; forward;
-function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection; PlayersReachableSquaresIndex__:Integer):Boolean; forward;
+function  IsAFreezingMove(FromSquareNo__,ToSquareNo__:Int; ABoxFreezingOnAGoalSquareCountsAsAFreezingMove__:Boolean):Boolean; forward;
+function  IsALegalPush(BoxNo__:Int; Direction__:TDirection; PlayersReachableSquaresIndex__:Int):Boolean; forward;
 function  LoadNextLevelFromFile(const OutputFileName__:String):Boolean; forward; {a simple version, parsing board and optional heading titles only}
 {$IFNDEF PLUGIN_MODULE}
-  function  Max(a__,b__:Integer):Integer; forward;
+  function  Max(a__,b__:Int):Int; forward;
 {$ENDIF}
-procedure MovePlayer(PlayerPos__:Integer); forward;
+procedure MovePlayer(PlayerPos__:Int); forward;
 function  Msg(const Text__,Caption__:String):Boolean; forward;
-function  NextPushToText(var PushNo__:Integer; var Text__:String):Boolean; forward;
+function  NextPushToText(var PushNo__:Int; var Text__:String):Boolean; forward;
 function  OPENCheck(const Caption__:String):Boolean; forward;
-function  OPENListLength(Position__:PPosition):Integer; forward;
+function  OPENListLength(Position__:PPosition):Int; forward;
 procedure OPENRemove(Position__:PPosition); forward;
 {$IFNDEF PLUGIN_MODULE} {if the module is compiled as a plugin (a dll), then 'OptimizeGame' is declared in the interface section}
-  function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar):Boolean; forward;
+  function  OptimizeGame(MovesAsTextBufferByteSize__:Int; MovesAsText__:PChar):Boolean; forward;
 {$ENDIF}
 function  ReplayGame(const Moves__:String):Boolean; forward;
 function  SaveLevelToFile(const FileName__,LevelName__:String):Boolean; forward;
 //procedure ShowBoxDistanceToAllSquares(const Distances__:TBoardOfIntegers); forward;
-function  ShowDeadlockSetNumbers : Integer; forward;
-procedure SquareToColRow(Square__:Integer; var Col__,Row__:Integer); forward;
+function  ShowDeadlockSetNumbers : Int; forward;
+procedure SquareToColRow(Square__:Int; var Col__,Row__:Int); forward;
 procedure TimeCheck; forward;
 function  TTIsOnPath(Position__,Path__:PPosition):Boolean; forward;
-function  TTListLength(Position__:PPosition):Integer; forward;
-function  TTLookup(HashValue__:THashValue; PlayerPos__,SearchDepth__:Integer; var Position__:PPosition):Boolean; forward;
+function  TTListLength(Position__:PPosition):Int; forward;
+function  TTLookup(HashValue__:THashValue; PlayerPos__,SearchDepth__:Int; var Position__:PPosition):Boolean; forward;
 procedure TTRemove(Position__:PPosition); forward;
 function  WriteLevelToFile({const} var F:Text; const LevelName__:String):Boolean; forward;
 function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var PluginResult__:TPluginResult):Boolean; forward; // only implemented for optimizer positions, i.e., positions of type 'TOptimizerPosition'
@@ -1361,7 +1422,7 @@ function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var
     PMemoryStatusEx              = ^TMemoryStatusEx;
 
   function  GetConsoleWindow() : HWND; stdcall;
-            external 'kernel32.dll' name 'GetConsoleWindow';    
+            external 'kernel32.dll' name 'GetConsoleWindow';
   procedure GlobalMemoryStatusEx(var lpBuffer: TMemoryStatusEx); stdcall;
             external 'kernel32.dll' name 'GlobalMemoryStatusEx';
   {$IFDEF PLUGIN_MODULE}
@@ -1374,7 +1435,7 @@ function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var
 
 {General Utilities}
 
-function  Align( Value__, Alignment__ : Integer ) : Integer;
+function  Align( Value__, Alignment__ : Int ) : Int;
 begin // returns the smallest value >= "Value__" which is a multiple of
       // "Alignment__", except when that value overflows the return value data
       // type;
@@ -1401,17 +1462,17 @@ end;
 
 {$IFDEF CONSOLE_APPLICATION}
 function  ExtractFileName(const FileName__:String):String;
-var i:Integer;
+var i:Int;
 begin
   i:=Length(FileName__);
   while (i>0) and (FileName__[i]<>BACKSLASH) and (FileName__[i]<>COLON) do
     Dec(i);
-  Result:=Copy(FileName__,Succ(i),MaxInt);
+  Result:=Copy(FileName__,Succ(i),High(Integer));
 end;
 {$ENDIF}
 
 function  FileNameWithExtension(const FileName__,Extension__:String):String;
-var i:Integer;
+var i:Int;
 begin
   i:=Length(FileName__);
   while (i<>0) and (FileName__[i]<>PERIOD) do Dec(i);
@@ -1421,14 +1482,14 @@ begin
 end;
 
 {$IFDEF PLUGIN_MODULE}
-procedure GetAsMuchMemoryAsPossible(var Memory__:Pointer; var ByteSize__:Cardinal; MinimumByteSize__:Cardinal);
+procedure GetAsMuchMemoryAsPossible(var Memory__:Pointer; var ByteSize__:UInt; MinimumByteSize__:UInt);
 const {$IFDEF WINDOWS}
-        RESERVE_MEMORY_BYTE_SIZE=  8*ONE_MEBI; {for safety, leave some memory unused; for instance, opening the 'Settings' window while the plugin is running will need some working memory}
+        RESERVE_MEMORY_BYTE_SIZE=  64*ONE_MEBI; {for safety, leave some memory unused; for instance, opening the 'Settings' window while the plugin is running will need some working memory}
       {$ENDIF}
-      START_DECREMENT           = 16*ONE_MEBI; {start decreasing with 16 MiB, and end up decreasing with 64 MiB at a time in each attempt to allocate a memory block}
-      MAX_DECREMENT             = 64*ONE_MEBI;
+      START_DECREMENT           =  64*ONE_MEBI; {start decreasing with 64 MiB, and end up decreasing with 256 MiB at a time in each attempt to allocate a memory block}
+      MAX_DECREMENT             = 256*ONE_MEBI;
 
-var Decrement {$IFDEF WINDOWS}, UserMemoryByteSize {$ENDIF} :Cardinal;
+var Decrement {$IFDEF WINDOWS}, UserMemoryByteSize {$ENDIF} :UInt;
 begin {try to allocate maximum 'ByteSize__' bytes of memory, minimum 'MinimumByteSize__' bytes}
   Memory__:=nil;
   if ByteSize__>0 then begin
@@ -1461,7 +1522,7 @@ begin {try to allocate maximum 'ByteSize__' bytes of memory, minimum 'MinimumByt
 end;
 {$ENDIF}
 
-function  GetAvailablePhysicalMemoryByteSize:Cardinal;
+function  GetAvailablePhysicalMemoryByteSize:UInt;
 {$IFDEF WINDOWS}
   var MemoryStatusEx:TMemoryStatusEx;
   begin
@@ -1477,7 +1538,7 @@ function  GetAvailablePhysicalMemoryByteSize:Cardinal;
   end;
 {$ENDIF}
 
-function  GetAvailableUserMemoryByteSize:Cardinal;
+function  GetAvailableUserMemoryByteSize:UInt;
 {$IFDEF WINDOWS}
   var MemoryStatusEx:TMemoryStatusEx;
   begin
@@ -1493,7 +1554,7 @@ function  GetAvailableUserMemoryByteSize:Cardinal;
   end;
 {$ENDIF}
 
-function  GetPhysicalMemoryByteSize:Cardinal;
+function  GetPhysicalMemoryByteSize:UInt;
 {$IFDEF WINDOWS}
   var MemoryStatusEx:TMemoryStatusEx;
   begin
@@ -1512,23 +1573,29 @@ function  GetPhysicalMemoryByteSize:Cardinal;
 function  GetTimeMS:TTimeMS;
 begin {returns a time measured in milliseconds; the base doesn't matter, the time is only used in relative calculations}
 {$IFDEF WINDOWS}
-  Result:=GetTickCount; {Windows function}
+  Result:=GetTickCount64; {Windows function}
 {$ELSE}
-  Result:=0;            {no timing}
+{$IFDEF FPC}
+  Result:=GetTickCount64; {FPC function}
+{$ELSE}
+  Result:=0;              {no timing}
+{$ENDIF}
 {$ENDIF}
 end;
 
-procedure InitializeRandomState(RandomNumber__:Integer; var RandomState__:TRandomState);
+procedure InitializeRandomState(RandomNumber__:Int; var RandomState__:TRandomState);
 begin
   RandomState__.RandomNumber:=Max(1,Abs(RandomNumber__));
 end;
 
 function  IntToStr(Number__:Int64):String;
 begin
+  {$WARNINGS OFF}
   Str(Number__,Result);
+  {$WARNINGS ON}
 end;
 
-function  IntToStrWithUnitName(Number__:Integer; const UnitName__:String):String;
+function  IntToStrWithUnitName(Number__:Int; const UnitName__:String):String;
 begin {precondition: the plural form of the unit name is 'UnitName__' + 's'}
   if   Number__<>1 then
        Result:=IntToStr(Number__)+SPACE+UnitName__+'s'
@@ -1536,7 +1603,7 @@ begin {precondition: the plural form of the unit name is 'UnitName__' + 's'}
 end;
 
 {$IFDEF WINDOWS}
-  function  IsKeyPressed( VirtualKeyCode__ : Integer ) : Boolean;
+  function  IsKeyPressed( VirtualKeyCode__ : Int ) : Boolean;
   begin // returns 'True' if the given key currently is pressed
     Result := ( GetASyncKeyState( VirtualKeyCode__ ) and
                 ( 1 shl ( ( SizeOf( SHORT ) * BITS_PER_BYTE ) - 1 ) ) ) <> 0;
@@ -1550,7 +1617,7 @@ begin
      Result:=Chr(Ord('a')+Ord(Result)-Ord('A'));
 end;
 
-function  Log2(Number__:Integer):Integer;
+function  Log2(Number__:Int):Int;
 begin
   Result:=-1;
   while Number__>0 do begin Inc(Result); Number__:=Number__ div 2; end;
@@ -1562,24 +1629,24 @@ begin {returns 'True' if the string contains the character, case insensitive}
           (System.Pos(UpCase(Char__),String__)<>0);
 end;
 
-function  Max(a__,b__:Integer):Integer;
+function  Max(a__,b__:Int):Int;
 begin
   if a__>=b__ then Max:=a__
   else Max:=b__;
 end;
 
-function  Min(a__,b__:Integer):Integer;
+function  Min(a__,b__:Int):Int;
 begin
   if a__<=b__ then Min:=a__
   else Min:=b__;
 end;
 
-function  PowerOf2(Number__:Integer):Integer;
+function  PowerOf2(Number__:Int):Int;
 begin // precondition: 0 <= 'Number__' < ( BITS_PER_INTEGER - 1 )
   Result:=1 shl Number__;
 end;
 
-function  Random(Range__:Integer; var RandomState__:TRandomState):Integer; {own random function so results are reproducible}
+function  Random(Range__:Int; var RandomState__:TRandomState):Int; {own random function so results are reproducible}
 const a=1366; c=150889; m=714025; {don't modify these values unless you know what you are doing}
 begin
   RandomState__.RandomNumber:=(a * (RandomState__.RandomNumber mod m) + c) mod m;
@@ -1594,7 +1661,7 @@ end;
       SHGFP_TYPE_CURRENT = 0;
       SHGFP_TYPE_DEFAULT = 1;
     var
-      PathCharBuffer     :array[0..MAX_PATH+1] of Char;
+      PathCharBuffer     :array[0..MAX_PATH+1] of AnsiChar;
     begin
       PathCharBuffer[Low (PathCharBuffer)]:=NULL_CHAR;
       PathCharBuffer[High(PathCharBuffer)]:=NULL_CHAR;
@@ -1619,8 +1686,8 @@ end;
     else Result:=Str__+WINDOWS_FILE_NAME_PATH_DELIMITER;
   end;
 {$ENDIF}
-function  StrToInt(const s__:String; var i__:Integer):Boolean;
-var ErrorPos:Integer;
+function  StrToInt(const s__:String; var i__:Int):Boolean;
+var ErrorPos:Int32;
 begin
   Val(s__,i__,ErrorPos); Result:=ErrorPos=0;
 end;
@@ -1630,7 +1697,7 @@ end;
   var
     ConsoleWindowHandle : HWND = 0;
 
-  function  WasKeyPressed( VirtualKeyCode__ : Integer ) : Boolean;
+  function  WasKeyPressed( VirtualKeyCode__ : Int32 ) : Boolean;
   begin // returns 'True' if the given key has been pressed and this application
         // has focus
     Result := ( ( GetASyncKeyState( VirtualKeyCode__ ) and
@@ -1650,8 +1717,8 @@ end;
 
 {Utilities}
 
-function  BoxNoAtSquare(SquareNo__:Integer):Integer;
-var BoxNo:Integer;
+function  BoxNoAtSquare(SquareNo__:Int):Int;
+var BoxNo:Int;
 begin // returns the number of the box at the square 'SquareNo__', if any
   Result:=0;
   for BoxNo:=1 to Game.BoxCount do
@@ -1660,15 +1727,15 @@ begin // returns the number of the box at the square 'SquareNo__', if any
          end;
 end;
 
-function  CalculateDefaultMemoryByteSize:Integer;
-var PhysicalMemoryBytes,PhysicalMemoryMiB:Cardinal;
+function  CalculateDefaultMemoryByteSize:Int;
+var PhysicalMemoryBytes,PhysicalMemoryMiB:UInt;
 begin
   PhysicalMemoryBytes:=GetPhysicalMemoryByteSize;
   if PhysicalMemoryBytes<High(PhysicalMemoryBytes) - (ONE_MEBI div 2) then Inc(PhysicalMemoryBytes,(ONE_MEBI div 2)); // prepare to round up
-  if PhysicalMemoryBytes>Cardinal(MaxInt) then PhysicalMemoryBytes:=Cardinal(MaxInt); // limit the memory byte size to an unsigned integer
+  if PhysicalMemoryBytes>High(Result) then PhysicalMemoryBytes:=High(Result); // limit the memory byte size to a signed integer
   PhysicalMemoryMiB:=PhysicalMemoryBytes div ONE_MEBI;
   if   PhysicalMemoryMiB<>0 then
-       Result:=Min(High(Result) div ONE_MEBI,Max(0,Succ(PhysicalMemoryMiB) div 2))*ONE_MEBI // 'div 2': only use half of the physical memory
+       Result:=Min(MAX_DEFAULT_MEMORY_BYTE_SIZE, Min(High(Result) div ONE_MEBI,Max(0,Succ(PhysicalMemoryMiB) div 2))*ONE_MEBI) // 'div 2': only use half of the physical memory
   else Result:=DEFAULT_MEMORY_BYTE_SIZE;
 end;
 
@@ -1682,12 +1749,12 @@ begin
          end;
 end;
 
-function  ColRowToSquare(Col__,Row__:Integer):Integer;
+function  ColRowToSquare(Col__,Row__:Int):Int;
 begin
   ColRowToSquare:=Row__ * (Game.BoardWidth+2) + Col__;
 end;
 
-function  DxDyToDirection(Dx__,Dy__:Integer):TDirection;
+function  DxDyToDirection(Dx__,Dy__:Int):TDirection;
 begin {precondition: either 'Dx__' or 'Dy__' is 0}
   if        Dx__=0 then
             if   Dy__<=0 then Result:=dUp
@@ -1696,7 +1763,7 @@ begin {precondition: either 'Dx__' or 'Dy__' is 0}
             else              Result:=dRight;
 end;
 
-procedure DirectionToDxDy(Direction__:TDirection; var Dx__,Dy__:Integer);
+procedure DirectionToDxDy(Direction__:TDirection; var Dx__,Dy__:Int);
 begin
   Dx__:=0; Dy__:=0;
   case Direction__ of
@@ -1709,8 +1776,8 @@ begin
 end;
 
 function  GameHistoryMovesAsText:String;
-var PushNo:Integer; MoveAsText:String;
-begin {note that this destroys calculations done by 'InitializeGame', hence, don't call it before the search is over}
+var PushNo:Int; MoveAsText:String;
+begin {note that this destroys calculations performed by 'InitializeGame', hence, don't call it before the search is over}
   {initialize the game before replaying the moves}
   Game.Board:=Game.OriginalBoard; {note that this destroys the calculations performed by 'InitializeGame'}
   Game.BoxPos:=Game.OriginalBoxPos; Game.PlayerPos:=Game.OriginalPlayerPos;
@@ -1723,8 +1790,8 @@ begin {note that this destroys calculations done by 'InitializeGame', hence, don
      until  not NextPushToText(PushNo,MoveAsText);
 end;
 
-function  GoalNoAtSquare(SquareNo__:Integer):Integer;
-var GoalNo:Integer;
+function  GoalNoAtSquare(SquareNo__:Int):Int;
+var GoalNo:Int;
 begin // returns the number of the goal at the square 'SquareNo__', if any
   Result:=0;
   for GoalNo:=1 to Game.GoalCount do
@@ -1733,15 +1800,15 @@ begin // returns the number of the goal at the square 'SquareNo__', if any
          end;
 end;
 
-function  IsABlackSquareOnAChessBoard(Square__:Integer):Boolean;
-var Col,Row:Integer;
+function  IsABlackSquareOnAChessBoard(Square__:Int):Boolean;
+var Col,Row:Int;
 begin
   SquareToColRow(Square__,Col,Row);
   Result:=(Odd(Col) and Odd(Row)) or ((not Odd(Col)) and (not Odd(Row)));
 end;
 
-function  IsABlockedBoxSquareAlongAxis(Square__:Integer; Direction__:TDirection):Boolean;
-var Neighbor1,Neighbor2:Integer;
+function  IsABlockedBoxSquareAlongAxis(Square__:Int; Direction__:TDirection):Boolean;
+var Neighbor1,Neighbor2:Int;
 begin {considers walls only, i.e., boxes on the board are not taken into account;}
       {contrary to what the function name suggests, the parameter is a direction, not an axis}
   with Game do begin
@@ -1762,58 +1829,58 @@ begin {considers walls only, i.e., boxes on the board are not taken into account
     end;
 end;
 
-function  IsABoxReachableSquare(Square__:Integer):Boolean;
+function  IsABoxReachableSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and FLAG_BOX_REACHABLE_SQUARE)<>0;
 end;
 
-function  IsABoxSquare(Square__:Integer):Boolean;
+function  IsABoxSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and BOX)<>0;
 end;
 
-function  IsABoxStartSquare(Square__:Integer):Boolean;
+function  IsABoxStartSquare(Square__:Int):Boolean;
 begin {precondition: 'Game.DistanceToNearestBoxStartPosition'  has been calculated}
   Result:=Game.DistanceToNearestBoxStartPosition[Square__]=0;
 end;
 
-function  IsADoorSquare(Square__:Integer):Boolean;
+function  IsADoorSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and FLAG_DOOR_SQUARE)<>0;
 end;
 
-function  IsAFloorSquare(Square__:Integer):Boolean;
+function  IsAFloorSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and FLOOR)<>0;
 end;
 
-function  IsAGateSquare(Square__:Integer):Boolean;
+function  IsAGateSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and FLAG_GATE_SQUARE)<>0;
 end;
 
-function  IsAGoalSquare(Square__:Integer):Boolean;
+function  IsAGoalSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and GOAL)<>0;
 end;
 
-function  IsALegalBoxSquare(Square__:Integer):Boolean;
+function  IsALegalBoxSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and (WALL+FLAG_ILLEGAL_BOX_SQUARE))=0;
 end;
 
-function  IsALegalAndBoxReachableSquare(Square__:Integer):Boolean;
+function  IsALegalAndBoxReachableSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and (WALL+FLAG_ILLEGAL_BOX_SQUARE+FLAG_BOX_REACHABLE_SQUARE+FLOOR))=FLAG_BOX_REACHABLE_SQUARE+FLOOR;
 end;
 
-function  IsAnEmptyFloorSquare(Square__:Integer):Boolean;
+function  IsAnEmptyFloorSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and (FLOOR+BOX))=FLOOR;
 end;
 
-function  IsANeighborSquare(Square__,NeighborSquare__:Integer; var Direction__:TDirection):Boolean;
-var Difference:Integer;
+function  IsANeighborSquare(Square__,NeighborSquare__:Int; var Direction__:TDirection):Boolean;
+var Difference:Int;
     Direction:TDirection;
 begin {returns 'True' if the squares are neighbors}
   Result:=False;
@@ -1826,18 +1893,18 @@ begin {returns 'True' if the squares are neighbors}
          end;
 end;
 
-function  IsAPlayerSquare(Square__:Integer):Boolean;
+function  IsAPlayerSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and PLAYER)<>0;
 end;
 
-function  IsAWallSquare(Square__:Integer):Boolean;
+function  IsAWallSquare(Square__:Int):Boolean;
 begin
   Result:=(Game.Board[Square__] and WALL)<>0;
 end;
 
-function  IsSquareAMemberOfDeadlockSet(SquareNo__,DeadlockSetNo__:Integer):Boolean;
-var Index:Integer;
+function  IsSquareAMemberOfDeadlockSet(SquareNo__,DeadlockSetNo__:Int):Boolean;
+var Index:Int;
 begin
   Result:=True;
   with Game.DeadlockSets do
@@ -1852,7 +1919,7 @@ begin
 end;
 
 function  LoadOptimizationMethodSettingsFromString(Str__:String; var MethodEnabled__:TOptimizationMethodEnabled; var MethodOrder__:TOptimizationMethodOrder):Boolean;
-var i,j:Integer; Method:TOptimizationMethod;
+var i,j:Int; Method:TOptimizationMethod;
     NewMethodEnabled:TOptimizationMethodEnabled; NewMethodOrder:TOptimizationMethodOrder;
 begin
   Result:=True;
@@ -1877,15 +1944,15 @@ begin
       end;
 end;
 
-function  ManhattanDistance(Square1__,Square2__:Integer):Integer;
-var Col1,Col2,Row1,Row2:Integer;
+function  ManhattanDistance(Square1__,Square2__:Int):Int;
+var Col1,Col2,Row1,Row2:Int;
 begin {returns the 'Manhattan distance' between two squares on the board}
   SquareToColRow(Square1__,Col1,Row1);
   SquareToColRow(Square2__,Col2,Row2);
   Result:=Abs(Col1-Col2)+Abs(Row1-Row2);
 end;
 
-function  MinimumDistanceToSquare(Square__:Integer; const Distances__:TSquareDirectionArrayOfInteger):Integer;
+function  MinimumDistanceToSquare(Square__:Int; const Distances__:TSquareDirectionArrayOfInteger):Int;
 var Direction:TDirection;
 begin {returns the minimum distance to the square, given the distances from each direction}
   Result:=INFINITY;
@@ -1895,7 +1962,7 @@ begin {returns the minimum distance to the square, given the distances from each
          Result:=Distances__[Square__,Direction];
 end; {MinimumDistanceToSquare}
 
-function  NeighborSquareDirection(Square__,NeighborSquare__:Integer):TDirection;
+function  NeighborSquareDirection(Square__,NeighborSquare__:Int):TDirection;
 begin {precondition: 'Square__' and 'NeighborSquare__' are neighbors}
   if        Square__ >  NeighborSquare__ then
        if   Square__ =  Succ( NeighborSquare__ ) then
@@ -1919,7 +1986,7 @@ begin
 end;
 
 function  OptimizationMethodOrderToString(const OptimizationMethodOrder__:TOptimizationMethodOrder):String;
-var i:Integer;
+var i:Int;
 begin
   Result:='';
   for i:=Succ(Low(OptimizationMethodOrder__)) to High(OptimizationMethodOrder__) do {'Succ(Low(...))': element 0 is the fixed fallback strategy}
@@ -1937,20 +2004,20 @@ begin
             IntToStr(PlayerLines    );
 end;
 
-function  PerformSokobanCallBackFunction:Integer;
+function  PerformSokobanCallBackFunction:Int32;
 {$IFDEF SINGLE_LINE_STATUS_TEXT}
-  var p:PChar;
+  var p:PChar8;
 {$ENDIF}
 begin {returns a non-zero value if the solver should terminate}
   if   Assigned(Solver.SokobanCallBackFunction) then with Solver.SokobanStatusPointer^ do begin
        MovesGenerated :=Solver.MoveCount;
        PushesGenerated:=Solver.PushCount;
-       StatesGenerated:=Int64(YASS.Positions.Count)+YASS.Positions.Statistics.DroppedCount;
+       StatesGenerated:=Int64(YASS.Positions.Count)+Int64(YASS.Positions.Statistics.DroppedCount);
        TimeMS:=UInt32(Game.InitializationTimeMS+Solver.TimeMS+Optimizer.TimeMS);
 
        {$IFDEF SINGLE_LINE_STATUS_TEXT}
        StatusText[High(StatusText)-1]:=NULL_CHAR; // ensure that the status text has a null terminator. the last character has a special meaning. it points to "Notes:", if any,
-       p:=PChar(Addr(StatusText[Low(StatusText)]));
+       p:=PChar8(Addr(StatusText[Low(StatusText)]));
        while p^<>NULL_CHAR do begin
          if Ord(p^)<Ord(SPACE) then
             p^:=SPACE;
@@ -1963,7 +2030,7 @@ begin {returns a non-zero value if the solver should terminate}
   else Result:=0;
 end;
 
-function  PreviousFreezeDeadlockSetWithNoFakedFreezingSquares(SetNo__:Integer):Integer;
+function  PreviousFreezeDeadlockSetWithNoFakedFreezingSquares(SetNo__:Int):Int;
 begin {returns the index of the previous freeze deadlock set which doesn't contain faked freezing squares;
        for a freeze deadlock set with faked freezing squares (e.g., the squares in a tunnel with goal squares,
        where the tunnel will be blocked if two boxes are pushed into the tunnel), this previous freeze deadlock set
@@ -1987,7 +2054,7 @@ end;
 
 procedure SetSokobanStatusText(const Text__:String);
 {$IFNDEF CONSOLE_APPLICATION}
-  var CharCount:Integer;
+  var CharCount:Int;
 {$ENDIF}
 begin
   with Solver.SokobanStatusPointer^ do begin
@@ -1995,14 +2062,14 @@ begin
       StatusText:=Text__;
       Writeln(StatusText);
     {$ELSE}
-      CharCount:=Min(Length(Text__),(SizeOf(StatusText)-SizeOf(Char)) div SizeOf(Char));
-      if CharCount<>0 then System.Move(PChar(Addr(Text__[1]))^,PChar(Addr(StatusText))^,CharCount*SizeOf(Char));
+      CharCount:=Min(Length(Text__),(SizeOf(StatusText)-SizeOf(Char8)) div SizeOf(Char8));
+      if CharCount<>0 then System.Move(PChar8(Addr(Text__[1]))^,PChar8(Addr(StatusText))^,CharCount*SizeOf(Char8));
       StatusText[Low(StatusText)+CharCount]:=NULL_CHAR; // add null-terminator
     {$ENDIF}
     end;
 end;
 
-function  SokobanCallBackFunction:Integer; stdcall;
+function  SokobanCallBackFunction:Int32; stdcall;
 begin // test function only; not in production
   with Solver.SokobanStatusPointer^ do begin
     {$IFDEF CONSOLE_APPLICATION}
@@ -2013,9 +2080,9 @@ begin // test function only; not in production
     end;
 end;
 
-function  SortBoxes( var SortedBoxes__:TBoxNumbers; const Scores__:TBoxArrayOfUnsignedIntegers; TieBreaker__:Integer):Integer;
-var BoxNo,Index:Integer;
-    Score,SortedItemScore:Cardinal;
+function  SortBoxes( var SortedBoxes__:TBoxNumbers; const Scores__:TBoxArrayOfUnsignedIntegers; TieBreaker__:Int):Int;
+var BoxNo,Index:Int;
+    Score,SortedItemScore:UInt;
 begin {sorts the box numbers in ascending order on scores;
        returns the number of boxes with zero score;
        if the tiebreaker is non-zero, then the sorting order is randomized for
@@ -2052,8 +2119,8 @@ begin {sorts the box numbers in ascending order on scores;
 }
 end;
 
-function  SquareToChar(Square__:Integer):Char;
-var Col,Row:Integer;
+function  SquareToChar(Square__:Int):Char;
+var Col,Row:Int;
 begin
   case Game.Board[Square__] and (PLAYER+BOX+GOAL+WALL) of
     PLAYER     : if   Legend.XSBNotation then
@@ -2089,25 +2156,25 @@ begin
           Result:=CH_WALL;
 end;
 
-procedure SquareToColRow(Square__:Integer; var Col__,Row__:Integer);
+procedure SquareToColRow(Square__:Int; var Col__,Row__:Int);
 begin
   Row__:=Square__   div   (Game.BoardWidth+2);
   Col__:=Square__ - Row__*(Game.BoardWidth+2);
 end;
 
-function  SquareToColRowAsText(Square__:Integer):String;
-var Col,Row:Integer;
+function  SquareToColRowAsText(Square__:Int):String;
+var Col,Row:Int;
 begin
   SquareToColRow(Square__,Col,Row);
   Result:=IntToStr(Col)+COMMA+IntToStr(Row);
 end;
 
-function  SAT(Square__:Integer):String; {'SquareToColRowAsText' abbreviated; for debuggin convenience}
+function  SAT(Square__:Int):String; {'SquareToColRowAsText' abbreviated; for debuggin convenience}
 begin
   Result:=SquareToColRowAsText(Square__);
 end;
 
-function  StraightLineVisibility(Square__,Distance__:Integer; Direction__:TDirection):Boolean;
+function  StraightLineVisibility(Square__,Distance__:Int; Direction__:TDirection):Boolean;
 begin {returns 'True' if the line of sight on the board in the given direction isn't blocked by walls or boxes;
        'Square__' is the starting point but it isn't itself a part of the line of sight, i.e., it may be a wall or a box square}
   with Game do begin
@@ -2128,15 +2195,15 @@ end;
 function  GetCommandLineParameters(var InputFileName__:String;
                                    var FirstLevelNo__,
                                        LastLevelNo__,
-                                       MemoryByteSize__:Cardinal;
+                                       MemoryByteSize__:UInt;
                                    var PushCountLimit__:Int64;
                                    var DepthLimit__,
-                                       BackwardSearchDepthLimit__:Cardinal;
+                                       BackwardSearchDepthLimit__:UInt;
                                    var OptimizerPushCountLimit__:Int64;
                                    var OptimizerDepthLimit__,
                                        DeadlockSetsAdjacentOpenSquaresLimit__,
                                        DeadlockSetsBoxLimitForDynamicSets__,
-                                       DeadlockSetsBoxLimitForPrecalculatedSets__:Cardinal;
+                                       DeadlockSetsBoxLimitForPrecalculatedSets__:UInt;
                                    var SearchMethod__:TSearchMethod;
                                    var SolverEnabled__,
                                        OptimizerEnabled__,
@@ -2147,7 +2214,7 @@ function  GetCommandLineParameters(var InputFileName__:String;
                                        ReuseNodesEnabled__,
                                        LogFileEnabled__,
                                        PackingOrderEnabled__:Boolean;
-                                   var PackingOrderBoxCountThreshold__:Cardinal;
+                                   var PackingOrderBoxCountThreshold__:UInt;
                                    var TimeLimitMS__,
                                        OptimizerTimeLimitMS__,
                                        BoxPermutationsSearchTimeLimitMS__:TTimeMS;
@@ -2155,14 +2222,14 @@ function  GetCommandLineParameters(var InputFileName__:String;
                                    var OptimizationMethodOrder__  :TOptimizationMethodOrder;
                                    var Optimization__:TOptimization;
                                    var VicinitySettings__:TVicinitySettings):Boolean;
-var i,j,ItemIndex:Integer; c:Cardinal; b:Boolean; sm:TSearchMethod; om:TOptimizationMethod; s:String;
+var i,j,ItemIndex:Int; c:UInt; b:Boolean; sm:TSearchMethod; om:TOptimizationMethod; s:String;
 
-  function  GetParameter(var Value__:Cardinal; Min__,Max__,Scale__:Cardinal; var ItemIndex__:Integer):Boolean;
+  function  GetParameter(var Value__:UInt; Min__,Max__,Scale__:UInt; var ItemIndex__:Int):Boolean;
   begin
     Inc(ItemIndex__); {skip argument name}
     if Scale__<1 then Scale__:=1;
     Result:=(ItemIndex__<=ParamCount) and
-            StrToInt(ParamStr(ItemIndex__),Integer(Value__)) and
+            StrToInt(ParamStr(ItemIndex__),Int(Value__)) and
             (Value__>=Min__ div Scale__) and (Value__<=Max__ div Scale__);
     Value__:=Value__*Scale__;
     Inc(ItemIndex__); {advance to next parameter}
@@ -2255,10 +2322,10 @@ begin {a simple and not fool-proof implementation}
           'l'       : if           HasCharCI(s,'o') then begin {log}
                                    LogFileEnabled__:=True; Inc(ItemIndex);
                                    end
-                      else         begin Result:=GetParameter(FirstLevelNo__,0,MaxInt,0,ItemIndex); {level from [ - to]}
+                      else         begin Result:=GetParameter(FirstLevelNo__,0,High(Int),0,ItemIndex); {level from [ - to]}
                                          if Result and (ItemIndex<=Pred(ParamCount)) and
                                             (ParamStr(ItemIndex)=HYPHEN) then begin
-                                            Result:=GetParameter(LastLevelNo__,FirstLevelNo__,MaxInt,0,ItemIndex);
+                                            Result:=GetParameter(LastLevelNo__,FirstLevelNo__,High(Int),0,ItemIndex);
                                             end;
                                    end;
           'm'       : if           HasCharCI(s,'u') then begin {MaxPushes}
@@ -2272,7 +2339,9 @@ begin {a simple and not fool-proof implementation}
                                    Result:=GetParameter(DepthLimit__,0,MAX_HISTORY_BOX_MOVES,0,ItemIndex)
                            else if (Length(s)>=5) and
                                    ((s[5]='t') or (s[5]='T')) {MaxTime} then begin
-                                   Result:=GetParameter(Cardinal(TimeLimitMS__),0,MAX_SEARCH_TIME_LIMIT_MS,1000,ItemIndex);
+                                   c:=UInt(TimeLimitMS__);
+                                   Result:=GetParameter(c,0,MAX_SEARCH_TIME_LIMIT_MS,1000,ItemIndex);
+                                   TimeLimitMS__:=TTimeMS(c);
                                    OptimizerTimeLimitMS__:=TimeLimitMS__;
                                    end
                                 else if HasCharCI(s,'h') {Method} then begin
@@ -2292,8 +2361,8 @@ begin {a simple and not fool-proof implementation}
                                      else if (Length(s)>=4) and
                                              ((s[4]='m') or (s[4]='M')) then begin {Memory}
                                              MemoryByteSize__   :=GetPhysicalMemoryByteSize;
-                                             if MemoryByteSize__> Cardinal(MAX_TRANSPOSITION_TABLE_BYTE_SIZE) then
-                                                MemoryByteSize__:=Cardinal(MAX_TRANSPOSITION_TABLE_BYTE_SIZE); // limit the transposition table byte size to a signed integer and leave some memory for other purposes
+                                             if MemoryByteSize__> UInt(MAX_TRANSPOSITION_TABLE_BYTE_SIZE) then
+                                                MemoryByteSize__:=UInt(MAX_TRANSPOSITION_TABLE_BYTE_SIZE); // limit the transposition table byte size to a signed integer and leave some memory free for other purposes
                                              Result:=GetParameter(MemoryByteSize__,
                                                                   0,
                                                                  {$IFDEF WINDOWS}
@@ -2307,9 +2376,9 @@ begin {a simple and not fool-proof implementation}
                                                 if (s<>'') and ((s[1]='a') or (s[1]='A')) then begin
                                                    {$IFDEF WINDOWS}
                                                      MemoryByteSize__   :=GetAvailableUserMemoryByteSize; //GetAvailablePhysicalMemoryByteSize;
-                                                     if MemoryByteSize__> Cardinal(MAX_TRANSPOSITION_TABLE_BYTE_SIZE) then
-                                                        MemoryByteSize__:=Cardinal(MAX_TRANSPOSITION_TABLE_BYTE_SIZE); // limit the transposition table byte size to a signed integer and leave some memory for other purposes
-                                                     Result:={(MemoryByteSize__>=0) and} (MemoryByteSize__<=MaxInt-ONE_MEBI);
+                                                     if MemoryByteSize__> UInt(MAX_TRANSPOSITION_TABLE_BYTE_SIZE) then
+                                                        MemoryByteSize__:=UInt(MAX_TRANSPOSITION_TABLE_BYTE_SIZE); // limit the transposition table byte size to a signed integer and leave some memory free for other purposes
+                                                     Result:={(MemoryByteSize__>=0) and} (MemoryByteSize__<=High(Int)-ONE_MEBI);
                                                    {$ELSE}
                                                      Msg('"-memory available": This parameter is only implemented in the Windows version.','');
                                                    {$ENDIF}
@@ -2367,7 +2436,7 @@ begin {a simple and not fool-proof implementation}
           'p'       : begin
                         if   Length(s)>=3 then
                              if   (s[3]='a') or (s[3]='A') then {packing order}
-                                  Result:=GetParameter(PackingOrderBoxCountThreshold__,0,MaxInt,0,ItemIndex)
+                                  Result:=GetParameter(PackingOrderBoxCountThreshold__,0,High(Int),0,ItemIndex)
                              else if   (s[3]='r') or (s[3]='R') then
                                        if   (Length(s)>=4) and (s[4]='o') or (s[4]='O') then
                                             Result:=GetBooleanValue(Prompt__) {"prompt", i.e., confirm messages yes/no}
@@ -2467,7 +2536,7 @@ begin
   Writeln('  -log                         : save search information to a logfile');
   Writeln('  -maxpushes <number> (million): search limit, default none'); // DEFAULT_PUSH_COUNT_LIMIT div ONE_MILLION,' million');
   Writeln('  -maxdepth  <number>          : search limit, default (and max.) ',MAX_HISTORY_BOX_MOVES,' pushes');
-  Writeln('  -maxtime   <seconds>         : search limit, default (and max.) 49 days');
+  Writeln('  -maxtime   <seconds>         : search limit, default unlimited');
   {$IFDEF WINDOWS}
     Writeln
          ('  -memory    <size>|avail (MiB): default ',CalculateDefaultMemoryByteSize div ONE_MEBI,' MiB. Available: physical memory');
@@ -2508,7 +2577,7 @@ begin {$I-}
 end; {$I+}
 
 function  CreateLogFile(const FileName__:String):Boolean;
-var i:Integer; s1,s2:String;
+var i:Int; s1,s2:String;
 begin {$I-}
   Result:=False; i:=-1;
   if CloseLogFile and LogFile.Enabled then with LogFile do begin
@@ -2542,8 +2611,8 @@ begin {$I-}
      end;
 end; {$I+}
 
-function  WriteBoardToLogFile(const Text__:String; Margin__:Integer):Boolean;
-var i:Integer; Margin:String; BoardAsTextLines:TBoardAsTextLines;
+function  WriteBoardToLogFile(const Text__:String; Margin__:Int):Boolean;
+var i:Int; Margin:String; BoardAsTextLines:TBoardAsTextLines;
 begin {$I-}
   Result:=LogFile.FileName<>'';
   if Result then with LogFile do begin
@@ -2649,7 +2718,7 @@ function  MakeLevelStatistics(const Name__:String;
                               DeadlockedOpenPositionsCount__,DeadlockPositionsCount__,
                               PrecalculatedDeadlockSetsCount__,DynamicDeadlockSetsCount__,
                               DeadlockSetsPushCount__,NewPathCount__,RoomPositionCount__,
-                              EnqueuedPositionsCountPlayersReachableSquaresNotCalculated__, EnqueuedPositionsCountPlayersReachableSquaresCalculated__:Cardinal;
+                              EnqueuedPositionsCountPlayersReachableSquaresNotCalculated__, EnqueuedPositionsCountPlayersReachableSquaresCalculated__:UInt;
                               InitializationTimeMS__,DeadlockSetsTimeMS__,PackingOrderTimeMS__,SolverTimeMS__,OptimizerTimeMS__:TTimeMS;
                               Flags__:TLevelStatisticsFlags):PLevelStatistics;
 begin
@@ -2703,7 +2772,7 @@ function  WriteStatistics(OutputFileName__:String):Boolean;
 const SHORT_LINE_LENGTH=80;
 var
   i,j,Count,LineLength,SolvedCount,
-  OptimalSolutionCount,SolvedLevelsTotalTimeMS,TotalGeneratedPushesCountMillion:Integer;
+  OptimalSolutionCount,SolvedLevelsTotalTimeMS,TotalGeneratedPushesCountMillion:Int;
   UnsignedInteger32:UInt32; Integer64:Int64;
   s:String; Total:TLevelStatistics; This,Next:PLevelStatistics; F:Text;
 begin {$I-}
@@ -2728,7 +2797,7 @@ begin {$I-}
      else Writeln(F,' - Optimizer Results');
      Writeln(F,'File: ',OutputFileName__);
      if      Solver.Enabled then
-             Writeln(F,'Method: ',Upcase(TEXT_SEARCH_METHOD[Solver.SearchMethod][1]), Copy(TEXT_SEARCH_METHOD[Solver.SearchMethod],2, MaxInt),' search')
+             Writeln(F,'Method: ',Upcase(TEXT_SEARCH_METHOD[Solver.SearchMethod][1]), Copy(TEXT_SEARCH_METHOD[Solver.SearchMethod],2, High(Integer)),' search')
      else if Optimizer.Enabled then
              if      Optimizer.Optimization=opMovesPushes then Writeln(F,'Optimize: Moves/pushes')
              else if Optimizer.Optimization=opPushesMoves then Writeln(F,'Optimize: Pushes/moves')
@@ -2840,15 +2909,15 @@ begin {$I-}
           ((PushCount<>0) or (lsfZeroPushSolution in Flags)) then
           Inc(SolvedLevelsTotalTimeMS,InitializationTimeMS+SolverTimeMS);
 
-       i:=Pred(Integer(Reader.FirstLevelNo))+Count;
+       i:=Pred(Int(Reader.FirstLevelNo))+Count;
        Write(F,i:4,Width:3,Height:3);
 
        s:=Name;
        i:=Pos(DOUBLE_QUOTE,s);
        if i<>0 then Delete(s,1,i);
        i:=Pos(DOUBLE_QUOTE,s);
-       if i<>0 then Delete(s,i,MaxInt);
-       if Length(s)>25 then Delete(s,26,MaxInt);
+       if i<>0 then Delete(s,i,High(Int));
+       if Length(s)>25 then Delete(s,26,High(Int));
        Write(F,s:26);
 
        if   Solver.Enabled and
@@ -3029,12 +3098,14 @@ end; {$I+}
 {Board}
 
 function  BoardToText(const LineTerminator__:String):String;
-var Row:Integer; s:String; BoardAsTextLines:TBoardAsTextLines;
+var Row:Int; s:String; BoardAsTextLines:TBoardAsTextLines;
 begin
   Result:='';
   BoardToTextLines(BoardAsTextLines);
   for Row:=1 to Game.BoardHeight do begin
+      {$WARNINGS OFF}
       s:=BoardAsTextLines[Row];
+      {$WARNINGS ON}
       if Length(s)>Game.BoardWidth then s:=Copy(s,1,Game.BoardWidth); {this shouldn't happen}
       while Length(s)<Game.BoardWidth do s:=s+SPACE;
       if   Result<>'' then
@@ -3045,7 +3116,7 @@ begin
 end;
 
 procedure BoardToTextLines(var BoardAsTextLines__:TBoardAsTextLines);
-var Col,Row:Integer;
+var Col,Row:Int;
 begin
   with Game do begin
     for Row:=1 to BoardHeight do begin
@@ -3059,8 +3130,8 @@ begin
     end;
 end;
 
-function  CalculateGateSquares:Integer; {finds all door squares and all gate squares; a gate square splits the board in separate rooms}
-var BoxNo,Square,NeighborSquare,OppositeNeighborSquare,OldPlayerPos:Integer; Direction:TDirection;
+function  CalculateGateSquares:Int; {finds all door squares and all gate squares; a gate square splits the board in separate rooms}
+var BoxNo,Square,NeighborSquare,OppositeNeighborSquare,OldPlayerPos:Int; Direction:TDirection;
 begin {caution: assumes 4 directions only}
   with Game do begin
     Result:=0;
@@ -3169,7 +3240,7 @@ begin {caution: assumes 4 directions only}
 end;
 
 function  CalculateHashValue:THashValue;
-var BoxNo,Square:Integer;
+var BoxNo,Square:Int;
 begin {only box positions are taken into account; the player position isn't considered, it's saved separately in each node}
   Result:=0;
   for BoxNo:=1 to Game.BoxCount do begin
@@ -3180,13 +3251,13 @@ begin {only box positions are taken into account; the player position isn't cons
 end;
 
 
-function  CalculateLowerBound : Integer;
+function  CalculateLowerBound : Int;
 // precondition: 'Game.SimpleLowerBound' has been calculated. (it always has)
 // it will be returned as value if this function exceeds the time limit for calculating a more accurate lower bound
 const
   MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND = 32; //MAX_BOX_COUNT; // 'MAX_BOX_COUNT': no other restrictions than the maximum number of boxes (but it may overflow the stack)
 type
-  TDistancesAndBenefitsArray = array[0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND,0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND] of Integer;
+  TDistancesAndBenefitsArray = array[0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND,0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND] of Int;
   TDistancesAndBenefits = record
     case Boolean of // a union definition in the "C" programming language, i.e., overlapping fields
       False : ( Distances : TDistancesAndBenefitsArray; );
@@ -3198,7 +3269,7 @@ const
   EPSILON_START_VALUE = 16; // must be an EPSILON_SCALING_DIVISOR^N value, where N is a nonnegative integer, and it must be <= MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND
   MAX_BOX_DISTANCE = MAX_BOARD_SIZE*DIRECTION_COUNT;
   MAX_BENEFIT = MAX_BOX_DISTANCE;
-//MAX_BID_COUNT = High( Integer );
+//MAX_BID_COUNT = High( Int );
   BENEFIT_INFINITY  = INFINITY; // immutable value
   DISTANCE_INFINITY = BENEFIT_INFINITY; // distances and benefits refer to the same physical data fields during the calculation. immutable value
   PRICE_INFINITY = ( High( TPrice )  // 4 * INFINITY must be a valid number
@@ -3207,13 +3278,13 @@ const
                    )
                    div 4;
 var
-  i,j,n,BoxNo,GoalNo,UnassignedBoxesCount,BestGoalNo,Epsilon,AssignedBoxNo,Distance,MaxDistance,BenefitsScalingFactor,Benefit,MaxBenefit:Integer;
-  //Countdown:Integer;
+  i,j,n,BoxNo,GoalNo,UnassignedBoxesCount,BestGoalNo,Epsilon,AssignedBoxNo,Distance,MaxDistance,BenefitsScalingFactor,Benefit,MaxBenefit:Int;
+  //Countdown:Int;
   //StartTimeMS, StopTimeMS : TTimeMS;
   OK : Boolean;
   _:TDistancesAndBenefits; // same data area for distances and benefits. benefit := max-distance - distance
   //BoxGoalAssignments, GoalBoxAssignments, // global variables in 'Game'
-  UnassignedBoxes:array[0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND] of Integer;
+  UnassignedBoxes:array[0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND] of Int;
   BestValue,SecondBestValue,Value,MinimumValue:TPrice;
   Prices:array[0..MAX_BOX_COUNT_FOR_CALCULATING_MINIMUM_LOWER_BOUND] of TPrice;
 
@@ -3419,8 +3490,8 @@ begin // CalculateLowerBound: calculates a pushes lower bound by using an auctio
        end;
 end; {CalculateLowerBound}
 
-function  CalculateSimpleLowerBound:Integer;
-var BoxNo,Distance,Square:Integer;
+function  CalculateSimpleLowerBound:Int;
+var BoxNo,Distance,Square:Int;
 begin {calculates distance to nearest goal for all boxes}
   Result:=0;
   for BoxNo:=1 to Game.BoxCount do begin
@@ -3436,7 +3507,7 @@ begin {calculates distance to nearest goal for all boxes}
 end;
 
 procedure CalculateTunnelSquares;
-var Square,NextSquare:Integer;
+var Square,NextSquare:Int;
     SquareIsBlockedByTwoWallsAlongTheOtherAxis:Boolean; Direction:TDirection;
 begin {caution: assumes 4 directions only}
   with Game do begin
@@ -3561,8 +3632,8 @@ begin {caution: assumes 4 directions only}
     end;
 end;
 
-procedure ClearBoard(BoardWidth__,BoardHeight__:Integer);
-var Col,Row,RowOffset:Integer;
+procedure ClearBoard(BoardWidth__,BoardHeight__:Int);
+var Col,Row,RowOffset:Int;
 begin
   with Game do begin
     InitializeBoard(BoardWidth__,BoardHeight__,True);
@@ -3576,7 +3647,7 @@ begin
 end;
 
 procedure DumpBoard;
-var Col,Row:Integer;
+var Col,Row:Int;
 begin
   with Game do begin
     for Row:=1 to BoardHeight do begin
@@ -3586,8 +3657,8 @@ begin
     end;
 end;
 
-procedure InitializeBoard(BoardWidth__,BoardHeight__:Integer; FillSquares__:Boolean);
-var i,RowOffset:Integer; Direction:TDirection;
+procedure InitializeBoard(BoardWidth__,BoardHeight__:Int; FillSquares__:Boolean);
+var i,RowOffset:Int; Direction:TDirection;
 begin
   with Game do begin
     BoardSize:=(BoardWidth__+2)*(BoardHeight__+2); {the extra 2 is for a wall-filled border}
@@ -3622,23 +3693,23 @@ begin
 end;
 
 procedure MarkTargetSquares(ReverseMode__:Boolean);
-var BoxNo,GoalNo,Square:Integer;
+var BoxNo,GoalNo,Square:Int;
 begin {marks goal squares or box starting positions as target squares, depending on the game mode}
   with Game do begin
     for  Square:=0 to BoardSize do {remove old marks, if any}
          Board[Square]:=Board[Square] and ((1 shl GOAL_BIT_SHIFT_COUNT)-1);
     if   not ReverseMode__ then
          for GoalNo:=1 to GoalCount do
-             Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]]+Cardinal(GoalNo shl GOAL_BIT_SHIFT_COUNT)
+             Board[GoalPos[GoalNo]]:=Board[GoalPos[GoalNo]]+UInt(GoalNo shl GOAL_BIT_SHIFT_COUNT)
     else for BoxNo:=1 to BoxCount do
-             Board[StartBoxPos[BoxNo]]:=Board[StartBoxPos[BoxNo]]+Cardinal(BoxNo shl GOAL_BIT_SHIFT_COUNT);
+             Board[StartBoxPos[BoxNo]]:=Board[StartBoxPos[BoxNo]]+UInt(BoxNo shl GOAL_BIT_SHIFT_COUNT);
     end;
 end;
 
-procedure SetBoard(PlayerPos__:Integer; BoxPos__:TBoxSquares; ReverseMode__:Boolean;
-                   var OldPlayerPos__:Integer; var OldBoxPos__:TBoxSquares;
+procedure SetBoard(PlayerPos__:Int; BoxPos__:TBoxSquares; ReverseMode__:Boolean;
+                   var OldPlayerPos__:Int; var OldBoxPos__:TBoxSquares;
                    var OldReverseMode__:Boolean);
-var BoxNo:Integer;
+var BoxNo:Int;
 begin
   OldPlayerPos__:=Game.PlayerPos; OldBoxPos__:=Game.BoxPos;                     {save current state}
   OldReverseMode__:=Game.ReverseMode;
@@ -3653,7 +3724,7 @@ begin
 end;
 
 procedure ShowBoard;
-var Row:Integer; BoardAsTextLines:TBoardAsTextLines;
+var Row:Int; BoardAsTextLines:TBoardAsTextLines;
 begin
   FillChar(BoardAsTextLines,SizeOf(BoardAsTextLines),0);
   BoardToTextLines(BoardAsTextLines);
@@ -3662,7 +3733,7 @@ begin
 end;
 
 procedure ShowBoardWithColumnsAndRows;
-var Col,Row:Integer; BoardAsTextLines:TBoardAsTextLines;
+var Col,Row:Int; BoardAsTextLines:TBoardAsTextLines;
 begin
   FillChar(BoardAsTextLines,SizeOf(BoardAsTextLines),0);
   for Col:=1 to Game.BoardWidth do
@@ -3673,11 +3744,11 @@ begin
       Writeln(BoardAsTextLines[Row],Row:4);
   for Col:=1 to Game.BoardWidth do
       Write(Col mod 10);
-  Writeln;      
+  Writeln;
 end;
 
 procedure ShowBoxDistanceToAllSquares(const Distances__:TBoardOfIntegers);
-var Col,Row,Square,Distance:Integer;
+var Col,Row,Square,Distance:Int;
 begin
   with Game do begin
     for Row:=1 to BoardHeight do begin
@@ -3695,7 +3766,7 @@ begin
 end;
 
 procedure ShowBoxDistanceToNearestGoal;
-var Col,Row,Distance:Integer;
+var Col,Row,Distance:Int;
 begin
   with Game do begin
     for Row:=1 to BoardHeight do begin
@@ -3714,7 +3785,7 @@ begin
 end;
 
 procedure ShowBoxReachableSquaresForAllBoxes;
-var i,Col,Row:Integer;
+var i,Col,Row:Int;
 begin
   with Game do begin
     for Row:=1 to BoardHeight do begin
@@ -3731,8 +3802,8 @@ begin
     end;
 end;
 
-procedure ShowCorral(Depth__:Integer; TimeStamp__:TTimeStamp);
-var BoxNo,Square,Col,Row:Integer; s:String; B:TBoard;
+procedure ShowCorral(Depth__:Int; TimeStamp__:TTimeStamp);
+var BoxNo,Square,Col,Row:Int; s:String; B:TBoard;
 begin
   B:=Game.Board;
   with Solver.SearchStates[Depth__].PlayersReachableSquares do begin
@@ -3756,7 +3827,7 @@ begin
 end;
 
 procedure ShowGateSquares; {shows all floors that cut the board in two separate rooms}
-var BoxNo,OldPlayerPos,Square:Integer;
+var BoxNo,OldPlayerPos,Square:Int;
 begin
   with Game do begin
     OldPlayerPos:=PlayerPos;
@@ -3780,7 +3851,7 @@ begin
 end;
 
 procedure ShowIllegalBoxSquares;
-var i:Integer; s:String; B:TBoard;
+var i:Int; s:String; B:TBoard;
 begin
   if Game.ShowDeadlockSetsEnabled or (LogFile.FileName<>'') then
      with Game do with DeadlockSets do begin
@@ -3811,8 +3882,8 @@ begin
        end;
 end;
 
-procedure ShowPlayersDistanceToAllSquares(MinPlayerPos__,Index__:Integer);
-var Col,Row,SquareNo:Integer;
+procedure ShowPlayersDistanceToAllSquares(MinPlayerPos__,Index__:Int);
+var Col,Row,SquareNo:Int;
 begin {precondition: the player's distance to reachable squares have been calculated for index 'Index__'}
   with Game do with Solver.SearchStates[Index__].PlayersReachableSquares do begin
     for Row:=1 to BoardHeight do begin
@@ -3835,8 +3906,8 @@ begin {precondition: the player's distance to reachable squares have been calcul
     end;
 end;
 
-procedure ShowPlayersReachableSquares(Index__:Integer);
-var Col,Row,SquareNo:Integer; SquareTimeStamp:TTimeStamp;
+procedure ShowPlayersReachableSquares(Index__:Int);
+var Col,Row,SquareNo:Int; SquareTimeStamp:TTimeStamp;
 begin {precondition: the player's distance to reachable squares have been calculated for index 'Index__'}
   with Game do with Solver.SearchStates[Index__].PlayersReachableSquares do begin
     for Row:=1 to BoardHeight do begin
@@ -3862,8 +3933,8 @@ begin {precondition: the player's distance to reachable squares have been calcul
     end;
 end;
 
-procedure ShowDeadlockSet(Index__,CenterSquareNo__:Integer);
-var i,j,k,Col,Row,Margin:Integer; DeadlockSetHashValue:THashValue;
+procedure ShowDeadlockSet(Index__,CenterSquareNo__:Int);
+var i,j,k,Col,Row,Margin:Int; DeadlockSetHashValue:THashValue;
     s:String; Direction:TDirection; B:TBoard;
 begin {$I-}
   if Game.ShowDeadlockSetsEnabled or (LogFile.FileName<>'') then
@@ -4018,7 +4089,7 @@ begin {$I-}
 end; {$I+}
 
 procedure ShowTunnelSquares;
-var SquareNo,Col,Row:Integer; Direction:TDirection;
+var SquareNo,Col,Row:Int; Direction:TDirection;
 begin
   with Game do
     for Direction:=Low(Direction) to High(Direction) do begin
@@ -4042,8 +4113,8 @@ end;
 
 {Moves}
 
-function  DoPush(BoxNo__:Integer; Direction__:TDirection; PlayersReachableSquaresIndex__:Integer):Boolean;
-var i,j,k,FromSquare,InnerFloorsCount,Square,ToSquare,SquareSetNo:Integer; SetFlags:TDeadlockSetFlagsSet;
+function  DoPush(BoxNo__:Int; Direction__:TDirection; PlayersReachableSquaresIndex__:Int):Boolean;
+var i,j,k,FromSquare,InnerFloorsCount,Square,ToSquare,SquareSetNo:Int; SetFlags:TDeadlockSetFlagsSet;
 begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].PlayersReachableSquares.Calculated'}
       {reflects whether the calculation has been performed for the game state}
       {after (sic) the push; ('IsALegalPush()' may have done it already)}
@@ -4071,7 +4142,7 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
 }
      Dec(Board[FromSquare],BOX);
      Inc(Board[ToSquare  ],BOX);
-     //Board[ToSquare]:=Cardinal(Board[ToSquare] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or Cardinal(BoxNo__ shl BOX_BIT_SHIFT_COUNT) or BOX;
+     //Board[ToSquare]:=UInt(Board[ToSquare] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or UInt(BoxNo__ shl BOX_BIT_SHIFT_COUNT) or BOX;
      BoxPos[BoxNo__]:=ToSquare;
      Dec(Board[PlayerPos],PLAYER);
      PlayerPos:=FromSquare;
@@ -4232,8 +4303,8 @@ begin {precondition: Solver.SearchStates[PlayersReachableSquaresIndex__].Players
      end;
 end;
 
-function  HasALegalPushOrPull(Position__:PPosition; var BoxNo__:Integer; var Direction__:TDirection):Boolean;
-var Count,SquareNo:Integer; d:TDirection; OldHashValue:THashValue;
+function  HasALegalPushOrPull(Position__:PPosition; var BoxNo__:Int; var Direction__:TDirection):Boolean;
+var Count,SquareNo:Int; d:TDirection; OldHashValue:THashValue;
 begin // returns 'True' if there currently is a box push/pull that leads to the position depicted by 'Position__'; see also 'OptimizeGame.WasALegalPush'.
       // the function searches for pushes or pulls depending on the current game mode given by 'Game.ReverseMode'
   Count:=0; OldHashValue:=Game.HashValue;
@@ -4280,13 +4351,13 @@ begin
     else Phase:=-1; {'-1': no packing order search}
 end;
 *)
-function  IsAFreezingMove ( FromSquareNo__ , ToSquareNo__ : Integer; ABoxFreezingOnAGoalSquareCountsAsAFreezingMove__ : Boolean ) : Boolean;
+function  IsAFreezingMove ( FromSquareNo__ , ToSquareNo__ : Int; ABoxFreezingOnAGoalSquareCountsAsAFreezingMove__ : Boolean ) : Boolean;
 {returns 'True' if putting a box on 'ToSquareNo__' creates a frozen position (optionally moving the box from 'FromSquareNo__')}
-var OriginalFromSquareValue : Integer; ABoxIsBlockedOnANonGoalSquare : Boolean;
+var OriginalFromSquareValue : Int; ABoxIsBlockedOnANonGoalSquare : Boolean;
 
-  function  BoxIsBlockedAlongOneAxis( SquareNo__ : Integer; Direction__ : TDirection;
+  function  BoxIsBlockedAlongOneAxis( SquareNo__ : Int; Direction__ : TDirection;
                                       var ABoxIsBlockedOnANonGoalSquare__ : Boolean):Boolean;
-  var Neighbor1, Neighbor2, Neighbor1Position , Neighbor2Position : Integer;
+  var Neighbor1, Neighbor2, Neighbor1Position , Neighbor2Position : Int;
   begin
     if   Direction__          = Low(Direction__) then                           {flip horizontal/vertical direction}
          Direction__         := Succ ( Low ( Direction__ ) )                    {caution: 'Succ(Low...'): assumes 4 directions only}
@@ -4392,7 +4463,7 @@ begin {IsAFreezingMove}
   Game.Board [FromSquareNo__] := OriginalFromSquareValue;                       {put box, if any, back on the board}
 end; {IsAFreezingMove}
 
-function  IsALegalBoxPosition(BoxPos__:Integer):Boolean;
+function  IsALegalBoxPosition(BoxPos__:Int):Boolean;
 var Direction:TDirection;
 begin {returns 'True' if a box can placed at the given square; some deadlocks depending on the player position are not taken into account;}
   with Game do begin
@@ -4407,8 +4478,8 @@ begin {returns 'True' if a box can placed at the given square; some deadlocks de
     end;
 end;
 
-function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection; PlayersReachableSquaresIndex__:Integer):Boolean;
-var i,j,k,SquareSetNo,FromSquare,InnerFloorsCount,NeighborSquare,OriginalPlayerPos,Square,ToSquare:Integer;
+function  IsALegalPush(BoxNo__:Int; Direction__:TDirection; PlayersReachableSquaresIndex__:Int):Boolean;
+var i,j,k,SquareSetNo,FromSquare,InnerFloorsCount,NeighborSquare,OriginalPlayerPos,Square,ToSquare:Int;
     SetFlags:TDeadlockSetFlagsSet;
     FromSquareSetNumbers,ToSquareSetNumbers : PDeadlockSetNumbers;
 begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
@@ -4704,7 +4775,7 @@ begin {precondition: simple constraints, e.g., the move isn't blocked by a wall}
        end;
 end;
 
-procedure MovePlayer(PlayerPos__:Integer);
+procedure MovePlayer(PlayerPos__:Int);
 begin
   with Game do begin
     Board[PlayerPos]:=Board[PlayerPos] and (not PLAYER); {remove player from the board}
@@ -4713,8 +4784,8 @@ begin
     end;
 end;
 
-procedure PutBoxOnBoard(BoxNo__,SquareNo__:Integer);
-var i:Integer;
+procedure PutBoxOnBoard(BoxNo__,SquareNo__:Int);
+var i:Int;
 begin {puts a box back on the board after it has been removed by calling 'RemoveBoxFromBoard'}
   if SquareNo__<>0 then begin
 {
@@ -4733,8 +4804,8 @@ begin {puts a box back on the board after it has been removed by calling 'Remove
      end;
 end; {PutBoxOnBoard}
 
-procedure RemoveBoxFromBoard(BoxNo__:Integer);
-var i,SquareNo:Integer;
+procedure RemoveBoxFromBoard(BoxNo__:Int);
+var i,SquareNo:Int;
 begin {removes a box from the board; normally it is put back on the board by calling 'PutBoxOnBoard'}
   SquareNo:=Game.BoxPos[BoxNo__];
   if SquareNo<>0 then begin
@@ -4762,8 +4833,8 @@ begin
      end;
 end;
 
-procedure UndoPush(BoxNo__:Integer; Direction__:TDirection);
-var i,FromSquare,ToSquare:Integer;
+procedure UndoPush(BoxNo__:Int; Direction__:TDirection);
+var i,FromSquare,ToSquare:Int;
 begin
   if BoxNo__<>0 then with Game do begin {only pushes are handled}
      Dec(PackingOrderPushCount,(Ord(Direction__) and POSITION_PACKING_ORDER_TAG) shr DIRECTION_BIT_COUNT);
@@ -4780,7 +4851,7 @@ begin
 }
      Dec(Board[FromSquare],BOX);
      Inc(Board[ToSquare  ],BOX);
-     //Board[ToSquare]:=Cardinal(Board[ToSquare] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or Cardinal(BoxNo__ shl BOX_BIT_SHIFT_COUNT) or BOX;
+     //Board[ToSquare]:=UInt(Board[ToSquare] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or UInt(BoxNo__ shl BOX_BIT_SHIFT_COUNT) or BOX;
      BoxPos[BoxNo__]:=ToSquare;
      Dec(Board[PlayerPos],PLAYER);
      PlayerPos:=ToSquare-SquareOffsetForward[Direction__];
@@ -4801,12 +4872,12 @@ begin
      end;
 end;
 
-procedure DoPull(BoxNo__:Integer; Direction__:TDirection);   {reverse mode: pulling boxes instead of pushing them}
+procedure DoPull(BoxNo__:Int; Direction__:TDirection);   {reverse mode: pulling boxes instead of pushing them}
 begin
   UndoPush(BoxNo__,OPPOSITE_DIRECTION[TDirection(Ord(Direction__) and DIRECTION_BIT_MASK)]);
 end;
 
-procedure UndoPull(BoxNo__:Integer; Direction__:TDirection); {reverse mode: pulling boxes instead of pushing them}
+procedure UndoPull(BoxNo__:Int; Direction__:TDirection); {reverse mode: pulling boxes instead of pushing them}
 begin
   DoPush  (BoxNo__,OPPOSITE_DIRECTION[TDirection(Ord(Direction__) and DIRECTION_BIT_MASK)],-1);
 end;
@@ -4816,7 +4887,7 @@ end;
 {Legend}
 
 procedure InitializeLegend(XSBNotation__:Boolean);
-var i:Integer;
+var i:Int;
 begin
   with Legend do begin
     FillChar(Legend,SizeOf(Legend),0);
@@ -4865,7 +4936,7 @@ begin {$I-}
 end; {$I+}
 
 function  LoadNextLevelFromFile(const OutputFileName__:String):Boolean; {a simple version, parsing board and optional heading titles only}
-var i,j,LineLength,BoardWidth,BoardHeight:Integer; ErrorText:String;
+var i,j,LineLength,BoardWidth,BoardHeight:Int; ErrorText:String;
     Board:array[0..MAX_BOARD_WIDTH,0..MAX_BOARD_HEIGHT] of UInt8;
 
   function  ShowError(const ErrorText__:String):Boolean;
@@ -4873,8 +4944,8 @@ var i,j,LineLength,BoardWidth,BoardHeight:Integer; ErrorText:String;
     Result:=Msg(ErrorText__+COLON+SPACE+Reader.InputFileName,'Load level from file');
   end;
 
-  function  IsABoardLine(const TextLine__:String; var Length__: Integer):Boolean;
-  var i:Integer;
+  function  IsABoardLine(const TextLine__:String; var Length__: Int):Boolean;
+  var i:Int;
   begin
     Length__:=Length(TextLine__); i:=1;
     while (Length__>0) and (Legend.CharToItem[TextLine__[Length__]]=FLOOR) do Dec(Length__); {skip trailing spaces and other floor characters, e.g., '_'}
@@ -4891,7 +4962,7 @@ var i,j,LineLength,BoardWidth,BoardHeight:Integer; ErrorText:String;
   end;
 
   function  MakeLevel(var ErrorText__:String):Boolean;
-  var Col,Row,RowOffset:Integer; PluginResult:TPluginResult;
+  var Col,Row,RowOffset:Int; PluginResult:TPluginResult;
 
     function  LoadSolution(var ErrorText__:String):Boolean;
     const
@@ -4899,7 +4970,7 @@ var i,j,LineLength,BoardWidth,BoardHeight:Integer; ErrorText:String;
       MACRO_BEGIN='<#';
 
       function  IsAMovesLine(const TextLine__:String):Boolean;
-      var i:Integer; Ch:Char;
+      var i:Int; Ch:Char;
       begin
         Result:=True;
         for i:=1 to Length(TextLine__) do begin
@@ -4977,8 +5048,8 @@ var i,j,LineLength,BoardWidth,BoardHeight:Integer; ErrorText:String;
     Result:=Result and InitializeGame(PluginResult,ErrorText__);
   end; {MakeLevel}
 
-  procedure TextLineToBoard(const TextLine__:String; Length__:Integer);
-  var Col:Integer;
+  procedure TextLineToBoard(const TextLine__:String; Length__:Int);
+  var Col:Int;
   begin {precondition: 'TextLine__' contains a legal board row}
     Inc(BoardHeight); BoardWidth:=Max(BoardWidth,Length__);
     for Col:=1 to Length__ do
@@ -5085,14 +5156,14 @@ begin {$I-}
     Result:=SaveLevelToFile(FileName__,LevelName__);
 end; {$I+}
 
-function  FirstPushToText(var PushNo__:Integer; var Text__:String):Boolean;
+function  FirstPushToText(var PushNo__:Int; var Text__:String):Boolean;
 begin
   PushNo__:=0;
   Result:=NextPushToText(PushNo__,Text__);
 end;
 
-function  NextPushToText(var PushNo__:Integer; var Text__:String):Boolean; {note that 'NextPushToText' replays the game}
-var i,PlayerSquare,MoveCount,LineCount{,Col,Row}:Integer; FinalDirection:TDirection; Moves:TSingleStepMoves;
+function  NextPushToText(var PushNo__:Int; var Text__:String):Boolean; {note that 'NextPushToText' replays the game}
+var i,PlayerSquare,MoveCount,LineCount{,Col,Row}:Int; FinalDirection:TDirection; Moves:TSingleStepMoves;
 begin {makes a string like 'ddrrU', i.e., intermediate non-pushing player-moves (lower-case) followed by the pushing move (upper-case)}
   Text__:='';
   Result:=PushNo__<Min(Game.History.Count,High(Game.History.Moves));
@@ -5117,8 +5188,8 @@ begin {makes a string like 'ddrrU', i.e., intermediate non-pushing player-moves 
      end;
 end;
 
-function  PathToText(Position__:PPosition; TextBufferSize__:Integer; MovesAsText__:PChar; var IsASolution__:Boolean; var Result__:TPluginResult):Boolean;
-var i,CharCount,MoveCount,LineCount,OldPlayerSquare,PlayerFromSquare:Integer;
+function  PathToText(Position__:PPosition; TextBufferSize__:Int; MovesAsText__:PChar; var IsASolution__:Boolean; var Result__:TPluginResult):Boolean;
+var i,CharCount,MoveCount,LineCount,OldPlayerSquare,PlayerFromSquare:Int;
     FinalDirection:TDirection; MovesAsText:String;
     Next,This:PPosition; Moves:TSingleStepMoves;
     OldBoard:TBoard; OldBoxPos:TBoxSquares; OldDeadlockSetCapacities:TDeadlockSetCapacities;
@@ -5236,7 +5307,7 @@ begin {$I-}
 end; {$I+}
 
 function  WriteLevelToFile({const} var F:Text; const LevelName__:String):Boolean;
-var PushNo,Row:Integer; PluginResult:TPluginResult;
+var PushNo,Row:Int; PluginResult:TPluginResult;
     s,s1,s2:String; BoardAsTextLines:TBoardAsTextLines;
 begin {$I-}
   Result:=True;
@@ -5296,7 +5367,7 @@ begin {$I-}
 end; {$I+}
 
 function  WritePathToFile(Position__:POptimizerPosition; {const} var F:Text; var PluginResult__:TPluginResult):Boolean; // only implemented for optimizer positions, i.e., positions of type 'TOptimizerPosition'
-var i:Integer; IsASolution:Boolean; s,s1:String;
+var i:Int; IsASolution:Boolean; s,s1:String;
 begin {$I-} {precondition: the game has been reset to the starting position}
   Result:=False;
   if Optimizer.Enabled and
@@ -5337,7 +5408,7 @@ begin {returns 'True' if 'Position__' is a member of the transposition table fre
      until  Result or (p=nil) or (p=Positions.FreeList);
 end;
 
-function  OPENCheckBucket(BucketIndex__:Integer):Boolean;
+function  OPENCheckBucket(BucketIndex__:Int):Boolean;
 var p:PPosition;
 begin {for debugging purposes: checks that positions in an open-queue bucket aren't on the free-list too}
   with Positions do with OpenPositions do begin
@@ -5442,12 +5513,12 @@ begin {puts all partially expanded positions on the open-list}
 end;
 
 function  OPENCheck(const Caption__:String):Boolean;
-var BucketNo:Integer; MemberCount:Cardinal;
+var BucketNo:Int; MemberCount:UInt;
 begin
   with Positions.OpenPositions do begin
     MemberCount:=0;
     //for BucketNo:=Low(Buckets) to High(Buckets) do Inc(MemberCount,OPENListLength(Buckets[BucketNo]));
-    for BucketNo:=MinValue to MaxValue do MemberCount:=MemberCount+Cardinal(OPENListLength(Buckets[BucketNo]));
+    for BucketNo:=MinValue to MaxValue do MemberCount:=MemberCount+UInt(OPENListLength(Buckets[BucketNo]));
     Result:=MemberCount=Count;
     if not Result then Msg(TEXT_INTERNAL_ERROR+': '+Caption__,TEXT_APPLICATION_TITLE);
     end;
@@ -5463,9 +5534,9 @@ begin {open positions: clear open-queue}
     end;
 end;
 
-function  OPENDropPositions(DepthLimit__:Integer):Integer;
+function  OPENDropPositions(DepthLimit__:Int):Int;
 var {$IFDEF CONSOLE_APPLICATION}
-      OriginalCount:Integer;
+      OriginalCount:Int;
     {$ENDIF}
     p:PPosition;
 begin {open positions: drop positions with score >= 'DepthLimit__'; the positions are removed from the transposition-table as well}
@@ -5496,7 +5567,7 @@ begin {open positions: drop positions with score >= 'DepthLimit__'; the position
 end;
 
 function  OPENIsAMember(Position__:PPosition):Boolean;
-var i:Integer; p,Root:PPosition;
+var i:Int; p,Root:PPosition;
 begin {open positions: is 'Position__' a member of the open-queue?}
   Result:=False;
   with Positions.OpenPositions do
@@ -5511,18 +5582,18 @@ begin {open positions: is 'Position__' a member of the open-queue?}
         end;
 end;
 
-function  OPENListLength(Position__:PPosition):Integer;
+function  OPENListLength(Position__:PPosition):Int;
 var BasePosition:PPosition;
 begin {open positions: number of nodes in the chain having 'Position__' as a member}
   Result:=0;
-  Position__:=PPosition(Cardinal(Position__) {and POSITION_POINTER_MASK});
+  Position__:=PPosition(UInt(Position__) {and POSITION_POINTER_MASK});
   if Position__<>nil then begin
      BasePosition:=Position__;
      repeat Inc(Result);
-            Position__:=PPosition(Cardinal(Position__^.ScoreBucket.Next) {and POSITION_POINTER_MASK});
-            //if Position__<>PPosition(Cardinal(Position__^.ScoreBucket.Prev) {and POSITION_POINTER_MASK})^.ScoreBucket.Next then
+            Position__:=PPosition(UInt(Position__^.ScoreBucket.Next) {and POSITION_POINTER_MASK});
+            //if Position__<>PPosition(UInt(Position__^.ScoreBucket.Prev) {and POSITION_POINTER_MASK})^.ScoreBucket.Next then
             //   Msg(TEXT_INTERNAL_ERROR+': "OPENListLength" (links) '+IntToStr(Solver.PushCount),TEXT_APPLICATION_TITLE);
-            //if Position__^.Score<>PPosition(Cardinal(Position__^.ScoreBucket.Prev) {and POSITION_POINTER_MASK})^.Score then
+            //if Position__^.Score<>PPosition(UInt(Position__^.ScoreBucket.Prev) {and POSITION_POINTER_MASK})^.Score then
             //   Msg(TEXT_INTERNAL_ERROR+': "OPENListLength" (score) '+IntToStr(Solver.PushCount),TEXT_APPLICATION_TITLE);
             //if (Ord(Position__^.Move.Direction) and POSITION_OPEN_TAG)=0 then
             //   Msg(TEXT_INTERNAL_ERROR+': "OPENListLength" (tag) '+IntToStr(Solver.PushCount),TEXT_APPLICATION_TITLE);
@@ -5530,15 +5601,15 @@ begin {open positions: number of nodes in the chain having 'Position__' as a mem
      end;
 end;
 
-function  OPENListLengthReverse(Position__:PPosition):Integer;
+function  OPENListLengthReverse(Position__:PPosition):Int;
 var BasePosition:PPosition;
 begin {open positions: number of nodes in the chain having 'Position__' as a member}
   Result:=0;
   if Position__<>nil then begin
-     Position__:=PPosition(Cardinal(Position__) {and POSITION_POINTER_MASK});
+     Position__:=PPosition(UInt(Position__) {and POSITION_POINTER_MASK});
      BasePosition:=Position__;
      repeat Inc(Result);
-            Position__:=PPosition(Cardinal(Position__^.ScoreBucket.Prev) {and POSITION_POINTER_MASK});
+            Position__:=PPosition(UInt(Position__^.ScoreBucket.Prev) {and POSITION_POINTER_MASK});
      until  Position__=BasePosition;
      end;
 end;
@@ -5594,7 +5665,7 @@ begin {open positions: remove best item, or in case of packing order search,
        {$ENDIF}
 
        if (Solver.PackingOrder.SetCount>0) and {with packing order search, the solver isn't searching for an optimal solutions, hence, it's all right to expand positions in any order}
-          ((PInteger(Addr(Solver.PushCount))^ and (Solver.ProgressCheckPoint.OpenListEscapeInterval))=0) then begin {'PInteger': 'Solver.PushCount' is a double integer, but here it's enough to look at its integer part}
+          ((PInt(Addr(Solver.PushCount))^ and (Solver.ProgressCheckPoint.OpenListEscapeInterval))=0) then begin
           //(not Game.DeadlockSets.NewDynamicDeadlockSets) then begin {focus on the most promising positions when there are new dynamic deadlock-sets; there is probably fewer of them which are deadlocked}
           repeat Inc(NoProgressRover);
           until  (NoProgressRover>MaxValue) or (Buckets[NoProgressRover]<>nil);
@@ -5643,7 +5714,7 @@ begin {open positions: worst item}
 end;
 
 function  OPENWorstUnprotected:PPosition;
-var RoverValue:Integer; Rover:PPosition;
+var RoverValue:Int; Rover:PPosition;
 begin {open positions: worst un-protected item}
   with Positions.OpenPositions do begin
     Result:=nil;
@@ -5683,7 +5754,7 @@ end;
 
 {Position list}
 
-procedure PLAddToFront(Position__:PPosition; var List__:PPosition; var Count__:Integer); {add item to the front of the list}
+procedure PLAddToFront(Position__:PPosition; var List__:PPosition; var Count__:Int); {add item to the front of the list}
 begin {position list: add item to the front of the list}
   if List__<>nil then with Position__^.ListLinks do begin                       {'<> nil': non-empty list}
      Prev:=List__^.ListLinks.Prev;                                              {link this position}
@@ -5698,7 +5769,7 @@ begin {position list: add item to the front of the list}
   Inc(Count__);
 end;
 
-procedure PLRemove(Position__:PPosition; var List__:PPosition; var Count__:Cardinal);
+procedure PLRemove(Position__:PPosition; var List__:PPosition; var Count__:UInt);
 begin {position list: remove item}
   with Position__^.ListLinks do begin
     Prev^.ListLinks.Next:=Next;                                                 {unlink this position}
@@ -5716,8 +5787,8 @@ end;
 
 {Transposition Table}
 
-function  TTLoad( const FileName__ : String; var Count__ : Integer; var Vector__ : PHashValueVector ) : Boolean;
-var ByteSize, BytesRead : Integer;
+function  TTLoad( const FileName__ : String; var Count__ : Int; var Vector__ : PHashValueVector ) : Boolean;
+var ByteSize, BytesRead : Int32;
     F : File;
 begin {$I-}
   {transposition table: load previously saved hash values from disk}
@@ -5742,10 +5813,10 @@ begin {$I-}
      Msg(TEXT_FILE_IO_ERROR, FileName__);
 end; {$I+}
 
-function  TTSave( const FileName__ : String ) : Integer;
+function  TTSave( const FileName__ : String ) : Int;
 const BUFFER_BYTE_SIZE=8*ONE_KIBI;
       BUFFER_CAPACITY=BUFFER_BYTE_SIZE div SizeOf(THashValue);
-var Index, ItemCount : Integer;
+var Index, ItemCount : Int;
     F : File;
     Items:array[0.. BUFFER_CAPACITY - 1] of THashValue;
 begin {$I-}
@@ -5755,7 +5826,7 @@ begin {$I-}
   AssignFile( F, FileName__ );
   Rewrite( F, 1 );
   ItemCount := 0;
-  for Index := 0 to Pred( Cardinal( Positions.Capacity ) - Cardinal( Positions.UninitializedItemCount ) ) do begin
+  for Index := 0 to Pred( UInt( Positions.Capacity ) - UInt( Positions.UninitializedItemCount ) ) do begin
       if ItemCount >= BUFFER_CAPACITY then begin
          BlockWrite(F, PByte(Addr(Items[Low( Items )]))^, SizeOf(Items[ Low( Items )]) * ItemCount );
          ItemCount := 0;
@@ -5776,7 +5847,7 @@ begin {$I-}
      end;
 end; {$I+}
 
-function  TTCheckBucket(const Caption__:String; HashBucket__:Integer):Boolean;
+function  TTCheckBucket(const Caption__:String; HashBucket__:Int):Boolean;
 var BasePosition,Position:PPosition;
 begin
   Result:=True;
@@ -5796,11 +5867,11 @@ begin
   else Writeln;
 end;
 
-function  TTReallocateMemoryBlock( var Block__ : Pointer; var ByteSize__ : Integer; NewByteSize__ : Integer ) : Boolean;
-var ItemCount : Integer;
+function  TTReallocateMemoryBlock( var Block__ : Pointer; var ByteSize__ : Int; NewByteSize__ : Int ) : Boolean;
+var ItemCount : Int;
 
-  procedure FreeMemoryBlock( var Block__ : Pointer; var ByteSize__ : Integer );
-  var Index : Integer;
+  procedure FreeMemoryBlock( var Block__ : Pointer; var ByteSize__ : Int );
+  var Index : Int;
   begin // returns the free memory block to the positions free list
     for Index := 0 to Pred( ByteSize__ div SizeOf( TPosition ) ) do begin
         PPosition( Block__ )^.PlayerPos := 0;                                   {marks the item as unused}
@@ -5837,11 +5908,11 @@ begin // 'TTReallocateMemoryBlock' reallocates, allocates, or releases a memory
 end;
 
 function  TTAdd(HashValue__:THashValue;
-                PlayerPos__,PushCount__,Score__,BoxNo__:Integer;
+                PlayerPos__,PushCount__,Score__,BoxNo__:Int;
                 Direction__:TDirection;
                 Parent__:PPosition;
                 var Position__:PPosition):Boolean;
-var HashBucketIndex:Integer; NextPosition:PPosition;
+var HashBucketIndex:Int; NextPosition:PPosition;
 begin {transposition table: add new item unless it already is in the table}
       {precondition:
        * 'Solver.SearchStates[PushCount__].PlayersReachableSquares.Calculated' is set correctly;}
@@ -5901,7 +5972,7 @@ begin {transposition table: add new item unless it already is in the table}
                      Position__:=nil;                                           {transposition-table full}
           end
        else begin {not all items have been used yet, hence, get the next free item in memory}
-          Position__:=PPosition(Addr(Positions^[Capacity-Cardinal(UninitializedItemCount)]));
+          Position__:=PPosition(Addr(Positions^[Capacity-UInt(UninitializedItemCount)]));
           Dec(UninitializedItemCount);
           end;
 
@@ -6056,11 +6127,11 @@ begin {transposition table: add new item unless it already is in the table}
                 end;
 end;
 
-function  TTIndexOf(Position__:PPosition):Integer; forward;
+function  TTIndexOf(Position__:PPosition):Int; forward;
 
-function  TTCalculatePerimeter:Integer;
+function  TTCalculatePerimeter:Int;
 const BUFFER_BYTE_SIZE=8*ONE_KIBI;
-var i,HashBucketIndex,LastItemIndex,BufferItemCount:Integer; InteriorNodesCount:Cardinal;
+var i,HashBucketIndex,LastItemIndex,BufferItemCount:Int; InteriorNodesCount:UInt;
     {$IFDEF CONSOLE_APPLICATION}
       TimeMS:TTimeMS; s:String;
     {$ENDIF}
@@ -6093,9 +6164,9 @@ begin {$I-}
            CreateGraphFile(ExtractFileName(ParamStr(0)))
          {$ELSE}
            CreateGraphFile(TEXT_APPLICATION_TITLE+GRAPH_FILE_EXT)
-         {$ENDIF}           
+         {$ENDIF}
         ) then begin
-        LastItemIndex:=Integer(Pred(Capacity-Cardinal(UninitializedItemCount)));
+        LastItemIndex:=Int(Pred(Capacity-UInt(UninitializedItemCount)));
 
         Seek(GraphFile.GraphFile,Succ(LastItemIndex)*SizeOf(GraphFileItems[0]));{reserve diskspace in one operation instead of extending the file with one buffer block at a time}
         FillChar(GraphFileItems[0],SizeOf(GraphFileItems[0]),0);                {initalize the record so the compiler doesn't complain about an un-initialized variable}
@@ -6209,8 +6280,8 @@ begin {$I-}
 
      Statistics.DroppedCount:=Statistics.DroppedCount+InteriorNodesCount;
      if   Result>=0 then begin
-          if Cardinal(Result)+InteriorNodesCount<>Count then
-             Msg(TEXT_INTERNAL_ERROR+SPACE+LEFT_PAREN+IntToStr(Cardinal(Result)+InteriorNodesCount-Count)+RIGHT_PAREN,'TTCalculatePerimeter');
+          if UInt(Result)+InteriorNodesCount<>Count then
+             Msg(TEXT_INTERNAL_ERROR+SPACE+LEFT_PAREN+IntToStr(UInt(Result)+InteriorNodesCount-Count)+RIGHT_PAREN,'TTCalculatePerimeter');
           Count:=Result; PerimeterListCount:=Result;
           end
      else PerimeterListCount:=High(PerimeterListCount); {'High': task failed}
@@ -6250,7 +6321,7 @@ begin {$I-}
 end; {$I+}
 
 procedure TTClear(ClearStatistics__:Boolean);
-var SquareNo : Integer; //Position:PPosition;
+var SquareNo : Int; //Position:PPosition;
 begin {transposition table: clear table, keeping precalculated deadlock-sets, if any}
   with Positions do begin
     Count                         :=0;
@@ -6265,8 +6336,8 @@ begin {transposition table: clear table, keeping precalculated deadlock-sets, if
     BestScore                     := High( BestScore );
     if Positions<>nil then begin
        if HighWaterMark<>nil then
-          Capacity                := ( Cardinal( HighWaterMark ) - Cardinal( Positions ) ) div SizeOf( TPosition );
-       UninitializedItemCount     := Integer(Capacity); {add one item at a time to the transposition-table instead of building a free-list with all the items in memory}
+          Capacity                := ( UInt( HighWaterMark ) - UInt( Positions ) ) div SizeOf( TPosition );
+       UninitializedItemCount     := Int(Capacity); {add one item at a time to the transposition-table instead of building a free-list with all the items in memory}
 (*
        for i:=Pred(Capacity) downto 0 do begin  {build a free-list with all the items in memory}
            Position:=Addr(Positions^[i]);       {current item}
@@ -6307,7 +6378,7 @@ begin
     end;
 end;
 
-function  TTIndexOf(Position__:PPosition):Integer;
+function  TTIndexOf(Position__:PPosition):Int;
 begin {transposition table: returns vector index for the item at 'Position__'}
   Result:=(UInt(Position__)-UInt(Positions.Positions)) div SizeOf(Position__^);
 end;
@@ -6320,16 +6391,16 @@ begin {transposition table: returns 'True' if 'Position__' is on the path leadin
     else Result:=True;
 end;
 
-function  TTInitialize(MemoryByteSize__:Cardinal):Boolean;
-var i,j:Integer;
-    PositionSize,HashBucketVectorSize,HashBucketItemSize:Cardinal;
+function  TTInitialize(MemoryByteSize__:UInt):Boolean;
+var i,j:Int;
+    PositionSize,HashBucketVectorSize,HashBucketItemSize:UInt;
     RandomState:TRandomState;
 begin {transposition table: allocates memory, initializes data structures for the positions, and initializes constants for Zobrist hash key values}
 //MemoryByteSize__:=256*ONE_MEBI;
   Result                    :=False;
   FillChar(Positions,SizeOf(Positions),0);
 //MemoryByteSize__          :=Min(MemoryByteSize__,High(Positions.MemoryByteSize));
-  MemoryByteSize__          :=Min(MemoryByteSize__,MaxInt);
+  MemoryByteSize__          :=Min(MemoryByteSize__,High(Int));
   PositionSize              :=SizeOf(Positions.Positions^[Low(Positions.Positions^)]);
   HashBucketItemSize        :=SizeOf(Positions.HashBuckets^[Low(Positions.HashBuckets^)]);
 
@@ -6356,7 +6427,7 @@ begin {transposition table: allocates memory, initializes data structures for th
         {calculate the size of the memory to reserve for the hash-buckets}
         HashBucketCount:=1; Capacity:=0;
         repeat i:=HashBucketCount shl 1;
-               HashBucketVectorSize:=Cardinal(i)*HashBucketItemSize;
+               HashBucketVectorSize:=UInt(i)*HashBucketItemSize;
                if   MemoryByteSize>=HashBucketVectorSize then begin
                     j:=(MemoryByteSize-HashBucketVectorSize) div PositionSize;  // calculate the number of positions after reservation of 'i' buckets
                     if j>0 then begin
@@ -6376,39 +6447,39 @@ begin {transposition table: allocates memory, initializes data structures for th
      end;
 
   InitializeRandomState(0, RandomState);
-  for i:=0 to 255 do if Random(MaxInt,RandomState)=0 then;                      {warm up the random number generator}
+  for i:=0 to 255 do if Random(High(Int),RandomState)=0 then;                   {warm up the random number generator}
 
   with Positions do
     for i:=Low(SquareHashValues) to High(SquareHashValues) do                   {initialize the hash square values used for calculating Zobrist hash-keys}
         repeat
           SquareHashValues[i]:=
-            Abs(Abs((THashValue(Random(MaxInt,RandomState)) shl 48))+
-                Abs((THashValue(Random(MaxInt,RandomState)) shl 32))+
-                Abs((THashValue(Random(MaxInt,RandomState)) shl 16))+
-                Abs((THashValue(Random(MaxInt,RandomState)) shl 8 ))+
-                Abs((THashValue(Random(MaxInt,RandomState)))));
+            Abs(Abs((THashValue(Random(High(Int),RandomState)) shl 48))+
+                Abs((THashValue(Random(High(Int),RandomState)) shl 32))+
+                Abs((THashValue(Random(High(Int),RandomState)) shl 16))+
+                Abs((THashValue(Random(High(Int),RandomState)) shl 8 ))+
+                Abs((THashValue(Random(High(Int),RandomState)))));
           for j:=0 to Pred(i) do                                                {avoid duplicates}
               if SquareHashValues[j]=SquareHashValues[i] then
                  SquareHashValues[i]:=0;
-        until SquareHashValues[i]>MaxInt;
+        until SquareHashValues[i]>High(Int32);
 end;
 
-function  TTListLength(Position__:PPosition):Integer;
+function  TTListLength(Position__:PPosition):Int;
 var BasePosition:PPosition;
 begin {transposition table: number of nodes in the chain having 'Position__' as a member}
   Result:=0;
   if Position__<>nil then begin
-     Position__:=PPosition(Cardinal(Position__) {and POSITION_POINTER_MASK});
+     Position__:=PPosition(UInt(Position__) {and POSITION_POINTER_MASK});
      BasePosition:=Position__;
      repeat Inc(Result);
-            Position__:=PPosition(Cardinal(Position__^.HashBucket.Next) {and POSITION_POINTER_MASK});
+            Position__:=PPosition(UInt(Position__^.HashBucket.Next) {and POSITION_POINTER_MASK});
      until  (Position__=nil) or (Position__=BasePosition);
      end;
 end;
 
-function  TTLookup(HashValue__:THashValue; PlayerPos__,SearchDepth__:Integer;
+function  TTLookup(HashValue__:THashValue; PlayerPos__,SearchDepth__:Int;
                    var Position__:PPosition):Boolean;
-var HashBucketIndex:Integer; BasePosition:PPosition;
+var HashBucketIndex:Int; BasePosition:PPosition;
 begin {transposition table: test if a key already exists in the table;}
       {preconditions:
        * 'PlayerPos__' = 'Game.PlayerPos' for real positions;
@@ -6476,7 +6547,7 @@ begin {transposition table: test if a key already exists in the table;}
 end;
 
 procedure TTRemove(Position__:PPosition);
-var HashBucketIndex:Integer;
+var HashBucketIndex:Int;
 begin {transposition table: remove item; precondition: 'Position__' is a fringe-node, i.e., not an interior node (no 'Parent' pointers back to this item)}
 //if Position__=Positions.CurrentPosition then
 //   Msg(TEXT_INTERNAL_ERROR,'TTRemove - current position');
@@ -6516,13 +6587,13 @@ end;
 
 {Pathfinding}
 
-function  CalculateBoxPullOrPushDistances(BoxSquare__,PlayersReachableSquaresIndex__:Integer;
+function  CalculateBoxPullOrPushDistances(BoxSquare__,PlayersReachableSquaresIndex__:Int;
                                           PushBox__,UsePlayerPosition__,ContinueCalculation__,CountReachableSquares__:Boolean;
-                                          var Distances__:TSquareDirectionArrayOfInteger):Integer;
-type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
+                                          var Distances__:TSquareDirectionArrayOfInteger):Int;
+type TQueueItem=record BoxPos,PlayerPos,Distance:Int; end;
 var  BoxPosition,BoxToSquare,Distance,DistanceInitializationValue,
      LastBoxPosition,NeighborSquare,
-     OldBoxSquareValue,OldPlayerPosition,PlayerFromSquare,PlayerToSquare,Square:Integer;
+     OldBoxSquareValue,OldPlayerPosition,PlayerFromSquare,PlayerToSquare,Square:Int;
      Direction:TDirection;
      QueueBottom,QueueTop:^TQueueItem;
      QueueItems:array[0..MAX_BOARD_SIZE*DIRECTION_COUNT] of TQueueItem;
@@ -6657,10 +6728,10 @@ begin {calculates the distance to all reachable squares by pulling or pushing a 
     end;
 end; {CalculateBoxPullOrPushDistances}
 
-procedure CalculateDistanceToNearestBoxStartPositionForAllSquares(FirstBoxNo__,LastBoxNo__:Integer; UsePlayerStartPosition__:Boolean; var Distances__:TBoardOfIntegers);
-type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
+procedure CalculateDistanceToNearestBoxStartPositionForAllSquares(FirstBoxNo__,LastBoxNo__:Int; UsePlayerStartPosition__:Boolean; var Distances__:TBoardOfIntegers);
+type TQueueItem=record BoxPos,PlayerPos,Distance:Int; end;
 var  BoxNo,BoxPosition,BoxToSquare,Distance,LastBoxPosition,
-     NeighborSquare,OldPlayerPosition,PlayerFromSquare,Square:Integer;
+     NeighborSquare,OldPlayerPosition,PlayerFromSquare,Square:Int;
      Direction:TDirection;
      Distances:TSquareDirectionArrayOfInteger;
      QueueBottom,QueueTop:^TQueueItem;
@@ -6761,9 +6832,9 @@ begin {calculates - for all squares on the (empty) board - the distance to the n
 end; {CalculateDistanceToNearestBoxStartPositionForAllSquares}
 
 procedure CalculateDistanceToNearestGoalForAllSquares(MarkIllegalBoxSquares__:Boolean; var Distances__:TBoardOfIntegers);
-type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
+type TQueueItem=record BoxPos,PlayerPos,Distance:Int; end;
 var  BoxNo,BoxPosition,BoxToSquare,Distance,GoalNo,GoalSquare,LastBoxPosition,
-     OldPlayerPosition,PlayerToSquare,Square:Integer;
+     OldPlayerPosition,PlayerToSquare,Square:Int;
      Direction:TDirection;
      Distances:TSquareDirectionArrayOfInteger;
      QueueBottom,QueueTop:^TQueueItem;
@@ -6857,8 +6928,8 @@ begin
     end;
 end; {CalculateDistanceToNearestGoalForAllSquares}
 
-function  CalculateBoxReachableSquaresForAllBoxes:Integer;
-var Square:Integer; Distances:TBoardOfIntegers;
+function  CalculateBoxReachableSquaresForAllBoxes:Int;
+var Square:Int; Distances:TBoardOfIntegers;
 begin {note that the player's start position does matter, but otherwise each box is calculated individually with all other boxes removed from the board}
   with Game do begin
     Result:=0;
@@ -6878,9 +6949,9 @@ begin {note that the player's start position does matter, but otherwise each box
 end;
 
 (* calculation of a player path optimizing moves only, i.e., no secondary optimization of player lines
-function  CalculatePlayerPath(FromSquare__,ToSquare__:Integer; MakeMoves__:Boolean; var MoveCount__:Integer; var Moves__:TSingleStepMoves):Boolean;
+function  CalculatePlayerPath(FromSquare__,ToSquare__:Int; MakeMoves__:Boolean; var MoveCount__:Int; var Moves__:TSingleStepMoves):Boolean;
 var
-  Square,FromSquare__,SuccessorDistance:Integer; QueueBottom,QueueTop:^Integer; Direction:TDirection;
+  Square,FromSquare__,SuccessorDistance:Int; QueueBottom,QueueTop:^Int; Direction:TDirection;
   Distances,ParentSquares,QueueItems:TBoardOfIntegers; Directions:array[0..MAX_BOARD_SIZE] of TDirection;
 begin
   FromSquare__:=Game.PlayerPos;
@@ -6926,26 +6997,26 @@ begin
 end;
 *)
 
-function  CalculatePlayerPath(ToSquare__:Integer;
+function  CalculatePlayerPath(ToSquare__:Int;
                               PreferredFinalDirection__:TDirection;
                               MakeMoves__:Boolean;
-                              var MoveCount__,LineCount__:Integer;
+                              var MoveCount__,LineCount__:Int;
                               var FinalDirection__:TDirection;
                               var Moves__:TSingleStepMoves):Boolean;
 const BITS_PER_PLAYER_LINE_LENGTH=8; {each player line has this number of  bits to represent its length; precondition: remainder(BITS_PER_UNSIGNED_INTEGER div BITS_PER_PLAYER_LINE_LENGTH) = 0}
-var   Distance,StopIndex,Square,NeighborSquare:Integer;
+var   Distance,StopIndex,Square,NeighborSquare:Int;
       LineCount,LineLength,NeighborLineCount,NeighborLineLength:UInt;
       NeighborTimeStamp,NextTimeStamp:TTimeStamp;
       Direction,LineDirection,NextLineDirection:TDirection;
       Directions:TDirectionSet;
-      QueueBottom,QueueTop:^Integer; Queue:TBoardOfIntegers;
+      QueueBottom,QueueTop:^Int; Queue:TBoardOfIntegers;
       LineCounts,LineLengths:TBoardOfUnsignedIntegers;
       ParentDirections:TBoardOfDirectionSets;
 begin {Calculates a moves/lines optimal path from the current player position to the square 'ToSquare__', using the most recent player line lengths for tiebreaking}
       {Precondition: 'Solver.SearchStates[0]' is free to use}
   with Solver.SearchStates[0].PlayersReachableSquares do begin
     if TimeStamp>=High(TimeStamp)-MAX_BOARD_SIZE-100 then ClearPlayersReachableSquares(0); {'100' (and '50' in the next line): ensure that 'TimeStamp-1' cannot occur as a leftover from the previous calculation}
-    TimeStamp:=(TimeStamp+Cardinal(Game.BoardSize)+50) and (not 1); {'not 1': enforce even parity for compatibility with 'CalculatePlayersReachableSquares'}
+    TimeStamp:=(TimeStamp+UInt(Game.BoardSize)+50) and (not 1); {'not 1': enforce even parity for compatibility with 'CalculatePlayersReachableSquares'}
     Result:=False; Calculated:=True; MinPlayerPos:=Game.PlayerPos;
     {calculated square values: reachable empty floors = timestamp + distance + 1; reachable boxes = timestamp}
 
@@ -7015,7 +7086,7 @@ begin {Calculates a moves/lines optimal path from the current player position to
            QueueBottom:=QueueTop; {exit the 'while' loop, i.e., stop the search; the breadth-first search ensures that all paths to the target square have been explored at the time the target square is selected for expansion}
 
            Result          :=True; {'True': there is a path from the current player position to the target square}
-           MoveCount__     :=Pred(Integer(Squares[Square]-TimeStamp)); {return the number of pushes it takes to get to the target square}
+           MoveCount__     :=Pred(Int(Squares[Square]-TimeStamp)); {return the number of pushes it takes to get to the target square}
            LineCount__     :=LineCounts[Square]; {return the number of lines it takes to get to the target square}
 
            FinalDirection__:=PreferredFinalDirection__; {initialize the final direction}
@@ -7081,8 +7152,8 @@ begin {Calculates a moves/lines optimal path from the current player position to
     end;
 end; {CalculatePlayerPath}
 
-procedure ClearPlayersReachableSquares(Index__:Integer);
-var i:Integer;
+procedure ClearPlayersReachableSquares(Index__:Int);
+var i:Int;
 begin {a complete reset of the square timestamps is only necessary on initialization and when the timestamp overflows}
   with Solver.SearchStates[Index__].PlayersReachableSquares do begin
     TimeStamp:=0; Calculated:=False;
@@ -7094,8 +7165,8 @@ begin {a complete reset of the square timestamps is only necessary on initializa
 end;
 
 (*
-function  CanUsePlayersReachableSquaresFromPredecessor(PredecessorDepth__,BoxNo__:Integer; Direction__:TDirection):Boolean;
-var BoxSquare,Mask:Integer; NeighborSquares:array[0..5] of Integer;
+function  CanUsePlayersReachableSquaresFromPredecessor(PredecessorDepth__,BoxNo__:Int; Direction__:TDirection):Boolean;
+var BoxSquare,Mask:Int; NeighborSquares:array[0..5] of Int;
 {
 Legend:
 |             : unspecified
@@ -7241,8 +7312,8 @@ begin {CanUsePlayersReachableSquaresFromPredecessor}
 end; {CanUsePlayersReachableSquaresFromPredecessor}
 *)
 
-function  CanUsePlayersReachableSquaresFromPredecessor(PredecessorDepth__,BoxNo__:Integer; Direction__:TDirection):Boolean;
-var BoxToSquare:Integer;
+function  CanUsePlayersReachableSquaresFromPredecessor(PredecessorDepth__,BoxNo__:Int; Direction__:TDirection):Boolean;
+var BoxToSquare:Int;
 begin {CanUsePlayersReachableSquaresFromPredecessor}
   with Game do with Solver.SearchStates[PredecessorDepth__].PlayersReachableSquares do begin
     BoxToSquare:=BoxPos[BoxNo__]+SquareOffsetForward[Direction__];
@@ -7255,13 +7326,13 @@ begin {CanUsePlayersReachableSquaresFromPredecessor}
     end;
 end; {CanUsePlayersReachableSquaresFromPredecessor}
 
-function  CalculatePlayersDistanceToReachableSquares(Index__:Integer):Integer;
-var Square,NeighborSquare,NeighborSquareTimeStamp:Integer; Direction:TDirection;
-    QueueBottom,QueueTop:^Integer; Queue:array[0..MAX_BOARD_SIZE] of Integer;
+function  CalculatePlayersDistanceToReachableSquares(Index__:Int):Int;
+var Square,NeighborSquare,NeighborSquareTimeStamp:Int; Direction:TDirection;
+    QueueBottom,QueueTop:^Int; Queue:array[0..MAX_BOARD_SIZE] of Int;
 begin {Returns player's distance to reachable squares in the global value 'Solver.SearchStates[Index__].PlayersReachableSquares'}
   with Solver.SearchStates[Index__].PlayersReachableSquares do begin
     if TimeStamp>=PLAYERS_REACHABLE_SQUARES_TIMESTAMP_UPPER_BOUND then ClearPlayersReachableSquares(Index__);
-    TimeStamp:=(TimeStamp+Cardinal(Game.BoardSize)+4) and (not 1); {'not 1': enforce even parity for compatibility with 'CalculatePlayersReachableSquares'}
+    TimeStamp:=(TimeStamp+UInt(Game.BoardSize)+4) and (not 1); {'not 1': enforce even parity for compatibility with 'CalculatePlayersReachableSquares'}
     Result:=0; Calculated:=True; MinPlayerPos:=Game.PlayerPos;
     {calculated square values: reachable empty floors = timestamp + distance + 1; reachable boxes = timestamp}
 
@@ -7292,9 +7363,9 @@ begin {Returns player's distance to reachable squares in the global value 'Solve
     end;
 end; {CalculatePlayersDistanceToReachableSquares}
 
-function  CalculatePlayersReachableSquares(Index__:Integer):Integer;
-var {Index,}Square,NeighborSquare:Integer; Direction:TDirection;
-    StackTop:^Integer; Stack:array[0..MAX_BOARD_SIZE] of Integer;
+function  CalculatePlayersReachableSquares(Index__:Int):Int;
+var {Index,}Square,NeighborSquare:Int; Direction:TDirection;
+    StackTop:^Int; Stack:array[0..MAX_BOARD_SIZE] of Int;
 begin {Returns result in the global value 'Solver.SearchStates[Index__].PlayersReachableSquares'}
   with Solver.SearchStates[Index__].PlayersReachableSquares do begin
     if False and {'False': re-using the player's reachable squares isn't fully implemented, hence it's disabled here}
@@ -7347,7 +7418,7 @@ begin {Returns result in the global value 'Solver.SearchStates[Index__].PlayersR
 end; {CalculatePlayersReachableSquares}
 
 function  CalculateReachableGoalsForAllSquares(PushBox__:Boolean; var SquaresGoalsCount__:TBoardOfIntegers; var SquaresGoalSet__:TBoardOfGoalSets):Boolean;
-var Count,GoalNo,GoalSquare,Square:Integer; Direction:TDirection;
+var Count,GoalNo,GoalSquare,Square:Int; Direction:TDirection;
     Distances:TSquareDirectionArrayOfInteger;
 begin {returns 'True' if the calculation runs to its completion; a time limit or the user may terminate the task during the calculation}
   with Game do begin
@@ -7398,7 +7469,7 @@ begin {returns 'True' if the calculation runs to its completion; a time limit or
 end;
 
 function  TestCalculateReachableGoalsForAllSquares:Boolean;
-var BoxNo,GoalNo,Square:Integer;
+var BoxNo,GoalNo,Square:Int;
     Time1MS,Time2MS:TTimeMS;
     SquaresGoalsCount1,SquaresGoalsCount2:TBoardOfIntegers;
     SquaresGoalSet1,SquaresGoalSet2:TBoardOfGoalSets;
@@ -7446,16 +7517,16 @@ end;
 
 
 procedure CalculateSquareStartBoxPositionDistances(var SquareTargetDistance__           :TSquareTargetDistance;
-                                                   var SquareTargetDistanceScaleFactor__:Integer;
+                                                   var SquareTargetDistanceScaleFactor__:Int;
                                                    var BoxGoalSets__                    :TBoxGoalSets);
-type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
-var  BoxNo,GoalNo,OldPlayerPosition,Square:Integer;
+type TQueueItem=record BoxPos,PlayerPos,Distance:Int; end;
+var  BoxNo,GoalNo,OldPlayerPosition,Square:Int;
      StartTimeMS:TTimeMS;
      Direction:TDirection;
      Distances:TSquareDirectionArrayOfInteger;
 
-  procedure ShowSquareTargetDistance(BoxNo__:Integer; const SquareTargetDistance__:TSquareTargetDistance);
-  var Col,Row,Square,Distance:Integer;
+  procedure ShowSquareTargetDistance(BoxNo__:Int; const SquareTargetDistance__:TSquareTargetDistance);
+  var Col,Row,Square,Distance:Int;
   begin
     Writeln('Box: ',BoxNo__);
     with Game do
@@ -7518,25 +7589,25 @@ begin {CalculateSquareStartBoxPositionDistances}
     for BoxNo:=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board}
     PlayerPos:=OldPlayerPosition; {restore player position}
 
-    SquareTargetDistanceScaleFactor__:=1; {update the current scale factor for the 'SquareTargetDistance__' table}    
+    SquareTargetDistanceScaleFactor__:=1; {update the current scale factor for the 'SquareTargetDistance__' table}
     SquareTargetDistance__[0,0]:=Ord(Solver.SearchLimits.DepthLimit>=0); {(ab)use element[0,0] to signal that distances have been calculated. square 0 is a wall outside the user's board, and box number 0 is unused}
     Inc(Solver.CalculateSquareTargetDistancesTimeMS, CalculateElapsedTimeMS(StartTimeMS,GetTimeMS));
     end;
 end; {CalculateSquareStartBoxPositionDistances}
 
-procedure CalculateSquareGoalDistances(FirstGoalNo__,LastGoalNo__,DestinationOffset__,DistanceScaleFactor__:Integer;
+procedure CalculateSquareGoalDistances(FirstGoalNo__,LastGoalNo__,DestinationOffset__,DistanceScaleFactor__:Int;
                                        UsePackingOrder__:Boolean;
                                        var SquareTargetDistance__:TSquareTargetDistance;
-                                       var SquareTargetDistanceScaleFactor__ : Integer;                                       
+                                       var SquareTargetDistanceScaleFactor__ : Int;
                                        var GoalBoxSets__:TBoxGoalSets);
-type TQueueItem=record BoxPos,PlayerPos,Distance:Integer; end;
-var  BoxNo,GoalNo,Index,OldPlayerPosition,Square:Integer;
+type TQueueItem=record BoxPos,PlayerPos,Distance:Int; end;
+var  BoxNo,GoalNo,Index,OldPlayerPosition,Square:Int;
      StartTimeMS:TTimeMS;
      Direction:TDirection;
      Distances:TSquareDirectionArrayOfInteger;
 
-  procedure ShowSquareTargetDistance(GoalNo__:Integer; const SquareTargetDistance__:TSquareTargetDistance);
-  var Col,Row,Square,Distance:Integer;
+  procedure ShowSquareTargetDistance(GoalNo__:Int; const SquareTargetDistance__:TSquareTargetDistance);
+  var Col,Row,Square,Distance:Int;
   begin
     Writeln('Goal: ',GoalNo__);
     with Game do
@@ -7614,7 +7685,7 @@ begin {CalculateSquareGoalDistances}
     for BoxNo:=1 to Game.BoxCount do Inc(Board[BoxPos[BoxNo]],BOX); {put all boxes back on the board}
     PlayerPos:=OldPlayerPosition; {restore player position}
 
-    SquareTargetDistanceScaleFactor__:=DistanceScaleFactor__; {update the current scale factor for the 'SquareTargetDistance__' table}    
+    SquareTargetDistanceScaleFactor__:=DistanceScaleFactor__; {update the current scale factor for the 'SquareTargetDistance__' table}
     SquareTargetDistance__[0,0]:=Ord(Solver.SearchLimits.DepthLimit>=0); {(ab)use element[0,0] to signal that distances have been calculated. square 0 is a wall outside the user's board, and box number 0 is unused}
     Inc(Solver.CalculateSquareTargetDistancesTimeMS, CalculateElapsedTimeMS(StartTimeMS,GetTimeMS));
 {
@@ -7625,7 +7696,7 @@ begin {CalculateSquareGoalDistances}
 end; {CalculateSquareGoalDistances}
 
 procedure ShowPlayersReachableSquaresB; {for test only}
-var i,Col,Row:Integer;
+var i,Col,Row:Int;
 begin
   Write('Player''s Reachable Squares (Col,Row): ');
   if CalculatePlayersReachableSquares(SEARCH_STATE_INDEX_DO_PUSH)>0 then
@@ -7645,8 +7716,8 @@ end;
 
 {Deadlock-sets}
 
-function  ShowDeadlockSetNumbers : Integer;
-var Index, SquareNo : Integer;
+function  ShowDeadlockSetNumbers : Int;
+var Index, SquareNo : Int;
 begin
   Result := 0;
   for SquareNo := 0 to Game.BoardSize do with Game.DeadlockSets do
@@ -7925,18 +7996,18 @@ XX              of them is a box on a non-goal square. The non-wall
 
   type TCornerType   =(ctTopLeft,ctTopRight,ctBottomLeft,ctBottomRight);
        TCornerTypeSet=set of TCornerType;
-       TCorner       =record EdgeLengths:TDirectionArrayOfIntegers; SquareNo:Integer; Types:TCornerTypeSet;
+       TCorner       =record EdgeLengths:TDirectionArrayOfIntegers; SquareNo:Int; Types:TCornerTypeSet;
                       end;
-  var  i,j,CornerCount:Integer; TimeMS:TTimeMS;
+  var  i,j,CornerCount:Int; TimeMS:TTimeMS;
        OriginalControllerAndFreezeSetPairsEnabled:Boolean;
        Corners:array[0..MAX_BOARD_SIZE] of TCorner;
        {S:String;}
 
-    function  AddSquareToDeadlockSet(SquareNo__:Integer):Boolean; forward;
+    function  AddSquareToDeadlockSet(SquareNo__:Int):Boolean; forward;
     function  CommitDeadlockSet(Search__,ExpandSet__,AcceptPseudoLegalSets__:Boolean; var StartPositionIsOK__:Boolean):Boolean; forward;
-    function  TrySquare(SquareNo__:Integer; Direction__:TDirection):Boolean; forward;
+    function  TrySquare(SquareNo__:Int; Direction__:TDirection):Boolean; forward;
 
-    procedure CountBoxesAndGoalsAndPlayer(SquareNo__:Integer; var BoxCount__,GoalCount__,PlayerCount__:Integer);
+    procedure CountBoxesAndGoalsAndPlayer(SquareNo__:Int; var BoxCount__,GoalCount__,PlayerCount__:Int);
     begin
       if (Game.Board[SquareNo__] and BOX   )<>0 then Inc(BoxCount__   );
       if (Game.Board[SquareNo__] and GOAL  )<>0 then Inc(GoalCount__  );
@@ -7944,7 +8015,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     procedure InitializeSquareColors;
-    var i:Integer;
+    var i:Int;
     begin
       with DeadlockSetCandidate__ do begin
         PaintedFloorCount:=0;
@@ -7954,8 +8025,8 @@ XX              of them is a box on a non-goal square. The non-wall
         end;
     end;
 
-    function  CalculateNeighborsWithColor(SquareNo__:Integer; Color__:TSquareColor; LegalSquaresOnly__:Boolean):Integer;
-    var Neighbor:Integer; Dir:TDirection;
+    function  CalculateNeighborsWithColor(SquareNo__:Int; Color__:TSquareColor; LegalSquaresOnly__:Boolean):Int;
+    var Neighbor:Int; Dir:TDirection;
     begin
       Result:=0;
       for Dir:=Low(Dir) to High(Dir) do begin
@@ -7971,7 +8042,7 @@ XX              of them is a box on a non-goal square. The non-wall
           end;
     end;
 
-    function  TryBox(SquareNo__:Integer):Boolean;
+    function  TryBox(SquareNo__:Int):Boolean;
     begin
       Result:=IsALegalBoxSquare     (SquareNo__) and
               IsABoxReachableSquare (SquareNo__) and
@@ -7982,7 +8053,7 @@ XX              of them is a box on a non-goal square. The non-wall
          end;
     end;
 
-    procedure AddFloor(SquareNo__:Integer);
+    procedure AddFloor(SquareNo__:Int);
     begin {precondition: the square is not already a member of the deadlock-set}
       DeadlockSetCandidate__.SquareColors[SquareNo__]:=scLightGray;
       Inc(DeadlockSetCandidate__.PaintedFloorCount);
@@ -7991,8 +8062,8 @@ XX              of them is a box on a non-goal square. The non-wall
       if (Game.Board[SquareNo__] and GOAL)<>0 then Inc(DeadlockSetCandidate__.GoalCount);
     end;
 
-    function  TryFloor(SquareNo__:Integer):Boolean;
-    var i,OldBoxCount,OldFloorCount,OldPaintedFloorCount,OldGoalCount,OldCapacity,OldSquareOutsideFence:Integer;
+    function  TryFloor(SquareNo__:Int):Boolean;
+    var i,OldBoxCount,OldFloorCount,OldPaintedFloorCount,OldGoalCount,OldCapacity,OldSquareOutsideFence:Int;
         OldDeadlockSetCandidateFlags:TDeadlockSetFlagsSet; Dir:TDirection;
     begin {tries to add a floor to the deadlock-set}
       Result:=(DeadlockSetCandidate__.SquareColors[SquareNo__]=scWhite) and
@@ -8025,7 +8096,7 @@ XX              of them is a box on a non-goal square. The non-wall
          end;
     end;
 
-    function  TrySquare(SquareNo__:Integer; Direction__:TDirection):Boolean;
+    function  TrySquare(SquareNo__:Int; Direction__:TDirection):Boolean;
     begin
       Result:=DeadlockSetCandidate__.SquareColors[SquareNo__]<>scWhite;         {non-white: square is already OK}
       if not Result then {white square, i.e., a non-visited square}
@@ -8090,7 +8161,7 @@ XX              of them is a box on a non-goal square. The non-wall
          end; {case}
     end;
 
-    function  InitializeDeadlockSetCandidate(Capacity__,CenterSquare__,MaxBoxCount__{,EscapedBoxesCountDown__}:Integer):Boolean;
+    function  InitializeDeadlockSetCandidate(Capacity__,CenterSquare__,MaxBoxCount__{,EscapedBoxesCountDown__}:Int):Boolean;
     begin {postcondition: leaves ''DeadlockSetCandidate__.Boxes.Squares', 'DeadlockSetCandidate__.Floors.Squares', and 'DeadlockSetCandidate__.SquaresOutsideFence.Squares' untouched}
       Result:=Game.DeadlockSets.Count<MAX_DEADLOCK_SETS;
       if Result then begin
@@ -8114,8 +8185,8 @@ XX              of them is a box on a non-goal square. The non-wall
          end;
     end;
 
-    procedure DeleteDeadlockSet(SetNo__:Integer);
-    var i,j,k,SquareNo,SquaresOutsideFenceItemCount:Integer;
+    procedure DeleteDeadlockSet(SetNo__:Int);
+    var i,j,k,SquareNo,SquaresOutsideFenceItemCount:Int;
     begin
       with Game.DeadlockSets do begin
         Dec(Count);
@@ -8164,8 +8235,8 @@ XX              of them is a box on a non-goal square. The non-wall
         end;
     end; {DeleteDeadlockSet}
 
-    function  EnsureSetNumbersCapacityForSquare( Capacity__, SquareNo__ : Integer ): Boolean;
-    var OldByteSize, OldCapacity, NewByteSize : Integer;
+    function  EnsureSetNumbersCapacityForSquare( Capacity__, SquareNo__ : Int ): Boolean;
+    var OldByteSize, OldCapacity, NewByteSize : Int;
     begin {returns 'True' if the square has at least the given capacity, possibly after reallocating the existing set numbers vector}
       with Game.DeadlockSets do begin
         if   SquareSetCount[ SquareNo__ ] > 0 then
@@ -8188,7 +8259,7 @@ XX              of them is a box on a non-goal square. The non-wall
         end;
     end;
 
-    function  AddSquareToDeadlockSet(SquareNo__:Integer):Boolean;
+    function  AddSquareToDeadlockSet(SquareNo__:Int):Boolean;
     begin {precondition: no square is added more than once}
       Result:=(DeadlockSetCandidate__.Boxes.Count< DeadlockSetCandidate__.MaxBoxCount) and
               (DeadlockSetCandidate__.GoalCount  <=Game.BoxCount);
@@ -8211,8 +8282,8 @@ XX              of them is a box on a non-goal square. The non-wall
          DeadlockSetCandidate__.GoalCount:=Succ(Game.BoxCount); {mark current set as invalid}
     end;
 
-    function  RemoveSquareFromDeadlockSet(SquareNo__:Integer):Boolean;
-    var i,j:Integer;
+    function  RemoveSquareFromDeadlockSet(SquareNo__:Int):Boolean;
+    var i,j:Int;
     begin
       Result:=False;
       with DeadlockSetCandidate__ do
@@ -8229,9 +8300,9 @@ XX              of them is a box on a non-goal square. The non-wall
     {call parameter 'False': returns 'False' if all boxes are located at goal squares
      call parameter 'True ': returns 'False' if the number of boxes <= number of goals at box squares and inner floor squares
     }
-    var i,BoxesAtGoalsCount,CenterSquareRoomSquareCount,SquareNo,Step:Integer;
+    var i,BoxesAtGoalsCount,CenterSquareRoomSquareCount,SquareNo,Step:Int;
 
-      procedure VisitFloor(SquareNo__:Integer; FloodFill__:Boolean); {marks floor-squares surrounded by boxes and walls}
+      procedure VisitFloor(SquareNo__:Int; FloodFill__:Boolean); {marks floor-squares surrounded by boxes and walls}
       var Direction:TDirection;
       begin
         if DeadlockSetCandidate__.SquareColors[SquareNo__]=scWhite then begin
@@ -8334,8 +8405,8 @@ XX              of them is a box on a non-goal square. The non-wall
            else Result:=False; {the deadlock-set candidate encompasses the entire board; this is normally caused by a fence-type deadlock candidate where the fence is broken from the beginning}
     end; {CalculateDeadlockSetCandidateInfo}
 
-    procedure LoadCandidateFromSet(SetNo__:Integer);
-    var i,j:Integer;
+    procedure LoadCandidateFromSet(SetNo__:Int);
+    var i,j:Int;
     begin  {copies set to 'DeadlockSetCandidate__'}
       with Game.DeadlockSets do begin
         DeadlockSetCandidate__.Capacity                 :=Capacity    [SetNo__];
@@ -8374,8 +8445,8 @@ XX              of them is a box on a non-goal square. The non-wall
         end;
     end; {LoadCandidateFromSet}
 
-    function  IsARedundantDeadlockSet(SetNo__:Integer):Boolean;
-    var i,j,SetNo,SquareNo,CommonSquaresCount:Integer;
+    function  IsARedundantDeadlockSet(SetNo__:Int):Boolean;
+    var i,j,SetNo,SquareNo,CommonSquaresCount:Int;
     begin {returns 'True' if the specified deadlock set or deadlock candidate
            is redundant;
            comparisons are only approximate and may return false positives, so
@@ -8418,15 +8489,15 @@ XX              of them is a box on a non-goal square. The non-wall
          end;
     end; {IsARedundantDeadlockSet}
 
-    function  ExpandDeadlockSet(BoxIndex__:Integer; ExpandSet__,AcceptPseudoLegalSets__:Boolean; var ParentDeadlockSetNo__:Integer; var StartPositionIsOK__:Boolean):Boolean;
+    function  ExpandDeadlockSet(BoxIndex__:Int; ExpandSet__,AcceptPseudoLegalSets__:Boolean; var ParentDeadlockSetNo__:Int; var StartPositionIsOK__:Boolean):Boolean;
     var i,ExtraBoxSquareNo,
         OldBoxCount,OldCapacity,OldFloorCount,OldGoalCount,OldPaintedFloorCount,OldSquareOutsideFence,
-        NeighborSquareNo,SquareNo,WhiteNeighborCount:Integer;
+        NeighborSquareNo,SquareNo,WhiteNeighborCount:Int;
         Direction:TDirection;
         OldDeadlockSetCandidateFlags:TDeadlockSetFlagsSet;
 
       function  ExpandDeadlockSet__:Boolean;
-      var i,BoxOnIllegalSquareIndex:Integer;
+      var i,BoxOnIllegalSquareIndex:Int;
       begin {ExpandDeadlockSet.ExpandDeadlockSet__}
         BoxOnIllegalSquareIndex:=0;
         if   DeadlockSetCandidate__.CenterSquare<>0 then
@@ -8474,7 +8545,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                        ExpandSet__,AcceptPseudoLegalSets__,ParentDeadlockSetNo__,StartPositionIsOK__); {try to get the box away from the illegal square}
       end; {ExpandDeadlockSet.ExpandDeadlockSet__}
 
-      function  TryToAddExtraBox(SquareNo__,ExtraBoxSquareNo__:Integer):Boolean;
+      function  TryToAddExtraBox(SquareNo__,ExtraBoxSquareNo__:Int):Boolean;
       begin {ExpandDeadlockSet.TryToAddExtraBox}
         Inc(DeadlockSetCandidate__.Boxes.Count);
         DeadlockSetCandidate__.Boxes.Squares[DeadlockSetCandidate__.Boxes.Count]:=ExtraBoxSquareNo__;
@@ -8680,19 +8751,19 @@ XX              of them is a box on a non-goal square. The non-wall
 
     function  CommitDeadlockSet(Search__,ExpandSet__,AcceptPseudoLegalSets__:Boolean; var StartPositionIsOK__:Boolean):Boolean;
     var //OldEscapedBoxesCountDown,
-        i,j,SquareNo,NewDeadlockSetNo:Integer;
+        i,j,SquareNo,NewDeadlockSetNo:Int;
         IsALegalSetButViolatesCapacityConstraints,TableOverflow:Boolean;
         HashKey:THashValue; BoxSquares:TBoardSquareSet;
 
       function  CheckSimpleDeadlocks:Boolean;
-      var i:Integer;
+      var i:Int;
 
-        function  IsAFrozenSquare ( SquareNo__ : Integer ) : Boolean;
+        function  IsAFrozenSquare ( SquareNo__ : Int ) : Boolean;
         var ABoxIsBlockedOnANonGoalSquare : Boolean;
 
-          function  BoxIsBlockedAlongOneAxis( SquareNo__ : Integer; Direction__ : TDirection;
+          function  BoxIsBlockedAlongOneAxis( SquareNo__ : Int; Direction__ : TDirection;
                                                 var ABoxIsBlockedOnANonGoalSquare__ : Boolean):Boolean;
-          var Neighbor1, Neighbor2, Neighbor1Position , Neighbor2Position : Integer;
+          var Neighbor1, Neighbor2, Neighbor1Position , Neighbor2Position : Int;
           begin
             if   Direction__         =  Low(Direction__) then                   {flip horizontal/vertical direction}
                  Direction__         := Succ ( Low ( Direction__ ) )            {caution: 'Succ(Low...'): assumes 4 directions only}
@@ -8793,7 +8864,7 @@ XX              of them is a box on a non-goal square. The non-wall
         TCheckType             = (ctCheckPushes,ctCheckPulls,ctCheckPullsPaintThePlayerIntoACorner);
         TTranspositionTableItemTimeStamp = Byte; {only byte-sized, for fast initialization}
       var
-        i,j,BoxesOnBoardCount,GameBoxCount,GamePlayerPos,NeighborSquare,Square:Integer;
+        i,j,BoxesOnBoardCount,GameBoxCount,GamePlayerPos,NeighborSquare,Square:Int;
         //S : String;
         Direction:TDirection;
         PushesFromTheOutsideOnlyDirectionSet:TDirectionSet;
@@ -8801,8 +8872,8 @@ XX              of them is a box on a non-goal square. The non-wall
         TranspositionTableTimeStamp  : TTranspositionTableItemTimeStamp;
         TranspositionTableTimeStamps : array[ Low( TDeadlockSearchTranspositionTable ) .. High( TDeadlockSearchTranspositionTable ) ] of TTranspositionTableItemTimeStamp; {timestamp for each item in the transposition table}
 
-        procedure CalculateSquaresOutsideFence(SquareOutsideFence__:Integer; var SquaresOutsideFence__:TBoardSquareSet);
-        var BoxNo,Index,NeighborSquareNo,OriginalPlayerPos,SquareNo:Integer;
+        procedure CalculateSquaresOutsideFence(SquareOutsideFence__:Int; var SquaresOutsideFence__:TBoardSquareSet);
+        var BoxNo,Index,NeighborSquareNo,OriginalPlayerPos,SquareNo:Int;
             Direction:TDirection;
         begin {returns the squares outside the fence which are in the specified access area }
           SquaresOutsideFence__.Count:=0;
@@ -8829,7 +8900,7 @@ XX              of them is a box on a non-goal square. The non-wall
         end; {CalculateSquaresOutsideFence}
 
         function  CalculateOutsideOnlyPushDirections(var PushesFromTheOutsideOnlyDirectionSet__:TDirectionSet; var SquaresOutsideFence__:TBoardSquareSet):Boolean;
-        var BoxNo,Index,NeighborSquareNo,{SquareIndex,}SquareNo:Integer;
+        var BoxNo,Index,NeighborSquareNo,{SquareIndex,}SquareNo:Int;
             Direction{,d}:TDirection;
             PushesFromTheOutsideDirectionSet:TDirectionSet;
             {SquareSet:TBoardSquareSet;}
@@ -8913,7 +8984,7 @@ XX              of them is a box on a non-goal square. The non-wall
         end; {CalculateOutsideOnlyPushDirections}
 
         procedure ClearBoard; {remove boxes and player from the board}
-        var i,j,SquareNo:Integer;
+        var i,j,SquareNo:Int;
         begin
           for i:=1 to Game.BoxCount do with Game.DeadlockSets do begin
               SquareNo:=Game.BoxPos[i];
@@ -8927,7 +8998,7 @@ XX              of them is a box on a non-goal square. The non-wall
         end;
 
         procedure InitializeBoard; {update board and deadlock capacities, using 'Game.BoxPos' and 'Game.PlayerPos'}
-        var i,j,SquareNo:Integer;
+        var i,j,SquareNo:Int;
         begin
           BoxesOnBoardCount := 0;
           for i:=1 to Game.BoxCount do with Game.DeadlockSets do begin
@@ -8943,7 +9014,7 @@ XX              of them is a box on a non-goal square. The non-wall
           Game.HashValue:=CalculateHashValue;
         end;
 
-        function  Check(CheckType__:TCheckType; var SquareOutsideFence__:Integer):Boolean;
+        function  Check(CheckType__:TCheckType; var SquareOutsideFence__:Int):Boolean;
         {returns 'True' on deadlock}
         {the deadlock candidate is invalid in 4 cases:}
         {1: if the player starting from the outside can push a box to a square outside the set;   }
@@ -8957,7 +9028,7 @@ XX              of them is a box on a non-goal square. The non-wall
         const PLAYER_START_SQUARE_COLORS:array[TCheckType] of TSquareColor =(scWhite,scLightGray,scWhite); {'white': outside floor; 'light gray': inner floor}
               SMALL_PLAYER_ACCESS_AREA_LIMIT=8;
         var   i,j,BackJumpDepth,DepthOffset,MaximumSearchDepth,MinimumRepetitionDepth,
-              PlayerReachableSquaresCount,PlayerOutsideFenceReachableSquaresCount:Integer;
+              PlayerReachableSquaresCount,PlayerOutsideFenceReachableSquaresCount:Int;
               Frontier:TBoardSquareSet;
               PeeledOffBoxes:TBoxNumberSet;
               // tests indicate that it's not worth it using a Bloom filter for the current path during the search;
@@ -8974,7 +9045,7 @@ XX              of them is a box on a non-goal square. The non-wall
           end;
 
           procedure CalculateFrontierSquares;
-          var i,SquareNo:Integer; Dir:TDirection;
+          var i,SquareNo:Int; Dir:TDirection;
           begin  {finds exterior floor squares (white squares) adjacent to the boxes}
             Frontier.Count:=0;
             for i:=1 to DeadlockSetCandidate__.Boxes.Count do
@@ -8989,12 +9060,12 @@ XX              of them is a box on a non-goal square. The non-wall
                 DeadlockSetCandidate__.SquareColors[Frontier.Squares[i]]:=scWhite; {reset colors to white, i.e., an outside square}
           end;
 
-          function  PlayerHasAccessToAnOuterSquare(Depth__:Integer):Boolean;
+          function  PlayerHasAccessToAnOuterSquare(Depth__:Int):Boolean;
           {this function belongs inside the following 'Search()' function,
            but that exceeds the maximum nesting level for some versions of the
            FPC Pascal compiler;
           }
-          var i:Integer;
+          var i:Int;
           begin {precondition: player's reachable squares have been calculated}
             Result:=False;
             for i:=1 to Frontier.Count do
@@ -9003,12 +9074,12 @@ XX              of them is a box on a non-goal square. The non-wall
                 else break;
           end;
 
-          function  PlayerHasAccessToAnInnerSquare(Depth__:Integer):Boolean;
+          function  PlayerHasAccessToAnInnerSquare(Depth__:Int):Boolean;
           {this function belongs inside the following 'Search()' function,
            but that exceeds the maximum nesting level for some versions of the
            FPC Pascal compiler;
           }
-          var i:Integer;
+          var i:Int;
           begin {precondition: player's reachable squares have been calculated}
             Result:=False;
             for i:=1 to DeadlockSetCandidate__.Boxes.Count do
@@ -9017,12 +9088,12 @@ XX              of them is a box on a non-goal square. The non-wall
                 else break;
           end;
 
-          function  BoardHasEmptyGoalSquaresUnreachableForThePlayer(Depth__:Integer):Boolean;
+          function  BoardHasEmptyGoalSquaresUnreachableForThePlayer(Depth__:Int):Boolean;
           {this function belongs inside the following 'Search()' function,
            but that exceeds the maximum nesting level for some versions of the
            FPC Pascal compiler;
           }
-          var i:Integer;
+          var i:Int;
           begin {precondition: player's reachable squares have been calculated}
             Result:=False;
             for i:=1 to Game.GoalCount do
@@ -9033,12 +9104,12 @@ XX              of them is a box on a non-goal square. The non-wall
                 else break;
           end;
 
-          function  CalculateFreezeDeadlocks(Depth__:Integer): Boolean;
+          function  CalculateFreezeDeadlocks(Depth__:Int): Boolean;
           {this function belongs inside the following 'Search()' function,
            but that exceeds the maximum nesting level for some versions of the
            FPC Pascal compiler;
           }
-          var   BoxNo, GoalNo, Index, NeighborSquare, OldCount, Square : Integer;
+          var   BoxNo, GoalNo, Index, NeighborSquare, OldCount, Square : Int;
                 Direction : TDirection;
                 FreezePosition:PPosition;
                 CurrentBoxPositions:TBoxSquares;
@@ -9117,8 +9188,8 @@ XX              of them is a box on a non-goal square. The non-wall
               end;
           end;
 
-          function  PeelOffBoxes(Depth__:Integer; var EscapedBoxesCountDown__,BoxesOnBoardCount__:Integer; var PeeledOffBoxes__:TBoxNumberSet):Boolean;
-          var BoxNo,BoxToSquareNo,SquareNo,SuccessorDepth:Integer;
+          function  PeelOffBoxes(Depth__:Int; var EscapedBoxesCountDown__,BoxesOnBoardCount__:Int; var PeeledOffBoxes__:TBoxNumberSet):Boolean;
+          var BoxNo,BoxToSquareNo,SquareNo,SuccessorDepth:Int;
               Direction:TDirection;
           begin {precondition: the player's reachable squares have been calculated, using index = 'Depth__' + 'DepthOffset'}
             Result:=True;
@@ -9171,12 +9242,12 @@ XX              of them is a box on a non-goal square. The non-wall
               end;
           end;
 
-          function  IsADuplicatePosition(Depth__,PlayerPos__:Integer; var {io:} MinimumRepetitionDepth__:Integer):Boolean;
+          function  IsADuplicatePosition(Depth__,PlayerPos__:Int; var {io:} MinimumRepetitionDepth__:Int):Boolean;
           {this function belongs inside the following 'Search()' function,
            but that exceeds the maximum nesting level for some versions of the
            FPC Pascal compiler;
           }
-          var i,j,k,BoxPosition,UnmatchedRemovedBoxIndex:Integer;
+          var i,j,k,BoxPosition,UnmatchedRemovedBoxIndex:Int;
           begin {protects against loops in the depth-first search by comparing the current position with all positions along the current path;
                  additionally, the current position is compared to the positions stored in the small local transposition table with known deadlocks}
             Result:=False;
@@ -9296,8 +9367,8 @@ XX              of them is a box on a non-goal square. The non-wall
                 end;
           end;
 
-          function  AddGamePositionToLocalTranspositionTable( Depth__, PlayerPos__ : Integer ) :Integer;
-          var i{, b, g, oPlayerPos} : Integer;
+          function  AddGamePositionToLocalTranspositionTable( Depth__, PlayerPos__ : Int ) :Int;
+          var i{, b, g, oPlayerPos} : Int;
           begin { stores the current game position in the local transposition table;
                   precondition: the current game position is a deadlock;}
 {
@@ -9362,8 +9433,8 @@ XX              of them is a box on a non-goal square. The non-wall
 }
           end;
 
-          function  Search(Depth__:Integer; var {o:} BackJumpDepth__, {io:} MinimumRepetitionDepth__:Integer):Boolean; {returns 'True' on deadlock}
-          var i,BoxNo,BoxToSquareNo,LastPushedBoxNo,OriginalPeeledOffBoxesCount,OriginalPlayerPos,SquareNo,SuccessorDepth,MinimumRepetitionDepthForSuccessorMoves:Integer;
+          function  Search(Depth__:Int; var {o:} BackJumpDepth__, {io:} MinimumRepetitionDepth__:Int):Boolean; {returns 'True' on deadlock}
+          var i,BoxNo,BoxToSquareNo,LastPushedBoxNo,OriginalPeeledOffBoxesCount,OriginalPlayerPos,SquareNo,SuccessorDepth,MinimumRepetitionDepthForSuccessorMoves:Int;
               HasLegalSuccessorMoves:Boolean;
               Direction:TDirection;
               //s:String;
@@ -9432,7 +9503,7 @@ XX              of them is a box on a non-goal square. The non-wall
                                Write('Forward ')
                           else Write('Backward ');
                           Write(Depth__,SPACE,BackJumpDepth__,SPACE,Game.DeadlockSets.CandidatePushCount,SPACE,Solver.PushCount,SPACE,Game.HashValue);
-                          Writeln; 
+                          Writeln;
                           Readln(s);
                           if s<>'' then
                              Game.Board[MAX_BOARD_SIZE]:=WALL;
@@ -9700,7 +9771,7 @@ XX              of them is a box on a non-goal square. The non-wall
           end; {Search}
 
         function  PeelOffUnnecessaryBoxes:Boolean;
-        var BoxNo,BackJumpDepth,Count,FloorCount,SquareNo,MinimumRepetitionDepth:Integer;
+        var BoxNo,BackJumpDepth,Count,FloorCount,SquareNo,MinimumRepetitionDepth:Int;
             DeadlockPosition:PPosition;
             //s:String;
         begin {PeelOffUnnecessaryBoxes: removes boxes which don't contribute to the forward search deadlock for the position}
@@ -10208,7 +10279,7 @@ XX              of them is a box on a non-goal square. The non-wall
       end; {CheckDeadlockSetCandidate}
 
       procedure PruneDeadlockSets;
-      var i,j,SetNo,SquareNo:Integer; CommonSquaresCount:array[0..MAX_DEADLOCK_SETS] of integer;
+      var i,j,SetNo,SquareNo:Int; CommonSquaresCount:array[0..MAX_DEADLOCK_SETS] of int;
       begin {precondition: the candidate-set is legal and has been stored as the newest deadlock-set}
         FillChar(CommonSquaresCount,SizeOf(CommonSquaresCount),0);
 
@@ -10437,8 +10508,8 @@ XX              of them is a box on a non-goal square. The non-wall
       //DeadlockSetCandidate__.EscapedBoxesCountDown:=OldEscapedBoxesCountDown;
     end; {CommitDeadlockSet}
 
-    function  CommitDynamicallyCreatedDeadlockSet(Position__:PPosition):Integer;
-    var BoxIndex,MoveCount,OldPlayerPos,NeighborSquare,Square,WhiteNeighborCount:Integer;
+    function  CommitDynamicallyCreatedDeadlockSet(Position__:PPosition):Int;
+    var BoxIndex,MoveCount,OldPlayerPos,NeighborSquare,Square,WhiteNeighborCount:Int;
         OldHashValue:THashValue;
         b,OK:Boolean;
         Direction:TDirection; OldTimeLimitMS:TTimeMS;
@@ -10560,7 +10631,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeNonGoalCorner:Boolean; {caution: assumes 4 directions only}
-    var i,Item,Col,Row:Integer; WallUp,WallDown,WallLeft,WallRight:Boolean;
+    var i,Item,Col,Row:Int; WallUp,WallDown,WallLeft,WallRight:Boolean;
     begin {side-effect: finds corners, including interior ones}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('Dead-end corner');
@@ -10600,7 +10671,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternType3Block:Boolean;
-    var b,g,i,j,k,m,p:Integer; Direction:TDirection;
+    var b,g,i,j,k,m,p:Int; Direction:TDirection;
     begin
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('3-Block');
@@ -10640,7 +10711,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternType4BlockA:Boolean;
-    var a,b,c,f,g,h,i,j,k:Integer;
+    var a,b,c,f,g,h,i,j,k:Int;
     begin {pattern type "4-Block/A" (can be hard-coded with a tiny speed increase (approx. 3%), see 'IsALegalPush'}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('4-Block/A');
@@ -10678,7 +10749,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternType4BlockB:Boolean;
-    var b,g,i,j,p,L1,L2,R1,R2:Integer; Direction:TDirection;
+    var b,g,i,j,p,L1,L2,R1,R2:Int; Direction:TDirection;
     begin {pattern type "4-Block/B"}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('4-Block/B');
@@ -10729,9 +10800,9 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeDoubleL:Boolean;
-    var i,SquareNo:Integer; d,Direction:TDirection;
+    var i,SquareNo:Int; d,Direction:TDirection;
 
-      function  RelativeSquareNo(SquareNo__,DeltaX__,DeltaY__:Integer; Direction__:TDirection):Integer;
+      function  RelativeSquareNo(SquareNo__,DeltaX__,DeltaY__:Int; Direction__:TDirection):Int;
       begin {returns a square number relative to 'SquareNo__'; the deltas refer to the relative distance; heading in the specified direction, 'forward' and 'right' are the positive axis}
         case Direction of {caution: assumes 4 directions only}
           dUp   : Result:=SquareNo__+DeltaX__*Game.SquareOffsetForward[dUp   ]+DeltaY__*Game.SquareOffsetForward[dRight];
@@ -10832,7 +10903,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeBlockedTunnel:Boolean;
-    var i:Integer; Direction:TDirection;
+    var i:Int; Direction:TDirection;
     begin {pattern type "Blocked tunnel"}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('Blocked tunnel');
@@ -10867,10 +10938,10 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeBlockedGateAndOneWayTunnel:Boolean;
-    var BoxNo,g,GoalCount,NeighborSquare,OldPlayerPos,OppositeNeighborSquare,Square,Square2:Integer;
+    var BoxNo,g,GoalCount,NeighborSquare,OldPlayerPos,OppositeNeighborSquare,Square,Square2:Int;
         Direction:TDirection;
 
-      function MakeGateDeadlockCandidate(Square1__,Square2__,Square3__:Integer; Direction__:TDirection):Boolean;
+      function MakeGateDeadlockCandidate(Square1__,Square2__,Square3__:Int; Direction__:TDirection):Boolean;
       begin
        {preconditions:
         'Square1__' is the gate square or the square above the gate square (see figures below);
@@ -10965,8 +11036,8 @@ XX              of them is a box on a non-goal square. The non-wall
                 end;
       end;
 
-      function  MakeExtendedGateSquareDeadlockSets(Square__,NeighborSquare__:Integer; Direction__:TDirection; var Result__:Boolean):Integer;
-      var Square3:Integer;
+      function  MakeExtendedGateSquareDeadlockSets(Square__,NeighborSquare__:Int; Direction__:TDirection; var Result__:Boolean):Int;
+      var Square3:Int;
       begin {produces deadlock patterns E,F,G in the figure above; caution: assumes 4 directions only}
         Result:=0;
         if NeighborSquare__=Square__ then NeighborSquare__:=0; {'True': variant E in the preceding 'MakeGateDeadlockCandidate()' function}
@@ -11161,7 +11232,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeClosedEdgeWithoutGoals:Boolean;
-    var a,a1,a2,b,c,c1,d,d1,e,g,i,j,k,p,dx,dy,Col1,Row1,Col2,Row2:Integer; Direction:TDirection;
+    var a,a1,a2,b,c,c1,d,d1,e,g,i,j,k,p,dx,dy,Col1,Row1,Col2,Row2:Int; Direction:TDirection;
     begin {side-effect: calculates edge-lengths for each corner}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('Closed edge without goals');
@@ -11224,7 +11295,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeClosedEdgeWithGoals:Boolean;
-    var a,b,g,i,j,p,NewSetsCount:Integer;
+    var a,b,g,i,j,p,NewSetsCount:Int;
         IsAGoalCorner:Boolean;
         d,Direction:TDirection;
         SetCapacities:TDirectionArrayOfIntegers;
@@ -11298,7 +11369,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeClosedEdgeFence:Boolean;
-    var a,b,g,i,j,p,ClosedEdgeCapacity:Integer; Direction:TDirection;
+    var a,b,g,i,j,p,ClosedEdgeCapacity:Int; Direction:TDirection;
         IsIllegalSquare:TBoardOfBooleans;
     begin {pattern type "Closed edge fence"}
       {$IFDEF CONSOLE_APPLICATION}
@@ -11350,7 +11421,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeDiagonalClosedEdgeFence:Boolean;
-    var a,i,j,Length,Step:Integer; CornerType:TCornerType; //Direction:TDirection;
+    var a,i,j,Length,Step:Int; CornerType:TCornerType; //Direction:TDirection;
     begin {pattern type "Diagonal closed edge fence"}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('Diagonal closed edge fence');
@@ -11393,18 +11464,18 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeSemiClosedLine:Boolean;
-    var i,LineLength:Integer;
+    var i,LineLength:Int;
         Direction:TDirection;
 
-      function  SemiClosedLine(SquareNo__,LineLength__:Integer; Direction__:TDirection):Boolean;
-      var a,b,g,j,k,BoxesWithWallsOnBothSides:Integer;
+      function  SemiClosedLine(SquareNo__,LineLength__:Int; Direction__:TDirection):Boolean;
+      var a,b,g,j,k,BoxesWithWallsOnBothSides:Int;
           BoxSquaresAtLine,BoxSquaresAtAdjacentLine:TBoxSquareSet;
           SemiClosedLineDeadlock: TDeadlockSetCandidate;
       begin
         Result:=True;
         for g:=0 to 1 do                                                        {for left and right adjacent lines}
             if InitializeDeadlockSetCandidate(-1,0,Min(Game.BoxCount,Game.DeadlockSets.BoxLimitForPrecalculatedSets)) then begin
-               LineLength__:=Abs(LineLength__);                                 {'LineLength__'>=0: maybe this is a semi-closed line} 
+               LineLength__:=Abs(LineLength__);                                 {'LineLength__'>=0: maybe this is a semi-closed line}
                a:=SquareNo__;                                                   {get the starting square for the line}
                k:=a;                                                            {'k' = first/next square on the line which must be filled with a box in order to create a deadlock-set}
                BoxSquaresAtLine.Count:=0;
@@ -11527,7 +11598,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeCurrentPosition:Boolean; {the current position (e.g., the starting position) may contain a corral deadlock if only the player was outside an enclosing corral}
-    var BoxNo:Integer;
+    var BoxNo:Int;
     begin {pattern type "Current position"}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('Current position');
@@ -11546,20 +11617,20 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeFrozenGoals:Boolean;
-    var BoxNo,GoalNo,GoalSquare,NeighborSquare,OldCount,OldPlayerPosition:Integer;
+    var BoxNo,GoalNo,GoalSquare,NeighborSquare,OldCount,OldPlayerPosition:Int;
         IsAFreezingGoalSet:Boolean; Direction:TDirection; GoalSet:TGoalSet;
 
       function  FindDeadlocks(const GoalSet__:TGoalSet; IsAFreezingGoalSet__:Boolean):Boolean; {'GoalSet__' is the freeze-set goal squares}
       var BoxNo,Distance,GoalNo,GoalSquare,GoalsInSetCount,i,j,NeighborSquare,OldCount,
-          Square,SquaresOutsideFenceCount,UnreachableGoalsCount:Integer;
+          Square,SquaresOutsideFenceCount,UnreachableGoalsCount:Int;
           Direction:TDirection;
           OldBoard:TBoard;
           Distances:TBoardOfIntegers;
 
-        function  CreateFreezeSet(GoalsInSetCount__:Integer; const GoalSet__:TGoalSet;
+        function  CreateFreezeSet(GoalsInSetCount__:Int; const GoalSet__:TGoalSet;
                                   IsAFreezingGoalSet__,IsAnOverflowFreezeSet__:Boolean;
-                                  SquaresOutsideFenceCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__:Integer):Boolean;
-        var GoalNo,Square:Integer;
+                                  SquaresOutsideFenceCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__:Int):Boolean;
+        var GoalNo,Square:Int;
         begin {preconditions:
                * the preceding deadlock-set is the controller-set for the controller/freeze-set pair, where this function creates the freeze-set
                * faked freezing squares (a tunnel which is forever blocked if there are two boxes in the tunnel) are floor squares marked as walls and as members of the set ('WALL+FLAG_SQUARE_SET')}
@@ -11602,21 +11673,21 @@ XX              of them is a box on a non-goal square. The non-wall
              end;
         end; {PatternTypeFrozenGoals.FindDeadlocks.CreateFreezeSet}
 
-        function  CalculateAreaOverflowAndUnderflowDeadlocks(GoalsInSetCount__:Integer; const GoalSet__:TGoalSet;
-                                                             FloorsInPlayersAccessAreaCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__:Integer):Boolean;
+        function  CalculateAreaOverflowAndUnderflowDeadlocks(GoalsInSetCount__:Int; const GoalSet__:TGoalSet;
+                                                             FloorsInPlayersAccessAreaCount__,FakedFreezingSquaresCount__,FakedFreezingSquaresGoalCount__:Int):Boolean;
         var
-          BoxNo:Integer;
+          BoxNo:Int;
           {TimeMS:TTimeMS;}
           SquaresGoalsCount:TBoardOfIntegers;
           SquaresGoalSet:TBoardOfGoalSets;
 
           function  CalculateAreaOverflowDeadlocks:Boolean; {with frozen boxes, there may be an area of the board from which only a limited number of goals can be reached}
-          var i,BoxNo,OldCount,Square:Integer; {PlayerToSquare,OldPlayerPos,OldSquareValue:Integer;}
+          var i,BoxNo,OldCount,Square:Int; {PlayerToSquare,OldPlayerPos,OldSquareValue:Int;}
               SquaresGoalsSubSetCount:TBoardOfIntegers;
               Visited:TBoardOfBooleans;
 
-            function  IsASubSet(Square1__,Square2__:Integer; const SquaresGoalsCount__:TBoardOfIntegers; const SquaresGoalSet__:TBoardOfGoalSets):Boolean;
-            var Goal:Integer;
+            function  IsASubSet(Square1__,Square2__:Int; const SquaresGoalsCount__:TBoardOfIntegers; const SquaresGoalSet__:TBoardOfGoalSets):Boolean;
+            var Goal:Int;
             begin {returns 'True' if the goals reachable from 'Square1__' is a subset of the goals reachable from 'Square2__'}
               {this function treats an empty set as not being a subset of any set;}
               Result:=(SquaresGoalsCount__[Square1__]> 0) and {'True': one or more goals are reachable from 'Square1__'}
@@ -11748,8 +11819,8 @@ XX              of them is a box on a non-goal square. The non-wall
 
           function  CalculateAreaUnderflowDeadlocks:Boolean; {with frozen boxes, there may be an area of the board from which only a limited number of goals can be reached}
 
-            function  IsASubSet(GoalNo1__,GoalNo2__:Integer; const SquaresGoalSet__:TBoardOfGoalSets):Boolean;
-            var Square:Integer;
+            function  IsASubSet(GoalNo1__,GoalNo2__:Int; const SquaresGoalSet__:TBoardOfGoalSets):Boolean;
+            var Square:Int;
             begin {returns 'True' if the pull-reachable squares from 'GoalNo1__' is a subset of the pull-reachable squares from 'GoalNo2__';}
               {this function treats an empty set as a subset of any set;
                that would be a mistake in this underflow calculation, but it
@@ -11766,7 +11837,7 @@ XX              of them is a box on a non-goal square. The non-wall
             end;
 
           var {CalculateAreaUnderflowDeadlocks}
-            i,BoxNo,GoalNo,OldCount,ReachableSquaresCount,ReachableSquaresLimit,Square:Integer;
+            i,BoxNo,GoalNo,OldCount,ReachableSquaresCount,ReachableSquaresLimit,Square:Int;
             {TimeMS:TTimeMS;}
             GoalsSubSetCount:TBoxArrayOfIntegers;
           begin {CalculateAreaUnderflowDeadlocks; precondition: it's a freezing goal set, i.e., 'IsAFreezingGoalSet__' = 'True', meaning the freeze-set is static and doesn't require a dynamic freeze-test during the game search}
@@ -11865,15 +11936,15 @@ XX              of them is a box on a non-goal square. The non-wall
             end;
         end; {PatternTypeFrozenGoals.FindDeadlocks.CalculateAreaOverflowAndUnderflowDeadlocks}
 
-       function  ExpandFreezeDeadlocks(GoalsInSetCount__,SquaresOutsideFenceCount__:Integer; GoalSet__:TGoalSet):Boolean;
-        var {BoxNo,}GoalNo,Index,OldCount,SquareNo,TunnelGoalCount:Integer;
+       function  ExpandFreezeDeadlocks(GoalsInSetCount__,SquaresOutsideFenceCount__:Int; GoalSet__:TGoalSet):Boolean;
+        var {BoxNo,}GoalNo,Index,OldCount,SquareNo,TunnelGoalCount:Int;
             Direction:TDirection;
             TunnelSquares:TBoardSquareSet;
 
-          function  IsTunnel(Square__:Integer; TunnelDirection__:TDirection; var TunnelSquares__:TBoardSquareSet; var TunnelGoalCount__:Integer):Boolean;
+          function  IsTunnel(Square__:Int; TunnelDirection__:TDirection; var TunnelSquares__:TBoardSquareSet; var TunnelGoalCount__:Int):Boolean;
           {side effects: sets 'FLAG_VISITED_SQUARE' and 'FLAG_SQUARE_SET' flags in 'Game.Board' squares}
 
-            function  IsBlockedByWallOnAxis(Square__:Integer; Direction__:TDirection):Boolean;
+            function  IsBlockedByWallOnAxis(Square__:Int; Direction__:TDirection):Boolean;
             begin {contrary to what the function name suggests, the parameter is a direction, not an axis}
               with Game do
                 Result:= ((( Board [ Square__ + SquareOffsetForward [ Direction__ ] ] and WALL ) <> 0 )
@@ -11881,7 +11952,7 @@ XX              of them is a box on a non-goal square. The non-wall
                           (( Board [ Square__ - SquareOffsetForward [ Direction__ ] ] and WALL ) <> 0 ));
             end;
 
-            function  IsDoorSquare(Square__:Integer; Direction__:TDirection):Boolean;
+            function  IsDoorSquare(Square__:Int; Direction__:TDirection):Boolean;
             begin {caution: 4 directions only}
               with Game do
                 Result:=IsALegalAndBoxReachableSquare(Square__) and
@@ -11891,19 +11962,19 @@ XX              of them is a box on a non-goal square. The non-wall
                         IsAWallSquare(Square__+SquareOffsetRight[Direction__]);
             end; {IsDoorSquare}
 
-            function  IsVisited(Square__:Integer):Boolean;
+            function  IsVisited(Square__:Int):Boolean;
             begin {returns 'True' if the square already is a member of the set (set flag), or if the square is marked as being a part of another tunnel (visited flag), or if the square isn't a floor}
               Result:=(Game.Board[Square__] and (WALL+FLOOR+FLAG_VISITED_SQUARE+FLAG_SQUARE_SET))<>FLOOR;
             end; {IsVisited}
 
-            function  MarkSquare(Square__:Integer):Boolean;
+            function  MarkSquare(Square__:Int):Boolean;
             begin {returns 'False' if the square already is a member of the set (set flag), or if the square is marked as being a part of another tunnel (visited flag)}
               Result:=not IsVisited(Square__);
               if Result then
                  Game.Board[Square__]:=Game.Board[Square__] or FLAG_SQUARE_SET;
             end; {MarkSquare}
 
-            function  AddSquareToSet(Square__:Integer; DiscardVisitedSquares__:Boolean):Integer;
+            function  AddSquareToSet(Square__:Int; DiscardVisitedSquares__:Boolean):Int;
             var Direction:TDirection;
             begin {returns the tunnel squares vector index for the square if the square is added to the set; returns 0 if the square already is a member of the set;}
               Result:=0;
@@ -11927,7 +11998,7 @@ XX              of them is a box on a non-goal square. The non-wall
                  end;
             end; {AddSquareToSet}
 
-            function  OutsideFloorNeighborCount(Square__:Integer):Integer;
+            function  OutsideFloorNeighborCount(Square__:Int):Int;
             var Direction:TDirection;
             begin {counts neighbor floor squares which are not members of the set of tunnel squares}
               Result:=0;
@@ -11936,7 +12007,7 @@ XX              of them is a box on a non-goal square. The non-wall
                      Inc(Result);
             end; {OutsideFloorNeighborCount}
 
-            function  Search(Depth__,Square__:Integer; Direction__:TDirection):Integer;
+            function  Search(Depth__,Square__:Int; Direction__:TDirection):Int;
             begin {caution: 4 directions only}
               Result:=0;
               //if (Depth__>0) and (Depth__<=MAX_BOARD_SIZE) then // testing stack overflow
@@ -12027,7 +12098,7 @@ XX              of them is a box on a non-goal square. The non-wall
                           for Index:=1 to Count do begin
                               Square:=Squares[Index];
                               if (Board[Square] and GOAL)<>0 then
-                                 Include(GoalSet__,Cardinal(Board[Square] shr GOAL_BIT_SHIFT_COUNT));
+                                 Include(GoalSet__,UInt(Board[Square] shr GOAL_BIT_SHIFT_COUNT));
                               if (Index>1) and (Index<Count) then begin
                                  Board[Square]:=Board[Square] or WALL; {temporarily turn the inner tunnel squares into walls}
                                  with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do Squares[Square]:=High(TimeStamp) and (not 1); {temporarily give the tunnel square the timestamp assigned to walls}
@@ -12039,7 +12110,7 @@ XX              of them is a box on a non-goal square. The non-wall
                           for Index:=1 to Count do begin
                               Square:=Squares[Index];
                               if (Board[Square] and GOAL)<>0 then
-                                 Exclude(GoalSet__,Cardinal(Board[Square] shr GOAL_BIT_SHIFT_COUNT));
+                                 Exclude(GoalSet__,UInt(Board[Square] shr GOAL_BIT_SHIFT_COUNT));
                               if (Index>1) and (Index<Count) then begin
                                  Board[Square]:=Board[Square] and (not WALL); {remove the temporary wall from the tunnel square}
                                  with Solver.SearchStates[SEARCH_STATE_INDEX_DO_PUSH].PlayersReachableSquares do Squares[Square]:=0; {remove the temporary 'wall' timestamp from the tunnel squares currently under investigation}
@@ -12429,7 +12500,7 @@ XX              of them is a box on a non-goal square. The non-wall
                Dec(Board[GoalSquare],GOAL); {remove the goal from the board}
 
                {find deadlocks based on this single goal square}
-               FindDeadlocks([GoalNo],IsAFreezingMove(0,GoalSquare,False));     {if 'IsAFreezingMove' is 'True' then the goal square is a corner square, i.e., a box freezes at this goal square}
+               FindDeadlocks([Int32(GoalNo)],IsAFreezingMove(0,GoalSquare,False));     {if 'IsAFreezingMove' is 'True' then the goal square is a corner square, i.e., a box freezes at this goal square}
 
                {find deadlocks based on two freezing neighbor goal squares}
                for Direction:=Low(Direction) to TDirection(Pred(Ord(Low(Direction))+(DIRECTION_COUNT div 2))) do begin {look for neighboring goal squares which freezes when they are filled with boxes}
@@ -12438,7 +12509,7 @@ XX              of them is a box on a non-goal square. The non-wall
 
                    if IsAGoalSquare(NeighborSquare) then
                       if IsAFreezingMove(0,NeighborSquare,False) then           {'True': there are two freezing neighbor goal squares}
-                         FindDeadlocks([GoalNo,GoalNoAtSquare(NeighborSquare)],True)
+                         FindDeadlocks([Int32(GoalNo),Int32(GoalNoAtSquare(NeighborSquare))],True)
                       else if (Direction=dUp) and
                               IsAGoalSquare(GoalSquare    +SquareOffsetLeft[Direction]) and
                               IsAGoalSquare(NeighborSquare+SquareOffsetLeft[Direction]) then begin {'True': there is a 2x2 squares goal set on the board; check if freeze-deadlocks can be based on this goal set}
@@ -12447,10 +12518,10 @@ XX              of them is a box on a non-goal square. The non-wall
                               if (not IsAFreezingMove(0,GoalSquare    +SquareOffsetLeft[Direction],False))
                                  and {'and': reduce the number of redundant 2x2 squares controller/freeze sets by eliminating situations where a single goal is enough to cause a freeze-situation}
                                  (not IsAFreezingMove(0,NeighborSquare+SquareOffsetLeft[Direction],False)) then
-                                 FindDeadlocks([GoalNo,
-                                                GoalNoAtSquare(NeighborSquare),
-                                                GoalNoAtSquare(GoalSquare    +SquareOffsetLeft[Direction]),
-                                                GoalNoAtSquare(NeighborSquare+SquareOffsetLeft[Direction])],
+                                 FindDeadlocks([Int32(GoalNo),
+                                                Int32(GoalNoAtSquare(NeighborSquare)),
+                                                Int32(GoalNoAtSquare(GoalSquare    +SquareOffsetLeft[Direction])),
+                                                Int32(GoalNoAtSquare(NeighborSquare+SquareOffsetLeft[Direction]))],
                                                 True);
 
                               Board[NeighborSquare]:=Board[NeighborSquare] and (not BOX);
@@ -12505,7 +12576,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeOverflowAreas:Boolean;
-    var Col,EmptySquaresCount,GoalNo,Index,Row,Square:Integer;
+    var Col,EmptySquaresCount,GoalNo,Index,Row,Square:Int;
         OK:Boolean; s:String;
         GoalNumberSet:TBoxNumberSet; Visited:TBoardOfBooleans;
     begin {pattern type "Overflow areas"}
@@ -12567,7 +12638,7 @@ XX              of them is a box on a non-goal square. The non-wall
     end;
 
     function  PatternTypeFencedInArea:Boolean;
-    var i,j,SetNo:Integer;
+    var i,j,SetNo:Int;
     begin {pattern type "Fenced-in area"}
       {$IFDEF CONSOLE_APPLICATION}
         if Game.ShowDeadlockSetsEnabled then Writeln('Fenced-in area');
@@ -12624,8 +12695,8 @@ XX              of them is a box on a non-goal square. The non-wall
          Positions.Count := 0;
          Positions.FreeList := nil;
          Positions.HighWaterMark := Positions.HashBuckets; {drop precalculated deadlocks from a previous level, if any}
-         Positions.Capacity := ( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TPosition );
-         Positions.UninitializedItemCount := Integer( Positions.Capacity );
+         Positions.Capacity := ( UInt( Positions.HighWaterMark ) - UInt( Positions.Positions ) ) div SizeOf( TPosition );
+         Positions.UninitializedItemCount := Int( Positions.Capacity );
 
 //       ShowDeadlockSetsEnabled:=True;
 
@@ -12769,7 +12840,7 @@ XX              of them is a box on a non-goal square. The non-wall
 end; {CalculateDeadlockSets}
 
 function  CheckDeadlockSetCapacities:Boolean;
-var SetNo:Integer;
+var SetNo:Int;
 begin {a sanity check of the deadlock sets capacity calculation; the test is far from being 100% accurate; it's just a simple check that the capacities don't exceed the number of squares}
   Result:=True;
   with Game.DeadlockSets do
@@ -12805,15 +12876,15 @@ end;
 {Game}
 
 function  InitializeGame(var PluginResult__:TPluginResult; var ErrorText__:String):Boolean;
-var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
+var BoxNo,SquareNo:Int; StartTimeMS:TTimeMS;
     OriginalSearchLimits:TSearchLimits;
     DeadlockSetCandidate:TDeadlockSetCandidate;
 
   function  FindBoxesAndGoalsAndPlayer(var PluginResult__:TPluginResult; var ErrorText__:String):Boolean;
-  var i,LoopCount:Integer;
+  var i,LoopCount:Int;
 
-    function  ChangeUnreachableBoxesAndGoalsToWalls(var Result__:Boolean; var PluginResult__:TPluginResult; var ErrorText__:String):Integer;
-    var i,SquareNo:Integer;
+    function  ChangeUnreachableBoxesAndGoalsToWalls(var Result__:Boolean; var PluginResult__:TPluginResult; var ErrorText__:String):Int;
+    var i,SquareNo:Int;
     begin
     {any immovable boxes and unreachable boxes and goals are converted to
      walls here, before taking the 'original level' snaphot; otherwise, more
@@ -12933,7 +13004,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
   end; {FindBoxesAndGoalsAndPlayer}
 
   procedure FillTubes;
-  var i,j,BoxOnGoalCount,NeighborFloorCount,NewBoxPos,NewPlayerPos:Integer;
+  var i,j,BoxOnGoalCount,NeighborFloorCount,NewBoxPos,NewPlayerPos:Int;
       DeadEnd,More:Boolean; Dir,Direction:TDirection;
   begin {precondition: positions of player and boxes have been calculated by 'FindBoxesAndGoalsAndPlayer'}
     with Game do begin
@@ -13003,26 +13074,26 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           LARGE_BOARD_AREA_THRESHOLD_PERCENT=25;
     type  TPackingOrderType=(poNone,poPullBoxes,poPullBoxesToStartingPositionsWithoutParking,poPullBoxesToStartingPositionsWithParking); {item order cannot change}
           TSquareBoxSets=array[0..MAX_BOARD_SIZE] of TBoxSetWithCount; {for each square, the box starting positions/goals that are pull/push-reachable from the square}
-    var   EndGamePhaseBoxCountLimit,ConnectedGoalsCount,GoalGroupCount,LargeBoardAreaThreshold,SquareGoalNo,SquareValue:Integer;
-          BestGoalSetCount,BestGoalSetRemainingBoxesCount:Integer;
+    var   EndGamePhaseBoxCountLimit,ConnectedGoalsCount,GoalGroupCount,LargeBoardAreaThreshold,SquareGoalNo,SquareValue:Int;
+          BestGoalSetCount,BestGoalSetRemainingBoxesCount:Int;
           OriginalSearchLimits:TSearchLimits;
           GoalGroupNumbers:TBoxNumbers; {for each goal, the group of connected goals to which it belongs}
           BestGoalSetNumbers:TBoxNumbers;
 
-    procedure CalculateConnectedGoals(var ConnectedGoalsCount__,GoalGroupCount__:Integer; var GoalGroupNumbers__:TBoxNumbers);
-    var Count,GoalNo:Integer;
+    procedure CalculateConnectedGoals(var ConnectedGoalsCount__,GoalGroupCount__:Int; var GoalGroupNumbers__:TBoxNumbers);
+    var Count,GoalNo:Int;
 
-      function  FindConnectedGoals(GoalSquare__,VisitedCount__,GroupNo__:Integer;
-                                   var GoalGroupNumbers__:TBoxNumbers):Integer;
-      var NeighborSquare:Integer; Direction:TDirection;
+      function  FindConnectedGoals(GoalSquare__,VisitedCount__,GroupNo__:Int;
+                                   var GoalGroupNumbers__:TBoxNumbers):Int;
+      var NeighborSquare:Int; Direction:TDirection;
       begin {precondition: 'GoalSquare__' is an unvisited goal}
         Result:=Succ(VisitedCount__); {'+1': 'GoalSquare__' is a not previously visited goal}
-        GoalGroupNumbers__[Cardinal(Game.Board[GoalSquare__] shr GOAL_BIT_SHIFT_COUNT)]:=GroupNo__; {assign the current group number to this goal number; 'shr': the goal numbers are stored in the high-order bits of the board square values}
+        GoalGroupNumbers__[UInt(Game.Board[GoalSquare__] shr GOAL_BIT_SHIFT_COUNT)]:=GroupNo__; {assign the current group number to this goal number; 'shr': the goal numbers are stored in the high-order bits of the board square values}
         for Direction:=Low(Direction) to High(Direction) do begin
             NeighborSquare:=GoalSquare__+Game.SquareOffsetForward[Direction];
             if ((Game.Board[NeighborSquare] and GOAL)<>0)                       {'True': the neighbor square is also a goal}
                and
-               (GoalGroupNumbers__[Cardinal(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]=0) {'True': the neighbor goal hasn't been assigned a group number yet}
+               (GoalGroupNumbers__[UInt(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]=0) {'True': the neighbor goal hasn't been assigned a group number yet}
                and
                (
                 {the goal has an unvisited neighboring goal in this direction
@@ -13061,7 +13132,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculatePackingOrder.CalculateConnectedGoals}
 
     procedure CalculatePullReachableGoalsForAllSquares(var SquareGoalSets__:TSquareBoxSets); {not used}
-    var  BoxNo,GoalNo,OldPlayerPosition,Square:Integer;
+    var  BoxNo,GoalNo,OldPlayerPosition,Square:Int;
          Distances:TSquareDirectionArrayOfInteger;
     begin {CalculatePackingOrder.CalculatePullReachableGoalsForAllSquares}
       with Game do begin
@@ -13089,7 +13160,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculatePackingOrder.CalculatePullReachableGoalsForAllSquares}
 
     procedure CalculateReachableBoxStartPositionsForAllSquares(var SquareBoxSets__:TSquareBoxSets); {not used}
-    var BoxNo,Square:Integer; Distances:TBoardOfIntegers;
+    var BoxNo,Square:Int; Distances:TBoardOfIntegers;
     begin
       with Game do begin
         FillChar(SquareBoxSets__,SizeOf(SquareBoxSets__),0);
@@ -13106,7 +13177,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculatePackingOrder.CalculateReachableBoxStartPositionsForAllSquares}
 
     procedure CalculateReachableGoalsFromEachBoxStartPosition(const SquareBoxSets__:TSquareBoxSets; var BoxGoalSets__:TBoxGoalSets); {not used}
-    var BoxNo,GoalNo:Integer;
+    var BoxNo,GoalNo:Int;
     begin
       with Game do begin
         FillChar(BoxGoalSets__,SizeOf(BoxGoalSets__),0);
@@ -13120,14 +13191,14 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
 
     procedure PackingOrderToText(var BoardAsTextLines__:TBoardAsTextLines);
     const PADDING_CHARACTER='-'; // UNDERSCORE; // CH_FLOOR;
-    var Col,Row,SetNo,Square,SquareGoalNo,SquareValue:Integer; s:String;
+    var Col,Row,SetNo,Square,SquareGoalNo,SquareValue:Int; s:String;
     begin
       for Row:=1 to Game.BoardHeight do with Game do begin
           BoardAsTextLines__[Row]:='';
           for Col:=1 to BoardWidth do begin
               Square:=ColRowToSquare(Col,Row);
               SquareValue:=Board[Square];
-              SquareGoalNo:=Cardinal(SquareValue shr GOAL_BIT_SHIFT_COUNT);
+              SquareGoalNo:=UInt(SquareValue shr GOAL_BIT_SHIFT_COUNT);
               if ((SquareValue and GOAL)=0) and
                  ( SquareGoalNo=0) then begin
                  if   (SquareValue and WALL)<>0 then
@@ -13151,7 +13222,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculatePackingOrder.PackingOrderToText}
 
     procedure ShowPackingOrder;
-    var {Index,}Row:Integer; BoardAsTextLines:TBoardAsTextLines;
+    var {Index,}Row:Int; BoardAsTextLines:TBoardAsTextLines;
     begin
       with Game do begin
         Writeln;
@@ -13188,13 +13259,13 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     const GOAL_DISTANCE_TO_NEIGHBOR_GROUP_THRESHOLD=3;
     var   i,j,{BlockedAxisCount,}BoxNo,GoalNo,{GroupNo,}
           OldPlayerPos,ParkBoxesCountDown,
-          Square,SetNo,{NewSetNo,}{MaxGoalSetNo,}Row{,Col1,Col2,Row1,Row2}:Integer;
+          Square,SetNo,{NewSetNo,}{MaxGoalSetNo,}Row{,Col1,Col2,Row1,Row2}:Int;
           {GoalMinDistanceToNeighborGroup,}SetSize:TBoxArrayOfIntegers;
           //Distances:TSquareDirectionArrayOfInteger;
           BoardAsTextLines:TBoardAsTextLines;
 
       procedure PutBoxesOnBoard;
-      var BoxNo,Square:Integer;
+      var BoxNo,Square:Int;
       begin {puts all boxes on the board; some of them may already be there}
         for BoxNo:=1 to Game.BoxCount do begin
             Square:=Game.BoxPos[BoxNo];
@@ -13203,7 +13274,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
       end;
 
       procedure RemoveBoxesFromBoard;
-      var BoxNo:Integer;
+      var BoxNo:Int;
       begin {removes all boxes from the board; some of them may already have been removed}
         for BoxNo:=1 to Game.BoxCount do begin
             Square:=Game.BoxPos[BoxNo];
@@ -13212,7 +13283,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
       end;
 
       procedure PutBoxesAtGoals;
-      var GoalNo,Square:Integer;
+      var GoalNo,Square:Int;
       begin {puts boxes at all goal squares on the board; some of them may already be there}
         for GoalNo:=1 to Game.GoalCount do begin
             Square:=Game.GoalPos[GoalNo];
@@ -13221,7 +13292,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
       end;
 
       procedure RemoveBoxesFromGoals;
-      var GoalNo:Integer;
+      var GoalNo:Int;
       begin {removes boxes from all goal squares on the board; some of them may already have been removed}
         for GoalNo:=1 to Game.GoalCount do begin
             Square:=Game.GoalPos[GoalNo];
@@ -13229,8 +13300,8 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
             end;
       end;
 
-      procedure PutBoxSquareSetOnBoard( OldCount__:Integer; var BoxSquareSet__:TBoxSquareSet);
-      var Square:Integer;
+      procedure PutBoxSquareSetOnBoard( OldCount__:Int; var BoxSquareSet__:TBoxSquareSet);
+      var Square:Int;
       begin {puts removed boxes back on the board; some of them may already be there}
         while OldCount__<BoxSquareSet__.Count do begin
           Square:=BoxSquareSet__.Squares[BoxSquareSet__.Count];
@@ -13239,8 +13310,8 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           end;
       end;
 
-      procedure RemoveBoxSquareSetFromBoard( OldCount__:Integer; var BoxSquareSet__:TBoxSquareSet);
-      var Square:Integer;
+      procedure RemoveBoxSquareSetFromBoard( OldCount__:Int; var BoxSquareSet__:TBoxSquareSet);
+      var Square:Int;
       begin {removes boxes from the board; some of them may already have been removed}
         while OldCount__<BoxSquareSet__.Count do begin
           Square:=BoxSquareSet__.Squares[BoxSquareSet__.Count];
@@ -13249,24 +13320,24 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           end;
       end;
 
-      function  Search(PlayerPos__:Integer; PackingOrderType__:TPackingOrderType):Boolean;
+      function  Search(PlayerPos__:Int; PackingOrderType__:TPackingOrderType):Boolean;
       const MAX_PARKED_TWICE_GOAL_COUNT=2;
-      var   BoxNo,GoalNo{,NewBoxPos,NewPlayerPos},PullCount:Integer;
-            Count,Index,SetMembersCount,RemainingBoxesCount,RemainingRealGoalsCount:Integer;
+      var   BoxNo,GoalNo{,NewBoxPos,NewPlayerPos},PullCount:Int;
+            Count,Index,SetMembersCount,RemainingBoxesCount,RemainingRealGoalsCount:Int;
             ParkedTwiceGoalSet,SeenBoxStartPositions:TBoxSetWithCount;
             ReachableBoxStartingPositions:array[0..MAX_BOX_COUNT] of TBoxSetWithCount;
             UsedBoxStartPositions:TBoxNumbers;
             GoalParkingSquares:TBoxSquares;
 
-        function  Search__(Depth__,SetCount__,SetMembersCount__,GoalAndParkingSquareCount__,RemainingBoxesCount__,RemainingRealGoalsCount__,PlayerPos__:Integer;
+        function  Search__(Depth__,SetCount__,SetMembersCount__,GoalAndParkingSquareCount__,RemainingBoxesCount__,RemainingRealGoalsCount__,PlayerPos__:Int;
                            SeenBoxStartPositions__:TBoxSetWithCount; {note that it's a value parameter, not a variable parameter}
                            var ParkedTwiceGoalSet__:TBoxSetWithCount;
                            var UsedBoxStartPositions__:TBoxNumbers):Boolean; {this is a depth-first recursive search where 'Depth__' is the search depth}
-        type TParkingSpace =record Distance,Square,PlayerPositionAfterParking:Integer; end;
+        type TParkingSpace =record Distance,Square,PlayerPositionAfterParking:Int; end;
              TParkingSpaces=array[0..2] of TParkingSpace; {elements 1..2 are the true parking spaces; element 0 is only used as a local variable}
         var  BoxNo,BoxStartPosIndex,GoalCandidate,GoalNo,i,Index,NewPlayerPos,OldGoalRemovalCandidatesCount,Square,
              TotalReachableBoxStartingPositionsCount,
-             TotalReachableSquaresCount:Integer;
+             TotalReachableSquaresCount:Int;
              Direction:TDirection;
              ParkingSpaces:TParkingSpaces;
              GoalParkingCandidates,GoalRemovalCandidates:TBoxNumberSet;
@@ -13277,7 +13348,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
 
             function  CalculateFreezeDeadlocks: Boolean;
             const FROZEN_GOALS_PATTERN_THRESHOLD = 4;
-            var   GoalNo, Index, Index2, Square, NeighborSquare, OldCount, OldPlayerPos : Integer;
+            var   GoalNo, Index, Index2, Square, NeighborSquare, OldCount, OldPlayerPos : Int;
                   Found : Boolean;
                   Direction : TDirection;
                   DeadlockSetCandidate : TDeadlockSetCandidate;
@@ -13357,7 +13428,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.PostprocessPackingOrder}
 
           procedure ShowUnusedBoxStartingPositions;
-          var BoxNo,StartBoxPosition:Integer;
+          var BoxNo,StartBoxPosition:Int;
           begin
             Write('Unused box starting positions: ');
             for BoxNo:=1 to Game.BoxCount do with Game do begin
@@ -13369,22 +13440,22 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
             Writeln;
           end;
 
-          function  FindGoalCandidateForParking(SearchDepth__:Integer;
+          function  FindGoalCandidateForParking(SearchDepth__:Int;
                                                 const TestedGoalsSet__:TGoalSet; const ParkedTwiceGoalSet__:TBoxSetWithCount;
-                                                var GoalNo__:Integer;
-                                                var ParkingSpaces__:TParkingSpaces):Integer;
+                                                var GoalNo__:Int;
+                                                var ParkingSpaces__:TParkingSpaces):Int;
           {returns the number of found parking spaces, i.e., 0..2}
-          var GoalNo,ParkingSpacesCount,Square:Integer;
+          var GoalNo,ParkingSpacesCount,Square:Int;
               IsACornerGoalSquare:Boolean;
               Direction:TDirection;
               ParkingSpaces:TParkingSpaces;
 
-            function  CanPullBoxToParkingSquare(GoalNo__:Integer;
+            function  CanPullBoxToParkingSquare(GoalNo__:Int;
                                                 UsePlayerPosition__:Boolean;
-                                                var ParkingSpaces__:TParkingSpaces):Integer; {returns the number of found parking spaces, i.e., 0..2}
+                                                var ParkingSpaces__:TParkingSpaces):Int; {returns the number of found parking spaces, i.e., 0..2}
             const SEARCH_STATE_INDEX=SEARCH_STATE_INDEX_SCRATCHPAD_1; {index for calculating the player's reachable squares; 'Solver.SearchStates' must be freely available for the selected index}
             var   BoxSquare,{Col,Row,}Distance,
-                  OldPlayerPosition,Square{PreviousSquare}:Integer;
+                  OldPlayerPosition,Square{PreviousSquare}:Int;
                   Direction{,d}:TDirection;
                   BoxPullSquareDirectionDistances{,Distances}:TSquareDirectionArrayOfInteger;
                   BoxPushBackToGoalDistances:TBoardOfIntegers;
@@ -13621,12 +13692,12 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
               end;
           end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.FindGoalCandidateForParking}
 
-          function  CanPullBoxToStartingPosition(GoalNo__:Integer;
-                                                 var NewBoxStartPosIndex__,NewPlayerPos__,PullCount__,TotalReachableBoxStartingPositionsCount__,TotalReachableSquaresCount__:Integer;
+          function  CanPullBoxToStartingPosition(GoalNo__:Int;
+                                                 var NewBoxStartPosIndex__,NewPlayerPos__,PullCount__,TotalReachableBoxStartingPositionsCount__,TotalReachableSquaresCount__:Int;
                                                  var ReachableBoxStartingPositions__:TBoxSetWithCount):Boolean; {'ReachableBoxStartingPositions__': box starting positions not yet used for removing a box from the board}
           const MINIMUM_DISTANCE_BETWEEN_BOX_AND_REMOVAL_SQUARE=3;  {Manhattan distance threshold; if a box is removed from the board by using a too close starting square, then removal of the remaining boxes may look easier than it really is}
                 SEARCH_STATE_INDEX=SEARCH_STATE_INDEX_SCRATCHPAD_1; {index for calculating the player's reachable squares; 'Solver.SearchStates' must be freely available for the chosen index}
-          var   BoxNo,GoalNo,GoalSquare,MaxGoalBoxEdgeCount,MinGoalBoxEdgeCount,OldPlayerPosition,StartBoxPosition,LastReachableBoxStartingPositionIndex:Integer;
+          var   BoxNo,GoalNo,GoalSquare,MaxGoalBoxEdgeCount,MinGoalBoxEdgeCount,OldPlayerPosition,StartBoxPosition,LastReachableBoxStartingPositionIndex:Int;
                 Direction:TDirection; Distances:TSquareDirectionArrayOfInteger;
           begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.CanPullBoxToStartingPosition}
             with Game do with Solver.PackingOrder do with Solver.SearchStates[SEARCH_STATE_INDEX] do begin
@@ -13755,8 +13826,8 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
               end;
           end; {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.CanPullBoxToStartingPosition}
 
-          function IsAllBoxesAtBoxStartingPositions( GoalAndParkingSquareCount__ : Integer ) : Boolean;
-          var GoalNo : Integer;
+          function IsAllBoxesAtBoxStartingPositions( GoalAndParkingSquareCount__ : Int ) : Boolean;
+          var GoalNo : Int;
           begin {returns 'True' is the remaining boxes on the board are located at box start positions}
             Result := True;
             for GoalNo := 1 to GoalAndParkingSquareCount__ do
@@ -13766,8 +13837,8 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                    end;
           end;
 
-          procedure AddGoalRemovalCandidate(GoalNo__,BoxStartPosIndex__:Integer);
-          var Index:Integer;
+          procedure AddGoalRemovalCandidate(GoalNo__,BoxStartPosIndex__:Int);
+          var Index:Int;
           begin
             with Game do with Solver.PackingOrder do begin
               Inc(GoalRemovalCandidates.Count);
@@ -13786,7 +13857,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
           end;
 
           procedure ClearRemovalCandidateSet;
-          var BoxStartPosIndex,GoalNo,Index:Integer;
+          var BoxStartPosIndex,GoalNo,Index:Int;
           begin {CalculatePackingOrder.CalculatePackingOrder__.Search.Search__.ClearRemovalCandidateSet}
             with Game do with Solver.PackingOrder do
               while GoalRemovalCandidates.Count>0 do begin
@@ -13854,7 +13925,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                             SPACE,PlayerPos__,
                             SPACE,ParkedTwiceGoalSet__.Count,
                             SPACE,Solver.PushCount,
-                            //SPACE,Cardinal(Addr(BoardAsTextLines))-Cardinal(Addr(GoalRemovalCandidates)),
+                            //SPACE,UInt(Addr(BoardAsTextLines))-UInt(Addr(GoalRemovalCandidates)),
                             ' Find set: ',SetCount__,
                             ' Set members: ',SetMembersCount__,
                             ' Unseen start positions: ',BoxCount-SeenBoxStartPositions__.Count);
@@ -14016,7 +14087,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                            SPACE,PlayerPos__,
                                            SPACE,ParkedTwiceGoalSet__.Count,
                                            SPACE,Solver.PushCount,
-                                           //SPACE,Cardinal(Addr(BoardAsTextLines))-Cardinal(Addr(GoalRemovalCandidates)),
+                                           //SPACE,UInt(Addr(BoardAsTextLines))-UInt(Addr(GoalRemovalCandidates)),
                                            ' Find set: ',SetCount__,
                                            ' Set members: ',SetMembersCount__,
                                            ' Unseen start positions: ',BoxCount-SeenBoxStartPositions__.Count);
@@ -14110,7 +14181,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                SPACE,PlayerPos__,
                                SPACE,ParkedTwiceGoalSet__.Count,
                                SPACE,Solver.PushCount,
-                               //SPACE,Cardinal(Addr(BoardAsTextLines))-Cardinal(Addr(GoalRemovalCandidates)),
+                               //SPACE,UInt(Addr(BoardAsTextLines))-UInt(Addr(GoalRemovalCandidates)),
                                ' Find set: ',SetCount__,
                                ' Set members: ',SetMembersCount__,
                                ' Unseen start positions: ',BoxCount-SeenBoxStartPositions__.Count);
@@ -14137,7 +14208,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
                                 SPACE,PlayerPos__,
                                 SPACE,ParkedTwiceGoalSet__.Count,
                                 SPACE,Solver.PushCount,
-                                //SPACE,Cardinal(Addr(BoardAsTextLines))-Cardinal(Addr(GoalRemovalCandidates)),
+                                //SPACE,UInt(Addr(BoardAsTextLines))-UInt(Addr(GoalRemovalCandidates)),
                                 ' Find set: ',SetCount__,
                                 ' Set members: ',SetMembersCount__,
                                 ' Unseen start positions: ',BoxCount-SeenBoxStartPositions__.Count);
@@ -14382,16 +14453,16 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
         for GoalNo:=1 to GoalAndParkingSquareCount do begin {for each goal and parking square}
             Square                :=GoalPos[GoalNo];
             SquareValue           :=Board[Square];                              {the board square value for the goal number}
-            SquareGoalNo          :=Cardinal(SquareValue shr GOAL_BIT_SHIFT_COUNT); {the existing goal number for this square; a parking square may overlap real goal squares and previous parking squares}
+            SquareGoalNo          :=UInt(SquareValue shr GOAL_BIT_SHIFT_COUNT); {the existing goal number for this square; a parking square may overlap real goal squares and previous parking squares}
             Board[GoalPos[GoalNo]]:=(SquareValue   and (not WALL))              {remove temporary wall, if any, from the goal square}
-                                    -Integer(Cardinal(SquareGoalNo shl GOAL_BIT_SHIFT_COUNT))  {substract previously inserted goal number from the square value}
-                                    +Integer(Cardinal(GoalNo       shl GOAL_BIT_SHIFT_COUNT)); {insert the goal number in the square value, so there is a mapping from the board square values to the highest goal/parking place numbers}
+                                    -Int(UInt(SquareGoalNo shl GOAL_BIT_SHIFT_COUNT))  {substract previously inserted goal number from the square value}
+                                    +Int(UInt(GoalNo       shl GOAL_BIT_SHIFT_COUNT)); {insert the goal number in the square value, so there is a mapping from the board square values to the highest goal/parking place numbers}
             end;
 
         for GoalNo:=1 to GoalAndParkingSquareCount do NextGoalAtSameSquare[GoalNo]:=GoalNo; {initially, make a circular list for each goal, where the goal itself is the only member of the list}
         for GoalNo:=GoalAndParkingSquareCount downto 1 do begin                        {for each goal and parking square}
             SquareValue                       :=Board[GoalPos[GoalNo]];                {the board square value for the goal number}
-            SquareGoalNo                      :=Cardinal(SquareValue shr GOAL_BIT_SHIFT_COUNT); {the highest real goal number or parking space for this square; a parking square may overlap real goal squares and other parking squares}
+            SquareGoalNo                      :=UInt(SquareValue shr GOAL_BIT_SHIFT_COUNT); {the highest real goal number or parking space for this square; a parking square may overlap real goal squares and other parking squares}
             NextGoalAtSameSquare[GoalNo      ]:=NextGoalAtSameSquare[SquareGoalNo];    {link from the current goal to the next member of the circular list of goals for this square}
             NextGoalAtSameSquare[SquareGoalNo]:=GoalNo;                                {link from the highest goal number for this square to the current goal number; this is the link from the last member of the circular list back to the first member}
             end;
@@ -14484,10 +14555,10 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
   end; {CalculatePackingOrder}
 
   procedure CalculateRooms; {caution: assumes 4 directions only}
-  var {BoxNo,}DoorCount:Integer; DoorSquares:TBoardOfIntegers;
+  var {BoxNo,}DoorCount:Int; DoorSquares:TBoardOfIntegers;
 
     procedure CalculateDoors; {caution: assumes 4 directions only}
-    var ASquare,BoxNo,Square,OldCount:Integer; Direction:TDirection;
+    var ASquare,BoxNo,Square,OldCount:Int; Direction:TDirection;
     begin
       with Game do begin
         for BoxNo:=1 to BoxCount do Dec(Board[BoxPos[BoxNo]],BOX);              {remove boxes from the board}
@@ -14592,7 +14663,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculateDoors}
 
     procedure CalculateRooms__; {caution: assumes 4 directions only}
-    var ASquare,NeighborSquare,RoomSquareCount,Square:Integer; Direction:TDirection; Stack:TBoardSquareSet;
+    var ASquare,NeighborSquare,RoomSquareCount,Square:Int; Direction:TDirection; Stack:TBoardSquareSet;
     begin {preconditions: 'Game.Rooms' has been cleared, the door information in 'DoorSquares' has been calculated, and 'CalculateDeadlockSets()' has been called in order to do the 'CalculateBoxReachableSquaresForAllBoxes' calculation}
       with Game do begin
         for Square:=0 to BoardSize do
@@ -14660,7 +14731,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {CalculateRooms__}
 
     procedure RoomsToTextLines( var BoardAsTextLines__:TBoardAsTextLines );
-    var i,Col,Row,Square:Integer; s:String;
+    var i,Col,Row,Square:Int; s:String;
     begin
       with Game do begin
         for Row:=Low(BoardAsTextLines__) to High(BoardAsTextLines__) do
@@ -14691,7 +14762,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {RoomsToTextLines}
 
     function  WriteRoomsToLogFile:Boolean;
-    var Row:Integer; BoardAsTextLines:TBoardAsTextLines;
+    var Row:Int; BoardAsTextLines:TBoardAsTextLines;
     begin
       Result:=LogFile.FileName<>'';
       if Result then with LogFile do begin
@@ -14704,7 +14775,7 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
     end; {WriteRoomsToLogFile}
 
     procedure ShowRooms;
-    var Row:Integer; BoardAsTextLines:TBoardAsTextLines;
+    var Row:Int; BoardAsTextLines:TBoardAsTextLines;
     begin
       RoomsToTextLines(BoardAsTextLines);
       Writeln('Rooms');
@@ -14722,13 +14793,13 @@ var BoxNo,SquareNo:Integer; StartTimeMS:TTimeMS;
          if Rooms.Count>0 then
             WriteRoomsToLogFile;
          //for BoxNo:=1 to BoxCount do Inc(Rooms.RoomBoxCount[Rooms.Squares[BoxPos[BoxNo]].RoomNo]); {calculate the number of boxes in each room}
-         {ShowRooms;} 
+         {ShowRooms;}
          end;
       end;
   end; {CalculateRooms}
 
   procedure InitializeSearchStates;
-  var  i:Integer;
+  var  i:Int;
   begin
     with Solver do begin
       {FillChar(Solver.SearchStates,SizeOf(Solver.SearchStates),0);}
@@ -14824,7 +14895,7 @@ begin {InitializeGame}
     end;
 end;
 
-function  ReduceBoxChanges:Integer;
+function  ReduceBoxChanges:Int;
   // preconditions:
   // * the history contains the game to be optimized;
   // * the board position matches the initial game state after push number 'Game.TubeFillingPushCount';
@@ -14833,10 +14904,10 @@ var
   StartTimeMS:TTimeMS;
 
   // forward declarations
-  function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection):Boolean; forward;
+  function  IsALegalPush(BoxNo__:Int; Direction__:TDirection):Boolean; forward;
 
-  function  DoPushes(Start__,Stop__,BoxNo__:Integer; var Last__:Integer):Integer;
-  var i:Integer;
+  function  DoPushes(Start__,Stop__,BoxNo__:Int; var Last__:Int):Int;
+  var i:Int;
   begin // tries to perform pushes from the push number 'Start__' up to, but not including, the push number 'Stop__';
         // postcondition: the player's reachable squares have been calculated, using index = 0;
     with Game do with History do begin
@@ -14854,7 +14925,7 @@ var
       end;
   end;
 
-  function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection):Boolean;
+  function  IsALegalPush(BoxNo__:Int; Direction__:TDirection):Boolean;
   begin // precondition: the player's reachable squares have been calculated, using index = 0}
     with Game do with Solver.SearchStates[0].PlayersReachableSquares do
        Result:={inline simple checks for legal moves}
@@ -14866,8 +14937,8 @@ var
                YASS.IsALegalPush(BoxNo__,Direction__,-1);
   end;
 
-  procedure MoveItemsAfter(First__,Last__,After__:Integer);
-  var i:Integer; H:THistory;
+  procedure MoveItemsAfter(First__,Last__,After__:Int);
+  var i:Int; H:THistory;
   begin
     with Game do with History do begin
       for i:=First__ to Last__ do H.Moves[i]:=Moves[i];
@@ -14882,7 +14953,7 @@ var
       end;
   end;
 
-  function  UndoPushes(First__,Last__:Integer):Integer;
+  function  UndoPushes(First__,Last__:Int):Int;
   begin // takes back the pushes 'First__' .. 'Last__', both included;
         // returns the push number which matches the new game state;
         // precondition: the current game state matches push number 'Last__';
@@ -14895,8 +14966,8 @@ var
       end;
   end;
 {
-  procedure CalculateDependencies(StartNo__:Integer);
-  var i,j,OldPlayerPos:Integer; More:Boolean;
+  procedure CalculateDependencies(StartNo__:Int);
+  var i,j,OldPlayerPos:Int; More:Boolean;
   begin
     with Game do with History do begin
       OldPlayerPos:=PlayerPos;
@@ -14947,8 +15018,8 @@ var
   end;
 }
 
-  function  ReduceBoxChanges__:Integer;
-  var i,j,k,LastSameBoxIndex,OldPlayerPos,NormalizedPlayerPos:Integer; OK:Boolean; //s:String;
+  function  ReduceBoxChanges__:Int;
+  var i,j,k,LastSameBoxIndex,OldPlayerPos,NormalizedPlayerPos:Int; OK:Boolean; //s:String;
   begin
     Result:=0; //s:='';
     with Game do with History do begin
@@ -15085,7 +15156,7 @@ function  ReplayGame(const Moves__:String):Boolean;
 var {$IFDEF CONSOLE_APPLICATION}
       a,b,
     {$ENDIF}
-    i,j,n,Len,SquareNo:Integer; Ch:Char; Direction:TDirection;
+    i,j,n,Len,SquareNo:Int; Ch:Char; Direction:TDirection;
 begin {replays a game from a string; mostly used for testing that deadlock-sets are all right}
   Result:=True;
   Game.OriginalSolutionMoveCount:=0;
@@ -15263,7 +15334,7 @@ end; {TimeCheck}
 
 function  Search:Boolean;
 {precondition: the game has been initialized by calling 'InitializeGame'}
-var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
+var OriginalBoxLimitForDynamicSets,OldPlayerPos:Int;
     LevelTimeLimitMS:TTimeMS;
     OriginalSearchLimits:TSearchLimits;
     OriginalSearchMethod:TSearchMethod;
@@ -15273,8 +15344,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     {$ENDIF}
     p:PPosition; {F:Text;}
 
-  procedure DoPull(BoxNo__:Integer; Direction__:TDirection);
-  var FromSquare,ToSquare:Integer;
+  procedure DoPull(BoxNo__:Int; Direction__:TDirection);
+  var FromSquare,ToSquare:Int;
   begin {precondition: this local procedure must shadow the corresponding top-level procedure}
     if BoxNo__<>0 then with Game do begin {only pulls are handled}
        Direction__:=TDirection(Ord(Direction__) and DIRECTION_BIT_MASK);
@@ -15296,8 +15367,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
        end;
   end;
 
-  procedure UndoPull(BoxNo__:Integer; Direction__:TDirection);
-  var FromSquare,ToSquare:Integer;
+  procedure UndoPull(BoxNo__:Int; Direction__:TDirection);
+  var FromSquare,ToSquare:Int;
   begin {precondition: this local procedure must shadow the corresponding top-level procedure}
     if BoxNo__<>0 then with Game do begin {only pushes are handled}
        FromSquare:=BoxPos[BoxNo__];
@@ -15324,7 +15395,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
   // wasting too much space
   procedure SetPosition(Position__:PPosition);
   // do/undo moves so the board matches the position at the tree-node 'Position__'
-  var Depth,NewBoxNo,SquareNo:Integer; NewDirection:TDirection; p,Next,Temp:PPosition;
+  var Depth,NewBoxNo,SquareNo:Int; NewDirection:TDirection; p,Next,Temp:PPosition;
   begin // precondition : 'Position__' is a member of the transposition-table
        //  postcondition: if it's a forward search then 'Solver.SearchStates[Position__^.PushCount].PlayersReacableSquares.Calculated' has been set according to whether the calculation has been performed for the push number 'Position__^.PushCount'
     with Positions do begin
@@ -15381,7 +15452,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                               Move.BoxNo:=NewBoxNo;
                               UInt8(Move.Direction):=(UInt8(Move.Direction) and (not DIRECTION_BIT_MASK))+Ord(NewDirection);
                               //for NewBoxNo:=1 to Game.BoxCount do with Game do {repair the box numbers stored in the upper bits of the board squares}
-                              //    Board[BoxPos[NewBoxNo]]:=Cardinal(Board[BoxPos[NewBoxNo]] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or Cardinal(NewBoxNo shl BOX_BIT_SHIFT_COUNT);
+                              //    Board[BoxPos[NewBoxNo]]:=UInt(Board[BoxPos[NewBoxNo]] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or UInt(NewBoxNo shl BOX_BIT_SHIFT_COUNT);
                               end
                            else begin
                              TerminateSearch;
@@ -15436,7 +15507,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                               Move.BoxNo:=NewBoxNo;
                               UInt8(Move.Direction):=(UInt8(Move.Direction) and (not DIRECTION_BIT_MASK))+Ord(NewDirection);
                               //for NewBoxNo:=1 to Game.BoxCount do with Game do {repair the box numbers stored in the upper bits of the board squares}
-                              //    Board[BoxPos[NewBoxNo]]:=Cardinal(Board[BoxPos[NewBoxNo]] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or Cardinal(NewBoxNo shl BOX_BIT_SHIFT_COUNT);
+                              //    Board[BoxPos[NewBoxNo]]:=UInt(Board[BoxPos[NewBoxNo]] and (not (BOX_GOAL_BIT_MASK shl BOX_BIT_SHIFT_COUNT))) or UInt(NewBoxNo shl BOX_BIT_SHIFT_COUNT);
                               end
                            else begin
                               TerminateSearch; // something is wrong, such as 2 different positions accidentally having identical hashvalues
@@ -15532,7 +15603,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
   end; // Search.HasValidSolution
 
   procedure ShowPath(Position__:PPosition);
-  var OldPlayerPos:Integer; p:PPosition;
+  var OldPlayerPos:Int; p:PPosition;
   begin
     p:=Position__; OldPlayerPos:=Game.PlayerPos;
     while p<>nil do with p^ do begin
@@ -15568,7 +15639,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
   {$ENDIF}
 
   function  ConcatenateMovesFromBackwardSearch:Boolean;
-  var BoxNo,FileSize,i,Index,PlayerStartPosition:Integer;
+  var BoxNo,FileSize,i,Index,PlayerStartPosition:Int;
       StartPositionReverseMode:Boolean; p:PPosition;
       GraphFileItem:TGraphFileItem;
       ForwardBoxNo:TBoxNumbers;
@@ -15668,13 +15739,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       end;
   end; {Search.InitializeProgressCheckPoint}
 
-  function  MakeProgressCheckPoint(Score__,GamePhase__:Integer):Integer;
+  function  MakeProgressCheckPoint(Score__,GamePhase__:Int):Int;
     {if the score or the game phase is a new best result, then the function returns 0,
      otherwise, the function returns the number of infrequently pushed boxes since the last checkpoint}
-  var GoalNo,Index:Integer;
+  var GoalNo,Index:Int;
 
-    function  CalculateBoxPushBonuses:Integer;
-    var BoxNo,CutoffPoint,Index,TotalPushCount:Integer;
+    function  CalculateBoxPushBonuses:Int;
+    var BoxNo,CutoffPoint,Index,TotalPushCount:Int;
     begin {Search.MakeProgressCheckPoint.CalculateBoxPushBonuses}
       {if the solver doesn't make any progress, then the normal evaluation
        function isn't doing a good job; as an attempt to compensate for that,
@@ -15731,13 +15802,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          end;
       if Result=0 then begin {'True': this is not a new best score or a new best game phase; calculate statistics for the pushes since the last checkpoint}
          {sort the boxes in ascending order on the number of pushes since last checkpoint; returns the number of 0-push boxes}
-         Result:=SortBoxes(SortedBoxes.Numbers,BoxPushCounts,Random(MaxInt-MAX_BOX_COUNT-1,RandomState));
+         Result:=SortBoxes(SortedBoxes.Numbers,BoxPushCounts,Random(High(Int)-MAX_BOX_COUNT-1,RandomState));
          SortedBoxes.Count:=0; {the count is not used for the number of boxes, but for the number of boxes which get a bonus; initialize it to zero;}
          if (Solver.PackingOrder.SetCount>0) then
             Result:=CalculateBoxPushBonuses; {calculate bonuses for pushing infrequently pushed boxes}
 
          if (Solver.PackingOrder.LastPhaseWithABoxParkedInASmallArea>0) and
-            (Positions.Count>=Cardinal(Min(INITIAL_PARKING_POSITION_COUNT_LIMIT,Integer(Positions.Capacity div 4)))) then with Solver.PackingOrder do begin
+            (Positions.Count>=UInt(Min(INITIAL_PARKING_POSITION_COUNT_LIMIT,Int(Positions.Capacity div 4)))) then with Solver.PackingOrder do begin
             {the initial parking operations seems to be unsuccesful; abandon all parking operations in the initial phases of the game}
             for Index:=FirstSetMemberIndex[LastPhaseWithABoxParkedInASmallArea] to GoalAndParkingSquareCount do begin
                 GoalNo:=SetMembers[Index];
@@ -15782,20 +15853,20 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
   {- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - }
 
-  function  BackwardSearch:Integer;
+  function  BackwardSearch:Int;
   {precondition: the transposition-table has been initialized before calling 'BackwardSearch'}
-  var i,BoxNo,ExploredPositionsCountdownToTimeCheck,PlayerStartPosition,Square:Integer;
-      OriginalCapacity:Cardinal;
+  var i,BoxNo,ExploredPositionsCountdownToTimeCheck,PlayerStartPosition,Square:Int;
+      OriginalCapacity:UInt;
       OriginalReuseNodesEnabled:Boolean;
       StartPositionReverseMode:Boolean; Position:PPosition;
       ForwardBoxNo:TBoxNumbers;
       BoxStartPositions:TBoxSquares;
       Visited:TBoardOfBooleans;
 
-    function  Search(Position__:PPosition):Integer; {Search.BackwardSearch.Search}
+    function  Search(Position__:PPosition):Int; {Search.BackwardSearch.Search}
     {precondition: player's reachable squares have been calculated for this depth, that is, 'Position__^.PushCount'}
     var BoxNo,LastPushedBoxNo,PositionScore,Square,
-        SuccessorPushCount,SuccessorScore:Integer;
+        SuccessorPushCount,SuccessorScore:Int;
         Direction:TDirection; SuccessorPosition:PPosition;
     begin {Search.BackwardSearch.Search}
       //ShowBoard; Write('Expand position: Depth: ',Position__^.PushCount,' Score: ',Position__^.Score,' Simple lower bound: ',Game.SimpleLowerBound,' Positions: ',Positions.Count);
@@ -16087,7 +16158,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
            while precalculating deadlock sets at level load time;
           }
           Dec(Capacity, Capacity div 100); {reserve 1% of the transposition table memory for per-square deadlock set numbers}
-          UninitializedItemCount := Integer( Capacity );
+          UninitializedItemCount := Int( Capacity );
           end;
 
        if (Solver.SearchLimits.TimeLimitMS<High(Solver.SearchLimits.TimeLimitMS)) {'True': the search time is limited}
@@ -16098,8 +16169,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
            disk after the backward search; to ensure that there still is time to
            perform a forward search, there is a built-in transposition table
            size limit for the backward search;}
-          Positions.Capacity := Min( Integer(Positions.Capacity), MAX_BACKWARD_SEARCH_POSITIONS );
-          Positions.UninitializedItemCount := Integer( Positions.Capacity );
+          Positions.Capacity := Min( Int(Positions.Capacity), MAX_BACKWARD_SEARCH_POSITIONS );
+          Positions.UninitializedItemCount := Int( Positions.Capacity );
           end;
 
        {enqueue start-position (for a normal forward game)}
@@ -16206,7 +16277,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
        {restore the maximum transposition table capacity in case the backward search was running with a smaller table}
        if Positions.Capacity<OriginalCapacity then begin {otherwise, the transposition table has been re-initialized because there was something wrong with a found solution}
-          Inc( Positions.UninitializedItemCount, Integer( OriginalCapacity - Positions.Capacity ) );
+          Inc( Positions.UninitializedItemCount, Int( OriginalCapacity - Positions.Capacity ) );
           Positions.Capacity := OriginalCapacity;
           end;
        end;
@@ -16214,16 +16285,16 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
   {- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - }
 
-  function  ForwardSearch:Integer;
+  function  ForwardSearch:Int;
   {precondition: the transposition-table has been initialized before calling 'ForwardSearch'}
-  var SquareNo,GoalNo,Distance,ExploredPositionsCountdownToTimeCheck:Integer;
+  var SquareNo,GoalNo,Distance,ExploredPositionsCountdownToTimeCheck:Int;
       Position:PPosition;
       {$IFDEF PLUGIN_MODULE}
         s:String;
       {$ENDIF}
 
     procedure LogDeadlockSetStatistics;
-    var i:Integer; s:String; Totals:array[Boolean] of Cardinal;
+    var i:Int; s:String; Totals:array[Boolean] of UInt;
     begin
       if LogFile.Enabled then begin
          FillChar(Totals,SizeOf(Totals),0);
@@ -16249,7 +16320,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          end;
     end; {Search.ForwardSearch.LogDeadlockSetStatistics}
 
-    function  Search(Position__:PPosition):Integer; {Search.ForwardSearch.Search}
+    function  Search(Position__:PPosition):Int; {Search.ForwardSearch.Search}
     {precondition: the player's reachable squares have been calculated for this depth, i.e., 'Position__^.PushCount'}
     type
       PCorral                = ^TCorral;
@@ -16258,7 +16329,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         IsANewCorral         : Boolean;
         IsANotStoredDeadlock : Boolean;
         BoxSquares           : TBoxSquareSet;
-        MinPlayerPos         : Integer;
+        MinPlayerPos         : Int;
         NextCorral           : PCorral; {linked list of neighboring corrals}
         TimeStamp            : TTimeStamp;
       end;
@@ -16267,8 +16338,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       BoxNo,CorralBoxCount,Distance,GoalNo,i,Index,j,k,LastPushedBoxNo,
       NeighborSquare,OldPushCount,PositionScore,
       RoomNo,RoomPruningBoxCount,
-      Square,SuccessorBoxPos,SuccessorPushCount,SuccessorScore,Col,Row:Integer;
-      OldPositionCount:Cardinal;
+      Square,SuccessorBoxPos,SuccessorPushCount,SuccessorScore,Col,Row:Int;
+      OldPositionCount:UInt;
       LowWaterBoxTimeStamp,OldTimeStamp:TTimeStamp;
       HasAllBoxesOnGoals,IsAMultiRoomCorral:Boolean; Direction:TDirection;
       SuccessorPosition:PPosition;
@@ -16304,10 +16375,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
            end;
       end; {Search.ForwardSearch.Search.UpdateBestSolution}
 
-      function  CalculateCorralSquares(InnerFloorSquare__:Integer; var {io} HasAllBoxesOnGoals__:Boolean; var Corral__:TCorral):Integer; {caution: assumes 4 directions only}
-      var {Index,}BoardSquareValue,Square,NeighborSquare,NeighborSquare2:Integer;
+      function  CalculateCorralSquares(InnerFloorSquare__:Int; var {io} HasAllBoxesOnGoals__:Boolean; var Corral__:TCorral):Int; {caution: assumes 4 directions only}
+      var {Index,}BoardSquareValue,Square,NeighborSquare,NeighborSquare2:Int;
           Direction:TDirection;
-          BoxSquaresTop,StackTop:^Integer; Stack:array[0..MAX_BOARD_SIZE] of Integer; {caution: 'BoxSquaresTop' relies on 'TBoxSquareSet.BoxSquares' being a zero-based vector of integers where element 0 is unused}
+          BoxSquaresTop,StackTop:^Int; Stack:array[0..MAX_BOARD_SIZE] of Int; {caution: 'BoxSquaresTop' relies on 'TBoxSquareSet.BoxSquares' being a zero-based vector of integers where element 0 is unused}
       begin {Returns the inner floor squares in the global value 'Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares'}
         with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do begin
           if TimeStamp>=PLAYERS_REACHABLE_SQUARES_TIMESTAMP_UPPER_BOUND then
@@ -16315,7 +16386,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
           Inc(TimeStamp,2); {reachable empty floors = timestamp; reachable boxes = timestamp + 1}
 
           Result:=0; Calculated:=True; MinPlayerPos:=InnerFloorSquare__;
-          Corral__.HashValue:=0; 
+          Corral__.HashValue:=0;
           BoxSquaresTop:=Addr(Corral__.BoxSquares.Squares); // Corral.BoxSquares.Count:=0;
 
           if InnerFloorSquare__<>0 then begin
@@ -16395,7 +16466,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
              end;
 
           {calculate the number of boxes belonging to the corral; 'BoxSquareTop' points to the last added box square}
-          Corral__.BoxSquares.Count:=(Cardinal(BoxSquaresTop)-Cardinal(Addr(Corral__.BoxSquares.Squares))) div SizeOf(TBoxSquare); {vector element 0 is not used}
+          Corral__.BoxSquares.Count:=(UInt(BoxSquaresTop)-UInt(Addr(Corral__.BoxSquares.Squares))) div SizeOf(TBoxSquare); {vector element 0 is not used}
           Corral__.IsANewCorral    :=False; {initialize the 'is a new corral?' flag}
           Corral__.MinPlayerPos    :=MinPlayerPos; {return the normalized top-left player position}
           Corral__.TimeStamp       :=TimeStamp;
@@ -16403,7 +16474,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       end; {Search.ForwardSearch.Search.CalculateCorralSquares}
 
       function  CalculateCorralDeadlockStatus(GamePosition__,CorralPosition__:PPosition; var DeadlockSetCandidate__:TDeadlockSetCandidate):Boolean;
-//    var OriginalFloorCount:Integer;
+//    var OriginalFloorCount:Int;
       begin {precondition: 'DeadlockSetCandidate__' contains the deadlock candidate}
 //      OriginalFloorCount                          :=DeadlockSetCandidate__.Floors.Count;
         DeadlockSetCandidate__.MaxBoxCount          :=DeadlockSetCandidate__.Boxes.Count;
@@ -16417,16 +16488,16 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         //Writeln(Game.DeadlockSets.Count);
 
         if Assigned(CorralPosition__) then with CorralPosition__^.Move do begin
-          {Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_VISITED_TAG);}
+          {Direction:=TDirection(UInt(Ord(Direction)) or POSITION_VISITED_TAG);}
           if   Result then
-               Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_DEADLOCK_TAG)
+               Direction:=TDirection(UInt(Ord(Direction)) or POSITION_DEADLOCK_TAG)
           else {the corral could not be proved to be a deadlock at creation}
                {time; the search may later hit a dead end with this corral on}
                {the board; at that time it's tested once more if the corral is}
                {a deadlock (new deadlock-sets might help finding a proof);}
                {to that end, the 'open' tag is added here to signal that the}
                {second attempt hasn't been performed yet}
-               Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_OPEN_TAG);
+               Direction:=TDirection(UInt(Ord(Direction)) or POSITION_OPEN_TAG);
           end;
 
         Inc(Positions.Statistics.CalculateCorralDeadlockStatusCount);
@@ -16477,15 +16548,15 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       end; {Search.ForwardSearch.Search.CalculateCorralDeadlockStatus}
 
       function  TTAddNoPushesDeadlock(GamePosition__,CorralDeadlockPosition__:PPosition; IsACorralDeadLock__:Boolean; var NoPushesDeadlockPosition__:PPosition):Boolean;
-      var BoxNo,Square,SuccessorPushCount:Integer;
+      var BoxNo,Square,SuccessorPushCount:Int;
           OldControllerAndFreezeSetPairsEnabled:Boolean;
           BoxSquares:TBoxSquares;
           Direction:TDirection;
           DeadlockSetCandidate:TDeadlockSetCandidate;
           OldHashValue:THashValue;
 
-        function  CanABoxBePushed(SuccessorPushCount__:Integer):Boolean;
-        var BoxNo,NeighborSquare,Square:Integer; Direction:TDirection;
+        function  CanABoxBePushed(SuccessorPushCount__:Int):Boolean;
+        var BoxNo,NeighborSquare,Square:Int; Direction:TDirection;
         begin {preconditions:
                  1. the player's reachable squares have been calculated using index 'MAX_HISTORY_BOX_MOVES';
                  2. the player's reachable squares for search depth 'SuccessorPushCount__' are free to use;
@@ -16631,7 +16702,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                      Flags                    :=[dsfIsADeadlock,dsfPlayerMustBeOutsideSet,dsfIsOnlyADeadlockForListedPlayerAccessAreasOutsideFence]; {'dsfIsADeadlock': the corral is a deadlock; no further analysis is necessary}
                      SquareOutsideFence       :=-SquaresOutsideFence.Squares[1]; {elevate one of the squares outside the fence to be the representative for the outside area; (the negated value makes 'CommitDeadlockSet' use the absolute value)}
                      SquaresOutsideFence.Count:=-SquaresOutsideFence.Count; {negate the count; it makes 'CommitDeadlockSet' use the absolute value instead of resetting the count}
-                     with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count);  {update statistics}
+                     with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+UInt(DeadlockSetCandidate.Boxes.Count);  {update statistics}
 
                      OldHashValue:=Game.HashValue;
                      CalculateCorralDeadlockStatus(GamePosition__,NoPushesDeadlockPosition__,DeadlockSetCandidate);
@@ -16658,10 +16729,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
            end;
 
         if CorralDeadlockPosition__<>nil then with CorralDeadlockPosition__^.Move do {mark that pruning has been attempted for this corral}
-           Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_NO_LEGAL_PUSHES_TEST_TAG); {note that the tag only tells that pruning has been attempted; this is not the same as saying that the pruned corral is a deadlock}
+           Direction:=TDirection(UInt(Ord(Direction)) or POSITION_NO_LEGAL_PUSHES_TEST_TAG); {note that the tag only tells that pruning has been attempted; this is not the same as saying that the pruned corral is a deadlock}
 
         if NoPushesDeadlockPosition__<>nil then with NoPushesDeadlockPosition__^.Move do {mark that an attempt has been made to prune this deadlock candidate}
-           Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_NO_LEGAL_PUSHES_TEST_TAG);
+           Direction:=TDirection(UInt(Ord(Direction)) or POSITION_NO_LEGAL_PUSHES_TEST_TAG);
 
         Result:=(NoPushesDeadlockPosition__<>nil) and {'True': True': the deadlock candidate has been stored in the transposition table; (not necessarily created by this call to the function; the candidate may have been stored earlier}
                 ((Ord(NoPushesDeadlockPosition__^.Move.Direction) and POSITION_DEADLOCK_TAG)<>0); {'True': the pruned deadlock has been classified as a deadlock}
@@ -16675,7 +16746,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       end; {Search.ForwardSearch.Search.TTAddNoPushesDeadlock}
 
       function  TTAddSingleRoomCorral(Position__:PPosition; var Corral__:TCorral):Boolean;
-      var BoxIndex{,MemoryBlockByteSize,MemoryBlockPositionCount}:Integer;
+      var BoxIndex{,MemoryBlockByteSize,MemoryBlockPositionCount}:Int;
           CorralPosition:PPosition; DeadlockSetCandidate:TDeadlockSetCandidate;
       begin {adds a single-room corral (an area fenced-in by boxes) to the transposition table; returns 'True' if the corral is added and classified as a deadlock}
         Result:=False; //exit;
@@ -16698,7 +16769,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                repeat MemoryBlockPositionCount:=(MemoryBlockByteSize+Pred(SizeOf(TPosition))) div SizeOf(TPosition); {calculate the number of normal game positions that must be "stolen" for getting a memory block of this size}
                       MemoryBlockByteSize     := MemoryBlockByteSize div 2; {prepare for the next 'repeat ... until' loop if there isn't enough memory for the current memory block size}
                until (MemoryBlockPositionCount<=Positions.UninitializedItemCount);
-               Positions.CorralBoxSquares.BoxSquare:=PBoxSquare2(Addr(Positions.Positions^[Positions.Capacity-Cardinal(Positions.UninitializedItemCount)]);
+               Positions.CorralBoxSquares.BoxSquare:=PBoxSquare2(Addr(Positions.Positions^[Positions.Capacity-UInt(Positions.UninitializedItemCount)]);
                Positions.CorralBoxSquares.BoxSquaresCountDown:=(MemoryBlockPositionCount*SizeOf(TPosition)) div SizeOf(TBoxSquare);
                Dec(Positions.UninitializedItemCount,MemoryBlockPositionCount);
                end;
@@ -16721,7 +16792,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             DeadlockSetCandidate.CenterSquare:=Corral__.MinPlayerPos;
             DeadlockSetCandidate.Flags:=[];
 
-            with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count);  {update statistics}
+            with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+UInt(DeadlockSetCandidate.Boxes.Count);  {update statistics}
 {
             if CorralPosition.HashValue=1374239095250729304 then begin
 //          if Solver.PushCount=4383191 then begin
@@ -16754,7 +16825,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                //Readln;
 
                with CorralPosition^.Move do begin
-                 Direction:=TDirection((Cardinal(Ord(Direction)) or (POSITION_DEADLOCK_TAG+POSITION_NOT_STORED_DEADLOCK_TAG)) and (not POSITION_OPEN_TAG));
+                 Direction:=TDirection((UInt(Ord(Direction)) or (POSITION_DEADLOCK_TAG+POSITION_NOT_STORED_DEADLOCK_TAG)) and (not POSITION_OPEN_TAG));
                  end;
                Corral__.IsANotStoredDeadlock:=True;
                end;
@@ -16769,13 +16840,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       function  TTAddMultiRoomCorral(Position__:PPosition; IsAMultiRoomCorral__,HasNoLegalPushes__:Boolean; LowWaterBoxTimeStamp__:TTimeStamp; var CorralMinPlayerPos__:TBoxSquareSet):Boolean;
       {precondition: 'CorralPruning' has been called for the current game position 'Position__'}
       var BoxNo,Index,NeighborSquare,NeighborWallsCount,
-          NeigborCorralSquaresCount,Square:Integer;
+          NeigborCorralSquaresCount,Square:Int;
           Direction:TDirection;
           CorralHashValue:THashValue; CorralPosition,PrunedCorralPosition:PPosition;
           DeadlockSetCandidate:TDeadlockSetCandidate;
 
-        function  AddNeighborCorral(const DeadlockSetCandidate__:TDeadlockSetCandidate; var CorralMinPlayerPos__:TBoxSquareSet):Integer;
-        var BoxIndex,NeighborSquare,Square:Integer;
+        function  AddNeighborCorral(const DeadlockSetCandidate__:TDeadlockSetCandidate; var CorralMinPlayerPos__:TBoxSquareSet):Int;
+        var BoxIndex,NeighborSquare,Square:Int;
             b:Boolean; Direction:TDirection; NeighborCorral:TCorral;
         begin
           Result:=0;
@@ -16875,7 +16946,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                   DeadlockSetCandidate.GoalCount:=0; {the number of goals is recalculated from scratch by 'CalculateDeadlockSets' when the candidate has a center square, but the number must be initialized with a proper value}
                   DeadlockSetCandidate.Flags:=[];
 
-                  with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+Cardinal(DeadlockSetCandidate.Boxes.Count); {update statistics}
+                  with Positions.Statistics do CorralPositionsBoxCount:=CorralPositionsBoxCount+UInt(DeadlockSetCandidate.Boxes.Count); {update statistics}
 {
                   if Game.HashValue=1391017276032698857 then begin
                      ShowBoard;
@@ -16923,7 +16994,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       end; {Search.ForwardSearch.Search.TTAddMultiRoomCorral}
 
       function  TTAddFrozenGoalsPattern(GamePosition__:PPosition):Boolean;
-      var   GoalNo,OldCount,Square:Integer; PatternHashValue:THashValue;
+      var   GoalNo,OldCount,Square:Int; PatternHashValue:THashValue;
             PatternPosition:PPosition;
             DeadlockSetCandidate:TDeadlockSetCandidate;
       begin {creates deadlock-sets based on boxes freezing at goal squares}
@@ -16957,13 +17028,13 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       end; {Search.ForwardSearch.Search.TTAddFrozenGoalsPattern}
 
       function  TTAddNoProgressPattern( Position__ : PPosition ) : Boolean; {registers any new "no progress" deadlocks and starts a new "no progress" detection cycle}
-      var BoxNo,MinPlayerPos{,OldCount}:Integer; TimeMS:TTimeMS; BoxHashValue:THashValue;
+      var BoxNo,MinPlayerPos{,OldCount}:Int; TimeMS:TTimeMS; BoxHashValue:THashValue;
           DeadlockSetCandidate:TDeadlockSetCandidate;
           BoxSet:TBoxSetWithCount;
           //s:String;
 
         procedure CalculatePlayersReachableSquaresWithBoxesRemovedFromTheBoard(const BoxSet__:TBoxSetWithCount);
-        var BoxNo:Integer;
+        var BoxNo:Int;
         begin
           for BoxNo:=1 to Game.BoxCount do
               if BoxNo in BoxSet__.BoxSet then
@@ -16980,8 +17051,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                  Game.Board[Game.BoxPos[BoxNo]]:=Game.Board[Game.BoxPos[BoxNo]] or BOX; {put all boxes back on the board}
         end;
 
-        function  MakeDeadlockSetCandidateWithBoxSet(const BoxSet__:TBoxSetWithCount; var BoxHashValue__:THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__:TDeadlockSetCandidate):Boolean;
-        var BoxNo,Square:Integer;
+        function  MakeDeadlockSetCandidateWithBoxSet(const BoxSet__:TBoxSetWithCount; var BoxHashValue__:THashValue; var MinPlayerPos__ : Int; var DeadlockSetCandidate__:TDeadlockSetCandidate):Boolean;
+        var BoxNo,Square:Int;
         begin
           with DeadlockSetCandidate__ do begin
             BoxHashValue__:=0; Boxes.Count:=0; GoalCount:=0; CenterSquare:=0; Flags := [dsfIsANoProgressDeadlockCandidate];
@@ -17001,10 +17072,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             end;
         end; {MakeDeadlockSetCandidateWithBoxSet}
 
-        function  MakeDeadlockSetCandidateWithInactiveBoxes( var BoxHashValue__ : THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
+        function  MakeDeadlockSetCandidateWithInactiveBoxes( var BoxHashValue__ : THashValue; var MinPlayerPos__ : Int; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
         const ACTIVE_BOX_THRESHOLD = 200 * ONE_KIBI;
-        var BoxNo, NeigborCorralSquaresCount, OppositeAxisBlockCount, OldPlayerPos, Square : Integer;
-            ActiveBoxThreshold : Cardinal;
+        var BoxNo, NeigborCorralSquaresCount, OppositeAxisBlockCount, OldPlayerPos, Square : Int;
+            ActiveBoxThreshold : UInt;
             Direction : TDirection;
             BoxSet:TBoxSetWithCount;
         begin
@@ -17109,8 +17180,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
               end;
         end; {MakeDeadlockSetCandidateWithInactiveBoxes}
 
-        function  MakeDeadlockSetCandidateWithCurrentPosition( var BoxHashValue__ : THashValue; var MinPlayerPos__ : Integer; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
-        var BoxNo,Square:Integer;
+        function  MakeDeadlockSetCandidateWithCurrentPosition( var BoxHashValue__ : THashValue; var MinPlayerPos__ : Int; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
+        var BoxNo,Square:Int;
         begin
           with DeadlockSetCandidate__ do begin
             BoxHashValue__:=0; Boxes.Count:=0; GoalCount:=0; CenterSquare:=0;
@@ -17127,8 +17198,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             end;
         end; {MakeDeadlockSetCandidateWithCurrentPosition}
 
-        function CheckDeadlockSetCandidate( Position__ : PPosition; BoxHashValue__ : THashValue; MinPlayerPos__ : Integer; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
-        var //BoxNo, OldCount : Integer;
+        function CheckDeadlockSetCandidate( Position__ : PPosition; BoxHashValue__ : THashValue; MinPlayerPos__ : Int; var DeadlockSetCandidate__ : TDeadlockSetCandidate ) : Boolean;
+        var //BoxNo, OldCount : Int;
             DeadlockPosition : PPosition;
         //  OriginalBoard:TBoard;
         begin
@@ -17283,12 +17354,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         Inc(Game.DeadlockSets.NoProgressDeadlockCheckTimeMS,CalculateElapsedTimeMS(TimeMS,GetTimeMS));
       end; {Search.ForwardSearch.Search.TTAddNoProgressPattern}
 
-      ///const DebugThreshold:Cardinal=1;
+      ///const DebugThreshold:UInt=1;
 
       {///$DEFINE DEBUG_CORRALS}
 
       function  CorralPruning(Position__:PPosition;
-                              SearchDepth__,FloorSquare__,RecursionDepth__:Integer;
+                              SearchDepth__,FloorSquare__,RecursionDepth__:Int;
                               LowWaterBoxTimeStamp__                      :TTimeStamp;
                               NeighborCorral__                            :PCorral;
                               var HasAllBoxesOnGoals__                    :Boolean;
@@ -17299,7 +17370,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         MAX_CORRAL_SEARCH_DEPTH = 8; {guard against stack overflow}
       var
         BoxNo,//Index,//Col,Row,
-        NeighborSquare,OppositeNeighborSquare,Square:Integer;
+        NeighborSquare,OppositeNeighborSquare,Square:Int;
         BoxTimeStamp,LowWaterTimeStamp,NeighborSquareTimeStamp,OppositeNeighborSquareTimeStamp:TTimeStamp;
         IsANewMultiRoomCorral,
         NeighborCorralHasAllBoxesOnGoals,
@@ -17307,10 +17378,10 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         Direction:TDirection;
         Corral:TCorral;
 
-        procedure AddConnectedBoxesToCorral(BoxSquare__:Integer; BoxTimeStamp__,LowWaterBoxTimeStamp__:TTimeStamp; var Corral__:TCorral; var NextBoxNo__:Integer);
-//      function  AddConnectedBoxesToCorral(BoxSquare__:Integer; BoxTimeStamp__,LowWaterBoxTimeStamp__:TTimeStamp; var NextBoxNo__:Integer):Integer;
-        var {Index,}Square:Integer; Direction:TDirection;
-            StackTop:^Integer; Stack:TBoxArrayOfIntegers;
+        procedure AddConnectedBoxesToCorral(BoxSquare__:Int; BoxTimeStamp__,LowWaterBoxTimeStamp__:TTimeStamp; var Corral__:TCorral; var NextBoxNo__:Int);
+//      function  AddConnectedBoxesToCorral(BoxSquare__:Int; BoxTimeStamp__,LowWaterBoxTimeStamp__:TTimeStamp; var NextBoxNo__:Int):Int;
+        var {Index,}Square:Int; Direction:TDirection;
+            StackTop:^Int; Stack:TBoxArrayOfIntegers;
         begin
           //Result:=0;
           with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do begin
@@ -17357,9 +17428,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             end;
         end; {Search.ForwardSearch.Search.CorralPruning.AddConnectedBoxesToCorral}
 
-        function  BoxCanMoveIndependentlyOfCorralBoxes(Square__: Integer; Direction__:TDirection; LowWaterBoxTimeStamp__,BoxTimeStamp__:TTimeStamp; var IsAMultiRoomCorral__:Boolean):Boolean;
+        function  BoxCanMoveIndependentlyOfCorralBoxes(Square__: Int; Direction__:TDirection; LowWaterBoxTimeStamp__,BoxTimeStamp__:TTimeStamp; var IsAMultiRoomCorral__:Boolean):Boolean;
         var NeighborSquare,NeighborSquareValue,
-            OppositeNeighborSquare,OppositeNeighborSquareValue:Integer;
+            OppositeNeighborSquare,OppositeNeighborSquareValue:Int;
         begin
           with Solver.SearchStates[SEARCH_STATE_INDEX_CORRAL_PRUNING].PlayersReachableSquares do begin
             NeighborSquare              :=Square__+Game.SquareOffsetRight[Direction__];
@@ -17397,17 +17468,17 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
             end;
         end; {Search.ForwardSearch.Search.CorralPruning.BoxCanMoveIndependentlyOfCorralBoxes}
 
-        function  IsAFreezingMoveConsideringCorralBoxesOnly ( FromSquareNo__ , ToSquareNo__ : Integer;
+        function  IsAFreezingMoveConsideringCorralBoxesOnly ( FromSquareNo__ , ToSquareNo__ : Int;
                                                               LowWaterBoxTimeStamp__ , BoxTimeStamp__: TTimeStamp;
                                                               var IsAMultiRoomCorral__ : Boolean ) : Boolean;
-        var OriginalFromSquareValue : Integer;
+        var OriginalFromSquareValue : Int;
             ABoxIsBlockedOnANonGoalSquare , OriginalIsAMultiRoomCorral__ : Boolean;
 
-          function  BoxIsBlockedAlongOneAxis ( SquareNo__                : Integer;
+          function  BoxIsBlockedAlongOneAxis ( SquareNo__                : Int;
                                                Direction__               : TDirection;
-                                               {RecursionDepthCountDown__ : Integer;} {the recursion guard has been substituted by timestamping one axis per square}
+                                               {RecursionDepthCountDown__ : Int;} {the recursion guard has been substituted by timestamping one axis per square}
                                                var ABoxIsBlockedOnANonGoalSquare__ : Boolean ):Boolean;
-          var Neighbor1 , Neighbor2 , Neighbor1Position , Neighbor2Position : Integer;
+          var Neighbor1 , Neighbor2 , Neighbor1Position , Neighbor2Position : Int;
               OriginalAMultiRoomCorral__ : Boolean;
           begin
             {if RecursionDepthCountDown__ > 0 then}
@@ -17841,8 +17912,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
           end;
       end; {Search.ForwardSearch.Search.CorralPruning}
 
-    function MinimumDistanceToGamePhaseTargetSquares( Position__ : PPosition ) : Integer;
-    var Index:Integer;
+    function MinimumDistanceToGamePhaseTargetSquares( Position__ : PPosition ) : Int;
+    var Index:Int;
     begin
       Result := High( Result );
       with Game do with Solver.PackingOrder do
@@ -17853,21 +17924,21 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
          Result := -1;
     end;
 
-    function  CalculatePackingOrderPhaseAndScore(Position__:PPosition; FromSquare__,ToSquare__,BoxNo__:Integer):Boolean;
+    function  CalculatePackingOrderPhaseAndScore(Position__:PPosition; FromSquare__,ToSquare__,BoxNo__:Int):Boolean;
     {preconditions:
      1. 'Position__' is the result of pushing a box from 'FromSquare__' to 'ToSquare__';
      2. 'Position__^.PackingOrder.SetNo' contains the game phase before the push;
     }
     const END_GAME_PHASE_LIMIT=2; {near the end of the game, be less strict about obeying the calculated packing order}
     var   Distance,EmptySquaresCount,FilledSquaresCount,FreezePenalty,GamePhase,GoalNo,
-          i,Index,LastSetMemberIndex,Score,Score2,SetMemberSquare,SetNo,Square,SquarePhase:Integer;
+          i,Index,LastSetMemberIndex,Score,Score2,SetMemberSquare,SetNo,Square,SquarePhase:Int;
     begin {CalculatePackingOrderPhaseAndScore}
           {returns 'True' if the box reaches a target square for the game phase after the push}
       with Game do with Solver.PackingOrder do begin
         Score:=0;
         GamePhase:=Position__^.PackingOrder.SetNo;                              {game phase before the push}
 
-        GoalNo:=Cardinal(Board[FromSquare__] shr GOAL_BIT_SHIFT_COUNT);         {get the goal/parking place number, if any, for the 'from' square}
+        GoalNo:=UInt(Board[FromSquare__] shr GOAL_BIT_SHIFT_COUNT);             {get the goal/parking place number, if any, for the 'from' square}
         SquarePhase:=GoalSetNo[GoalNo];                                         {get the square phase number, if any; if the square is a target square in more than one phase, then the number in 'GoalSetNo[]' is the highest phase for the square}
         if SquarePhase>=GamePhase then begin                                    {'True': the box is leaving a square which was filled in this game phase or an earlier game phase}
            if SquarePhase>GamePhase then                                        {'True': the box leaves a square which was filled in an earlier and already completed game phase}
@@ -18021,23 +18092,23 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     end; {Search.ForwardSearch.Search.CalculatePackingOrderPhaseAndScore}
 (*
     function  TryToFillGoalsAndParkingspaces( Position__ : PPosition ) : Boolean;
-    var GamePhase, GoalNo, Index, SetMemberSquare : Integer;
-        //Col, Row : Integer;
+    var GamePhase, GoalNo, Index, SetMemberSquare : Int;
+        //Col, Row : Int;
 
-      function  PushBoxToSquare( Position__ : PPosition; BoxSquare__ : Integer ) : Integer;
+      function  PushBoxToSquare( Position__ : PPosition; BoxSquare__ : Int ) : Int;
       type PQueueItem = ^TQueueItem;
            TQueueItem = record BoxPos, PlayerPos : UInt16;
                                Parent            : PQueueItem;
                         end;
       var  BoxNo,BoxPosition,BoxToSquare,
            LastBoxPosition,NeighborSquare,
-           OldBoxSquareValue,OldPlayerPosition,PlayerToSquare:Integer;
+           OldBoxSquareValue,OldPlayerPosition,PlayerToSquare:Int;
            Direction:TDirection;
            QueueBottom,QueueTop,QueueItem:PQueueItem;
            QueueItems:array[0..MAX_BOARD_SIZE*DIRECTION_COUNT] of TQueueItem;
 
         procedure ShowPath( QueueItem__ : PQueueItem );
-        var Col, Row : Integer;
+        var Col, Row : Int;
         begin
           while Assigned( QueueItem__ ) do begin
             SquareToColRow( QueueItem__^.BoxPos, Col, Row );
@@ -18047,9 +18118,9 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
         end;
 
         function  AddPath( Position__  : PPosition;
-                           BoxNo__     : Integer;
+                           BoxNo__     : Int;
                            QueueItem__ : PQueueItem ) : Boolean;
-        var i, BoxSquare, FreezePenalty, NeighborSquare, PlayerSquare, SuccessorPushCount, SuccessorScore : Integer;
+        var i, BoxSquare, FreezePenalty, NeighborSquare, PlayerSquare, SuccessorPushCount, SuccessorScore : Int;
             Direction : TDirection;
             SuccessorPosition : PPosition;
         begin {stores the positions along the path for pushing the box to the selected target square}
@@ -18149,7 +18220,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                 SuccessorScore:=SuccessorPosition^.Score; {get the score calculated taking the game phase into account}
                                 if ((Game.Board[NeighborSquare] and GOAL)<>0) and     {'True': the box is pushed to a goal square}
                                    IsAFreezingMove(0,NeighborSquare,True) then begin  {'True': the box freezes at the goal square}
-                                   i:=Solver.PackingOrder.GoalSetNo[Cardinal(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]; {get packing order phase for the destination square}
+                                   i:=Solver.PackingOrder.GoalSetNo[UInt(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]; {get packing order phase for the destination square}
                                    if i<SuccessorPosition^.PackingOrder.SetNo then with Solver.PackingOrder do begin
                                       {the box freezes at a goal square which should not be filled in this packing order phase}
                                       //FreezePenalty:=(FirstSetMemberIndex[Position__^.PackingOrder.SetNo]-FirstSetMemberIndex[i])*EMPTY_GOAL_PENALTY;
@@ -18189,7 +18260,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                                  SuccessorPosition^.PathLengthToSolution;
                                  if (Positions.SolutionPosition=nil)
                                     or
-                                    (Cardinal(SuccessorScore) <
+                                    (UInt(SuccessorScore) <
                                      (Positions.SolutionPosition^.PushCount+
                                       Positions.SolutionPosition^.PathLengthToSolution))
                                     or
@@ -18240,7 +18311,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                   );
              Writeln;
              //Readln;
-}             
+}
              end;
         end; {AddPath}
 
@@ -18375,8 +18446,8 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
     end; {Search.ForwardSearch.TryToFillGoalsAndParkingspaces}
 *)
 (*
-    function  IsLegalOrimazePush(Position__:PPosition; BoxNo__:Integer; Direction__:TDirection):Boolean;
-    var Countdown:Integer;
+    function  IsLegalOrimazePush(Position__:PPosition; BoxNo__:Int; Direction__:TDirection):Boolean;
+    var Countdown:Int;
         PositionDirection:TDirection;
     begin
       with Game do begin
@@ -18455,7 +18526,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                    ' Min: ',Positions.OpenPositions.MinValue
 //                 ' Reused: ',Positions.SearchStatistics.ReuseCount
                  );
-           Write(SPACE,SPACE,Cardinal(Position__),SPACE,Game.HashValue,
+           Write(SPACE,SPACE,UInt(Position__),SPACE,Game.HashValue,
 //               SPACE,Positions.SearchStatistics.CalculateCorralDeadlockStatusCount,
                  SPACE,Game.DeadlockSets.Count,
                  ' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS, GetTimeMS)+500) div ONE_THOUSAND
@@ -18498,12 +18569,12 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
       // (calls to sub-functions are not a part of the test, hence, some surplus
       // is required)
       if Position__^.PushCount<=High(Solver.SearchStates) then begin
-         Writeln(Position__^.PushCount,SPACE,Cardinal(Addr(BoxNo)));
+         Writeln(Position__^.PushCount,SPACE,UInt(Addr(BoxNo)));
          Inc(Position__^.PushCount);
          Search(Position__);
          end
       else begin
-         Writeln(Position__^.PushCount,SPACE,Cardinal(Addr(BoxNo)));
+         Writeln(Position__^.PushCount,SPACE,UInt(Addr(BoxNo)));
          Readln;
          Halt;
          end;
@@ -18848,7 +18919,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 //                        if (Game.HashValue=8253987669946026094) then begin
 //                        if Game.HashValue=Game.SolutionPathHashValues[18] then begin
 //                        if (Position__^.HashValue=1430312999849821417) then begin
-                          //if (Positions.Capacity-Cardinal(Succ(Positions.UninitializedItemCount))>=1494196) then begin
+                          //if (Positions.Capacity-UInt(Succ(Positions.UninitializedItemCount))>=1494196) then begin
                              ShowBoard;
                              Write('Do push: ');
                              Write('Depth: ',Succ(Position__^.PushCount),SPACE,Succ(Position__^.PushCount-Positions.CurrentPosition^.PushCount),
@@ -18958,7 +19029,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
 
                                    if    ((Game.Board[NeighborSquare] and GOAL)<>0) and     {'True': the box is pushed to a goal square}
                                          IsAFreezingMove(0,NeighborSquare,True) then begin  {'True': the box freezes at the goal square}
-                                         i:=Solver.PackingOrder.GoalSetNo[Cardinal(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]; {get packing order phase for the destination square}
+                                         i:=Solver.PackingOrder.GoalSetNo[UInt(Game.Board[NeighborSquare] shr GOAL_BIT_SHIFT_COUNT)]; {get packing order phase for the destination square}
                                          if i<Position__^.PackingOrder.SetNo then with Solver.PackingOrder do begin
                                             {the box freezes at a goal square which should
                                              not be filled in this packing order phase;
@@ -19003,7 +19074,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                             ((Ord(SuccessorPosition^.Move.Direction) and (POSITION_OPEN_TAG+POSITION_PACKING_ORDER_PREMATURE_FREEZE_TAG))<>0)
                                             then begin
                                             SuccessorScore:=SuccessorPosition^.Score;
-                                            if Cardinal(SuccessorScore)<Positions.BestScore then begin
+                                            if UInt(SuccessorScore)<Positions.BestScore then begin
                                                Positions.BestScore:=SuccessorScore;
                                                Positions.BestPosition:=SuccessorPosition;
                                                end;
@@ -19117,7 +19188,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                                                         SuccessorPosition^.PathLengthToSolution;
                                         if (Positions.SolutionPosition=nil)
                                            or
-                                           (Cardinal(SuccessorScore) <
+                                           (UInt(SuccessorScore) <
                                             (Positions.SolutionPosition^.PushCount+
                                              Positions.SolutionPosition^.PathLengthToSolution))
                                            or
@@ -19252,7 +19323,7 @@ var OriginalBoxLimitForDynamicSets,OldPlayerPos:Integer;
                  if Parent<>nil then Position__^.PackingOrder.SetNo:=Parent^.PackingOrder.SetNo;
                  Result:=Score;
                  end;
-              end 
+              end
            else {only pushes for the boxes in the current room or tunnel have been generated}
               if (Ord(Move.Direction) and POSITION_OPEN_TAG)=0 then begin       {'True': the position isn't on the open-queue; put it on the list for further expansion later in case no solution is found in the room-pruned part of the game graph}
                  Result:=PositionScore;                                         {ensure that the position keeps its original score; otherwise optimality cannot be guaranteed}
@@ -19923,7 +19994,7 @@ begin {Search}
        end;
   {$ENDIF}
 
-  if Result and Optimizer.Enabled then 
+  if Result and Optimizer.Enabled then
      ReduceBoxChanges; {performing small optimizations isn't included in the search time}
 end; {Search}
 
@@ -19931,18 +20002,19 @@ end; {Search}
 
 {Optimizer}
 
-function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar):Boolean;
+function  OptimizeGame(MovesAsTextBufferByteSize__:Int; MovesAsText__:PChar):Boolean;
 // precondition: the game has been initialized by calling 'InitializeGame', and the game state is the start position
 
   type
-    TOptimizerPositionVector     = array[0..(MaxInt div SizeOf(TOptimizerPosition))-1] of TOptimizerPosition;
+    TOptimizerPositionVector     = array[0..(MaxInt div SizeOf(TOptimizerPosition))-1] of TOptimizerPosition; {the declared size limit is merely a formality. range checking is disabled}
     POptimizerPositionVector     = ^TOptimizerPositionVector;
     TPlayerPositionMatch         = (ppmAccessAreaFirst,ppmAccessAreaNext,ppmExact,ppmBetter,ppmNearest); // order must not change; e.g., see 'TTLookup'
   var
+    IsExhaustiveSearch           : Boolean;
     OriginalSolverTimeMS         : TTimeMS;
 
-  //function  TTIndexOf(Position__:PPosition):Integer; forward;
-  function  TTLookup(Depth__:Integer; PlayerPositionMatch__:TPlayerPositionMatch; Direction__:TDirection; var Position__:PPosition):Boolean; forward;
+  //function  TTIndexOf(Position__:PPosition):Int; forward;
+  function  TTLookup(Depth__:Int; PlayerPositionMatch__:TPlayerPositionMatch; Direction__:TDirection; var Position__:PPosition):Boolean; forward;
   procedure TTRemove(Position__:PPosition); forward;
   procedure MakeSuccessorChainForNodesOnPath(Position__:PPosition); forward;
   procedure SetGameMetrics(Position__:PPosition); forward;
@@ -19952,7 +20024,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   function  WriteBestPathToLogFile:Boolean; forward;
 
   function  CompareMovesFromSquare(const MFS__:TMovesFromSquare):Boolean;
-//var SquareNo:Integer; Direction:TDirection;
+//var SquareNo:Int; Direction:TDirection;
   begin // not in production
     Result:=True;
 //  for SquareNo:=0 to Pred(Game.BoardSize) do
@@ -19972,14 +20044,14 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 //  Result:=CompareMovesFromSquare(MFS);
   end; // OptimizeGame.CheckMovesFromSquare
 
-  procedure DoPull(BoxNo__:Integer; Direction__:TDirection);   {reverse mode: pulling boxes instead of pushing them}
+  procedure DoPull(BoxNo__:Int; Direction__:TDirection);   {reverse mode: pulling boxes instead of pushing them}
   begin
     Direction__:=OPPOSITE_DIRECTION[TDirection(Ord(Direction__) and DIRECTION_BIT_MASK)];
     // Dec(Optimizer.MovesFromSquare[Game.BoxPos[BoxNo__]-Game.SquareOffsetForward[Direction__],Direction__]); // update move map; note that pulls count down, that is, they "erase" the trail rather than leaving a new trail
     YASS.UndoPush(BoxNo__,Direction__);
   end; // OptimizeGame.DoPull
 
-  procedure DoPush(BoxNo__:Integer; Direction__:TDirection);
+  procedure DoPush(BoxNo__:Int; Direction__:TDirection);
   begin
     if BoxNo__<>0 then with Optimizer.GameMetrics do begin
        if Ord(Direction__)<>Ord(Direction__) and DIRECTION_BIT_MASK then
@@ -20004,14 +20076,14 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
        end;
   end; // OptimizeGame.DoPush
 
-  procedure UndoPull(BoxNo__:Integer; Direction__:TDirection); {reverse mode: pulling boxes instead of pushing them}
+  procedure UndoPull(BoxNo__:Int; Direction__:TDirection); {reverse mode: pulling boxes instead of pushing them}
   begin
     Direction__:=OPPOSITE_DIRECTION[TDirection(Ord(Direction__) and DIRECTION_BIT_MASK)];
     //Inc(Optimizer.MovesFromSquare[Game.BoxPos[BoxNo__],Direction__]); // update move map; note that pulls count down, that is, they "erase" the trail rather than leaving a new trail
     YASS.DoPush  (BoxNo__,Direction__,-1);
   end; // OptimizeGame.UndoPull
 
-  procedure UndoPush(BoxNo__:Integer; Direction__:TDirection; ParentPosition__:PPosition);
+  procedure UndoPush(BoxNo__:Int; Direction__:TDirection; ParentPosition__:PPosition);
   begin
     if BoxNo__<>0 then begin
        Direction__:=TDirection(Ord(Direction__) and DIRECTION_BIT_MASK);
@@ -20034,46 +20106,46 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
               ;
   end; // OptimizeGame.GameMetricsAsText
 
-  function  ComparePositionScores(Position1__,Position2__:PPosition):Integer;
+  function  ComparePositionScores(Position1__,Position2__:PPosition):Int;
   begin // returns the score for 'Position1__' minus the score for 'Position2__'
     with POptimizerPosition(Position1__)^ do with Position do begin
       if      (Optimizer.Optimization=opPushesMoves) or (Optimizer.Optimization=opPushesOnly) then begin // optimize pushes/moves or pushes
-              Result:=Integer(PushCount)-Integer(POptimizerPosition(Position2__)^.Position.PushCount);
-              if Result=0 then Result:=Integer(MoveCount)-Integer(POptimizerPosition(Position2__)^.MoveCount);
+              Result:=Int(PushCount)-Int(POptimizerPosition(Position2__)^.Position.PushCount);
+              if Result=0 then Result:=Int(MoveCount)-Int(POptimizerPosition(Position2__)^.MoveCount);
               end
       else if Optimizer.Optimization=opMovesPushes then begin                   // optimize moves
-              Result:=Integer(MoveCount)-Integer(POptimizerPosition(Position2__)^.MoveCount);
-              if Result=0 then Result:=Integer(PushCount)-Integer(POptimizerPosition(Position2__)^.Position.PushCount);
+              Result:=Int(MoveCount)-Int(POptimizerPosition(Position2__)^.MoveCount);
+              if Result=0 then Result:=Int(PushCount)-Int(POptimizerPosition(Position2__)^.Position.PushCount);
               end
            else begin // optimize boxlines
-              Result:=Integer(BoxLines)-Integer(POptimizerPosition(Position2__)^.BoxLines);
+              Result:=Int(BoxLines)-Int(POptimizerPosition(Position2__)^.BoxLines);
               if Result=0 then begin
                  if Optimizer.Optimization=opBoxLinesMoves then begin
-                    Result:=Integer(MoveCount)-Integer(POptimizerPosition(Position2__)^.MoveCount);
-                    if Result=0 then Result:=Integer(PushCount)-Integer(POptimizerPosition(Position2__)^.Position.PushCount);
+                    Result:=Int(MoveCount)-Int(POptimizerPosition(Position2__)^.MoveCount);
+                    if Result=0 then Result:=Int(PushCount)-Int(POptimizerPosition(Position2__)^.Position.PushCount);
                     end
                  else begin // optimize boxlines/pushes
-                    Result:=Integer(PushCount)-Integer(POptimizerPosition(Position2__)^.Position.PushCount);
-                    if Result=0 then Result:=Integer(MoveCount)-Integer(POptimizerPosition(Position2__)^.MoveCount);
+                    Result:=Int(PushCount)-Int(POptimizerPosition(Position2__)^.Position.PushCount);
+                    if Result=0 then Result:=Int(MoveCount)-Int(POptimizerPosition(Position2__)^.MoveCount);
                     end;
                  end;
               end;
       if Result=0 then begin
-         Result:=Integer(BoxLines)-Integer(POptimizerPosition(Position2__)^.BoxLines);
+         Result:=Int(BoxLines)-Int(POptimizerPosition(Position2__)^.BoxLines);
          if Result=0 then begin
-            Result:=Integer(BoxChanges)-Integer(POptimizerPosition(Position2__)^.BoxChanges);
+            Result:=Int(BoxChanges)-Int(POptimizerPosition(Position2__)^.BoxChanges);
             if Result=0 then begin
-               Result:=Integer(PushingSessions)-Integer(POptimizerPosition(Position2__)^.PushingSessions);
+               Result:=Int(PushingSessions)-Int(POptimizerPosition(Position2__)^.PushingSessions);
                if (Result=0) and Optimizer.GameMetrics.HasPlayerLines then
-                  Result:=Integer(PlayerLines)-Integer(Position2__^.PlayerLines);
+                  Result:=Int(PlayerLines)-Int(Position2__^.PlayerLines);
                end;
             end;
          end;
       end;
   end; // OptimizeGame.ComparePositionScores
 
-  function  HasABetterMovesPushesBoxLinesScore(Position__:PPosition; MoveCount__,PushCount__,BoxLines__:Integer):Boolean;
-  var CompareResult:Integer;
+  function  HasABetterMovesPushesBoxLinesScore(Position__:PPosition; MoveCount__,PushCount__,BoxLines__:Int):Boolean;
+  var CompareResult:Int;
   begin // returns 'True' if 'Position__' has a moves/pushes score better than ['MoveCount__', 'PushCount__'];
         // as an exception, if the optimization method is boxlines/moves or boxlines/pushes, then the number of boxlines is used as the first comparison criterion
     if        (Optimizer.Optimization=opPushesMoves) or (Optimizer.Optimization=opPushesOnly) then
@@ -20091,15 +20163,15 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                      else Result:=True
                 else Result:=False
          else with POptimizerPosition(Position__)^ do with Position do begin    // optimize boxlines
-                CompareResult                              :=Integer(BoxLines )-BoxLines__;
+                CompareResult                              :=Int(BoxLines )-BoxLines__;
                 if CompareResult=0 then begin
                    if Optimizer.Optimization=opBoxLinesMoves then begin         // optimize boxlines/moves
-                      CompareResult                        :=Integer(MoveCount)-MoveCount__;
-                      if CompareResult=0 then CompareResult:=Integer(PushCount)-PushCount__;
+                      CompareResult                        :=Int(MoveCount)-MoveCount__;
+                      if CompareResult=0 then CompareResult:=Int(PushCount)-PushCount__;
                       end
                    else begin                                                   // optimize boxlines/pushes
-                      CompareResult                        :=Integer(PushCount)-PushCount__;
-                      if CompareResult=0 then CompareResult:=Integer(MoveCount)-MoveCount__;
+                      CompareResult                        :=Int(PushCount)-PushCount__;
+                      if CompareResult=0 then CompareResult:=Int(MoveCount)-MoveCount__;
                       end;
                    end;
                 Result:=CompareResult<0;
@@ -20107,38 +20179,38 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   end; // OptimizeGame.HasABetterMovesPushesScore
 
   function  HasABetterOrEqualScore(Position__:PPosition):Boolean;
-  var CompareResult:Integer;
+  var CompareResult:Int;
   begin // returns 'True' if 'Position__' has a score <= the score for the current game position
     with POptimizerPosition(Position__)^ do with Position do begin
       if      (Optimizer.Optimization=opPushesMoves) or (Optimizer.Optimization=opPushesOnly) then begin // optimize pushes/moves or pushes
-              CompareResult                              :=Integer(PushCount)-Optimizer.GameMetrics.PushCount;
-              if CompareResult=0 then CompareResult      :=Integer(MoveCount)-Optimizer.GameMetrics.MoveCount;
+              CompareResult                              :=Int(PushCount)-Optimizer.GameMetrics.PushCount;
+              if CompareResult=0 then CompareResult      :=Int(MoveCount)-Optimizer.GameMetrics.MoveCount;
               end
       else if Optimizer.Optimization=opMovesPushes then begin // optimize moves/pushes
-              CompareResult                              :=Integer(MoveCount)-Optimizer.GameMetrics.MoveCount;
-              if CompareResult=0 then CompareResult      :=Integer(PushCount)-Optimizer.GameMetrics.PushCount;
+              CompareResult                              :=Int(MoveCount)-Optimizer.GameMetrics.MoveCount;
+              if CompareResult=0 then CompareResult      :=Int(PushCount)-Optimizer.GameMetrics.PushCount;
               end
            else begin // optimize boxlines
-              CompareResult                              :=Integer(BoxLines )-Optimizer.GameMetrics.BoxLines;
+              CompareResult                              :=Int(BoxLines )-Optimizer.GameMetrics.BoxLines;
               if CompareResult=0 then begin
                  if Optimizer.Optimization=opBoxLinesMoves then begin
-                    CompareResult                        :=Integer(MoveCount)-Optimizer.GameMetrics.MoveCount;
-                    if CompareResult=0 then CompareResult:=Integer(PushCount)-Optimizer.GameMetrics.PushCount;
+                    CompareResult                        :=Int(MoveCount)-Optimizer.GameMetrics.MoveCount;
+                    if CompareResult=0 then CompareResult:=Int(PushCount)-Optimizer.GameMetrics.PushCount;
                     end
                  else begin // optimize boxlines/pushes
-                    CompareResult                        :=Integer(PushCount)-Optimizer.GameMetrics.PushCount;
-                    if CompareResult=0 then CompareResult:=Integer(MoveCount)-Optimizer.GameMetrics.MoveCount;
+                    CompareResult                        :=Int(PushCount)-Optimizer.GameMetrics.PushCount;
+                    if CompareResult=0 then CompareResult:=Int(MoveCount)-Optimizer.GameMetrics.MoveCount;
                     end;
                  end;
               end;
       if   CompareResult=0 then begin
-           CompareResult:=Integer(BoxLines)-Optimizer.GameMetrics.BoxLines;
+           CompareResult:=Int(BoxLines)-Optimizer.GameMetrics.BoxLines;
            if CompareResult=0 then begin
-              CompareResult:=Integer(BoxChanges)-Optimizer.GameMetrics.BoxChanges;
+              CompareResult:=Int(BoxChanges)-Optimizer.GameMetrics.BoxChanges;
               if CompareResult=0 then begin
-                 CompareResult:=Integer(PushingSessions)-Optimizer.GameMetrics.PushingSessions;
+                 CompareResult:=Int(PushingSessions)-Optimizer.GameMetrics.PushingSessions;
                  if (CompareResult=0) and Optimizer.GameMetrics.HasPlayerLines then
-                    CompareResult:=Integer(PlayerLines)-Optimizer.GameMetrics.PlayerLines;
+                    CompareResult:=Int(PlayerLines)-Optimizer.GameMetrics.PlayerLines;
                  end;
               end;
            end;
@@ -20158,7 +20230,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   function  CalculateMetricsForPositionsOnBestPath(var BestPositionMetricsChanged__:Boolean):Boolean;
   // update metrics for all positions on the path to the best found position;
   // they may be out of sync if the search stopped prematurely, e.g., as the result of a user intervention, a time limit, or a full transposition table
-  var NewBoxNo,PlayerFromSquare,PlayerPathMoveCount,PlayerPathLineCount:Integer; NewDirection:TDirection;
+  var NewBoxNo,PlayerFromSquare,PlayerPathMoveCount,PlayerPathLineCount:Int; NewDirection:TDirection;
       PreviousPosition:PPosition; PlayerPathMoves:TSingleStepMoves;
   begin
     Result:=True; BestPositionMetricsChanged__:=False;
@@ -20193,7 +20265,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                       Optimizer.GameMetrics.LastPlayerDirection:=NewDirection;  {update the current player direction}
                       end;
                    DoPush(Move.BoxNo,TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK));
-                   Move.Direction:=TDirection(Cardinal(Ord(Move.Direction)) or POSITION_PATH_TAG); {the position must be marked as being on the current path so 'SetPosition()' later can undo the push normally}
+                   Move.Direction:=TDirection(UInt(Ord(Move.Direction)) or POSITION_PATH_TAG); {the position must be marked as being on the current path so 'SetPosition()' later can undo the push normally}
 
                    if Optimizer.GameMetrics.MoveCount<=High(MoveCount) then begin
 
@@ -20249,7 +20321,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   end; // OptimizeGame.CalculateMetricsForPositionsOnBestPath
 
   function  OPENAdd(Position__:PPosition; AddToFront__:Boolean):Boolean;
-  var BucketIndex:Integer; Root:PPosition;
+  var BucketIndex:Int; Root:PPosition;
   begin {open positions: if 'AddToFront__' is 'True' then insert item before other items with the same score}
     Result:=True;
     with Positions.OpenPositions do with Position__^ do begin
@@ -20301,11 +20373,11 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   end; // OptimizeGame.OPENAddPositionsOnPath
 
   procedure OPENClearEverythingButDelayUpdatePositions;
-  var i:Integer; Position:POptimizerPosition;
+  var i:Int; Position:POptimizerPosition;
   begin
     if Positions.OpenPositions.HighValueItemCount<>0 then begin
        Position:=POptimizerPosition(Positions.Positions);
-       for i:=0 to Integer(Pred(Positions.Capacity-Cardinal(Positions.UninitializedItemCount))) do with Position^.Position do begin
+       for i:=0 to Int(Pred(Positions.Capacity-UInt(Positions.UninitializedItemCount))) do with Position^.Position do begin
            if (Score<High(Positions.OpenPositions.Buckets)) then
               Move.Direction:=TDirection(Ord(Move.Direction) and (not POSITION_OPEN_TAG));
            Inc(Position);
@@ -20338,7 +20410,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   end; // OptimizeGame.OPENLoadPath
 
   procedure OPENRemove(Position__:PPosition);
-  var BucketIndex:Integer;
+  var BucketIndex:Int;
   begin {open positions: remove item}
     with Positions.OpenPositions do with Position__^ do with ScoreBucket do begin
       if Score<High(Buckets) then
@@ -20383,7 +20455,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       if (Ord(Position__^.Move.Direction) and POSITION_OPEN_TAG)<>0 then begin  {'True': the position is a member of the open-queue}
          OPENRemove(Position__);
          if KeepOpenTags__ then with Position__^.Move do                        {'True': keep the 'OPEN' tag even though the position isn't on the open-queue anymore}
-            Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_OPEN_TAG); {mark that this position was on the open-queue; 'OPENAddPositionsOnPath(...,True)' can put these positions back on the queue later}
+            Direction:=TDirection(UInt(Ord(Direction)) or POSITION_OPEN_TAG); {mark that this position was on the open-queue; 'OPENAddPositionsOnPath(...,True)' can put these positions back on the queue later}
          if Result=nil then Result:=Position__;                                 {return the last position on the path that was on the open-queue}
          end;
       Position__:=Position__^.Parent;
@@ -20403,7 +20475,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   end; // OptimizeGame.OPENRemoveWorst
 
   function  OPENWorstUnprotected:PPosition;
-  var RoverValue:Integer; Rover:PPosition;
+  var RoverValue:Int; Rover:PPosition;
   begin {open positions: worst un-protected item}
     with Positions.OpenPositions do begin
       Result:=WorstUnprotectedPosition;
@@ -20456,14 +20528,14 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end;
   end; // OptimizeGame.ForceUpdatingOfImprovedPositions;
 
-  function  TTAdd(BoxNo__:Integer;
+  function  TTAdd(BoxNo__:Int;
                   Direction__:TDirection;
-                  Depth__:Integer;
-                  Score__:Integer;
+                  Depth__:Int;
+                  Score__:Int;
                   Parent__,
                   NextInHashChain__:PPosition;
                   var Position__:PPosition):Boolean;
-  var HashBucketIndex:Integer;
+  var HashBucketIndex:Int;
   begin // TTAdd: add item to the transposition table
         // precondition 1: the board has been updated with the push ['BoxNo__', 'Direction__'];
         // precondition 2: the position is new, i.e., it's not a member of the transposition table;
@@ -20526,7 +20598,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                     end;
             end
          else begin {not all items have been used yet, hence, get the next free item from the allocated memory}
-            Position__:=PPosition(Addr(POptimizerPositionVector(Positions)^[Capacity-Cardinal(UninitializedItemCount)]));
+            Position__:=PPosition(Addr(POptimizerPositionVector(Positions)^[Capacity-UInt(UninitializedItemCount)]));
             Dec(UninitializedItemCount);
             end;
 
@@ -20604,18 +20676,18 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   begin
     YASS.TTClear(True);
     Positions.Capacity :=
-      ( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TOptimizerPosition ); {the optimizer uses an extended position data structure, hence, there is room for fewer nodes in the transposition table}
-    Positions.UninitializedItemCount := Integer( Positions.Capacity );
+      ( UInt( Positions.HighWaterMark ) - UInt( Positions.Positions ) ) div SizeOf( TOptimizerPosition ); {the optimizer uses an extended position data structure, hence, there is room for fewer nodes in the transposition table}
+    Positions.UninitializedItemCount := Int( Positions.Capacity );
     OPENClear;                                                                  {clearing the transposition table entails that the open-queue is empty too}
   end; // OptimizeGame.TTClear
 
-  function  TTIndexOf(Position__:PPosition):Integer;
+  function  TTIndexOf(Position__:PPosition):Int;
   begin {transposition table: returns vector index for the item at 'Position__'}
     Result:=(UInt(Position__)-UInt(Positions.Positions)) div SizeOf(TOptimizerPosition);
   end;
 
-  function  TTLoadGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar):Boolean;
-  var BoxNo,CharCount,NewBoxPos,NewPlayerPos:Integer;
+  function  TTLoadGame(MovesAsTextBufferByteSize__:Int; MovesAsText__:PChar):Boolean;
+  var BoxNo,CharCount,NewBoxPos,NewPlayerPos:Int;
       BestPositionMetricsChanged:Boolean;
       Ch:Char; Direction:TDirection; NewPosition,Position:PPosition;
       RepetitionMetrics:TOptimizerGameMetrics;
@@ -20769,9 +20841,9 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
        BestPosition:=CurrentPosition;
        //Write('Game: ',OptimizerMetricsAsText(BestPosition));
        if BestPosition<>nil then with BestPosition^ do begin
-          Move.Direction:=TDirection(Cardinal(Ord(Move.Direction)) or POSITION_TARGET_TAG);
+          Move.Direction:=TDirection(UInt(Ord(Move.Direction)) or POSITION_TARGET_TAG);
           if (Ord(Move.Direction) and POSITION_OPEN_TAG)<>0 then OPENRemove(BestPosition);
-          Game.EndPlayerPos:=Game.PlayerPos; // save the end player position; the player must end here if the optimizer returns a snapshot which isn't a solution; 
+          Game.EndPlayerPos:=Game.PlayerPos; // save the end player position; the player must end here if the optimizer returns a snapshot which isn't a solution;
           Optimizer.GameMetrics.HasPlayerLines:=True; // the raw solution contains correct player lines information at this point, hence, it's all right to compare statistics for the existing player lines and the optimized player lines
           Result:=CalculateMetricsForPositionsOnBestPath(BestPositionMetricsChanged); // the raw solution may contain non-optimal intermediate non-pushing player-moves
           Optimizer.GameMetrics.HasPlayerLines:=False;
@@ -20798,8 +20870,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
        if Optimizer.Result=prOK then Optimizer.Result:=prUnsolved;              // reset optimization result; repetitions may have changed the result to 'prOK'
   end; // OptimizeGame.TTLoadGame
 
-  function  TTLookup(Depth__:Integer; PlayerPositionMatch__:TPlayerPositionMatch; Direction__:TDirection; var Position__:PPosition):Boolean;
-  var HashBucketIndex,PlayerDistance,ResultPositionPlayerDistance:Integer;
+  function  TTLookup(Depth__:Int; PlayerPositionMatch__:TPlayerPositionMatch; Direction__:TDirection; var Position__:PPosition):Boolean;
+  var HashBucketIndex,PlayerDistance,ResultPositionPlayerDistance:Int;
       BasePosition,ResultPosition:PPosition;
   begin {transposition table: test if the current game position already exists}
     {when the function returns, 'Position__' = 'nil' either means "key >= all keys in its bucket" or "empty bucket"}
@@ -20896,12 +20968,12 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end;
   end; // OptimizeGame.TTLookup
 
-  function  TTNodesOnTargetPathCount:Integer;
-  var i:Cardinal; p:PPosition;
+  function  TTNodesOnTargetPathCount:Int;
+  var i:UInt; p:PPosition;
   begin
     Result:=0;
     with Positions do begin {count the nodes in memory with the target path flag}
-      for i:=0 to Pred(Capacity-Cardinal(Max(0,UninitializedItemCount))) do
+      for i:=0 to Pred(Capacity-UInt(Max(0,UninitializedItemCount))) do
           with PPosition(POptimizerPosition(Addr(POptimizerPositionVector(Positions)^[i])))^ do
             if (UInt8(Move.Direction) and POSITION_TARGET_PATH_TAG)<>0 then Inc(Result);
 
@@ -20913,8 +20985,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end;
   end; // OptimizeGame.TTNodesOnTargetPathCount
 
-  function  TTPurge(AlignedItemsCount__:Integer; Show__:Boolean):Integer;       {returns the number of purged positions, or -1 if purging fails}
-  var HashBucketIndex,OldCount:Cardinal; b:Boolean;
+  function  TTPurge(AlignedItemsCount__:Int; Show__:Boolean):Int;       {returns the number of purged positions, or -1 if purging fails}
+  var HashBucketIndex,OldCount:UInt; b:Boolean;
       p,q,BasePosition,NextInHashChain:PPosition;
       Next,Top:POptimizerPosition;
   begin {transposition table: cleanse the table for anything but the best path  }
@@ -20951,7 +21023,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
          OldCount:=Count;
          Count:=0;
-         UninitializedItemCount:=Integer(Capacity);
+         UninitializedItemCount:=Int(Capacity);
          FreeList:=nil;
          if HashBuckets<>nil then FillChar(HashBuckets^,HashBucketCount*SizeOf(HashBuckets^[Low(HashBuckets^)]),0); {actually, 'HashBuckets' cannot be 'nil' here; in that case, there would not be any best path in the transposition table}
 
@@ -20960,11 +21032,11 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
          Next:=POptimizerPosition(Positions);
          Top :=Next; Inc(Top,Pred(Min(Capacity,AlignedItemsCount__)));          {'Inc': it's easier to let the compiler calculate the address of the last item than doing it manually}
 
-         repeat while (Cardinal(Next)<=Cardinal(Top)) and                       {find leftmost free node in the transposition table, only looking at the left-justified items}
+         repeat while (UInt(Next)<=UInt(Top)) and                       {find leftmost free node in the transposition table, only looking at the left-justified items}
                       ((Ord(Next^.Position.Move.Direction) and POSITION_PATH_TAG)<>0) do {'<>0': this slot already contains a position which is a member of the best path}
                       Inc(Next);
 
-                if    (Cardinal(p)>Cardinal(Next)) and
+                if    (UInt(p)>UInt(Next)) and
                       (UninitializedItemCount>0) then begin                     {'True': move this position to the first free slot to the left}
                       if p^.Parent   <>nil then p^.Parent   ^.Successor:=PPosition(Next);
                       if p^.Successor<>nil then p^.Successor^.Parent   :=PPosition(Next);
@@ -21050,7 +21122,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
                 p:=p^.Successor;                                                {get ready to process the successor position, if any}
 
-                //if Cardinal(p)>=Cardinal(UnalignedItems) then begin           {'True': this item wasn't created by 'TTAdd'; precondition: the root item cannot be an unaligned one, and all unaligned items must be in ascending memory address order}
+                //if UInt(p)>=UInt(UnalignedItems) then begin           {'True': this item wasn't created by 'TTAdd'; precondition: the root item cannot be an unaligned one, and all unaligned items must be in ascending memory address order}
                 //   Inc(Next); Top:=Next;                                      {advance to the next free slot}
                 //   Top:=Next;                                                 {disable the search for a free slot at the top of the loop}
                 //   end;
@@ -21058,10 +21130,10 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
          until  p=nil;                                                          {until all positions on the best path have been processed}
 
          if Result=0 then begin                                                 {'0': no errors have been detected}
-            if   OldCount>Count then Result:=Cardinal(OldCount-Count)
+            if   OldCount>Count then Result:=UInt(OldCount-Count)
             else Result:=0;
-            if   High(DroppedCount)-Cardinal(Result)>=DroppedCount then
-                 DroppedCount:=DroppedCount+Cardinal(Result)
+            if   High(DroppedCount)-UInt(Result)>=DroppedCount then
+                 DroppedCount:=DroppedCount+UInt(Result)
             else DroppedCount:=High(DroppedCount);
 
             {$IFDEF CONSOLE_APPLICATION}
@@ -21079,7 +21151,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
          if (Result>=0)                                                         {'>=0' verification and recalculation of the metrics for the positions on best path succeeded}
             and
             ((not CheckMovesFromSquare) or
-             (Count<>Cardinal(Succ(BestPosition^.PushCount)-StartPosition^.PushCount))
+             (Count<>UInt(Succ(BestPosition^.PushCount)-StartPosition^.PushCount))
             ) then begin {'StartPosition^.PushCount' is non-zero if the level has forced first moves; see 'Game.TubeFillingPushCount'}
             Msg(TEXT_INTERNAL_ERROR+': "TTPurge"',TEXT_APPLICATION_TITLE); Result:=-1;
             end;
@@ -21112,7 +21184,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   end; // OptimizeGame.TTRemove
 
   function  PostProcessBestPosition:Boolean;
-  var MoveCount,LineCount:Integer; Direction:TDirection; Moves:TSingleStepMoves;
+  var MoveCount,LineCount:Int; Direction:TDirection; Moves:TSingleStepMoves;
   begin {update statistics and path to the best found solution/snapshot}
     {ensure that the metrics for the best position are correct;}
     {they may be out of sync if the search has destroyed the best path,}
@@ -21181,7 +21253,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
   procedure SetPosition(Position__:PPosition);
   // do/undo moves so the board matches the position represented by the tree-node 'Position__'
-  var NewBoxNo,SquareNo:Integer; NewDirection:TDirection; p,Next,Temp:PPosition;
+  var NewBoxNo,SquareNo:Int; NewDirection:TDirection; p,Next,Temp:PPosition;
   begin // precondition: 'Position__' is a member of the transposition-table
     with Positions do begin
       Inc(Statistics.SetPosition1Count);
@@ -21292,7 +21364,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
   end; // OptimizeGame.SearchStatePromptText
 
   procedure ShowPath(Position__:PPosition);
-  var OldPlayerPos:Integer; p,Next:PPosition;
+  var OldPlayerPos:Int; p,Next:PPosition;
   begin
     p:=Position__; OldPlayerPos:=Game.PlayerPos;
 
@@ -21308,7 +21380,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
     while p<>nil do with POptimizerPosition(p)^ do with Position do begin
       SetPosition(p);
       ShowBoard;
-      Writeln(Game.HashValue,COLON,Game.PlayerPos,SPACE,SPACE,Cardinal(p),COLON,TTIndexOf(p));
+      Writeln(Game.HashValue,COLON,Game.PlayerPos,SPACE,SPACE,UInt(p),COLON,TTIndexOf(p));
       Write(GameMetricsAsText);
       Readln;
       p:=Parent;
@@ -21383,7 +21455,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                  Direction:=TDirection(Ord(Direction) and (not POSITION_TARGET_TAG)); // remove the 'target' tag from the best existing position
                YASS.Positions.BestPosition:=CurrentPosition;                    // update the best found path
                with YASS.Positions.BestPosition^.Move do
-                 Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_TARGET_TAG); // ensure that the last position on the best path is tagged as a target position
+                 Direction:=TDirection(UInt(Ord(Direction)) or POSITION_TARGET_TAG); // ensure that the last position on the best path is tagged as a target position
                end;
             if p=YASS.Positions.SolutionPosition then
                YASS.Positions.SolutionPosition:=CurrentPosition;                // update the best found solution
@@ -21409,7 +21481,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       BestPosition:=BestPosition__;
       if BestPosition<>nil then with BestPosition^ do begin
          if (Ord(Move.Direction) and POSITION_OPEN_TAG)<>0 then OPENRemove(BestPosition); {ensure that the best position isn't on the open-queue because its members may be candidates for recycling}
-         Successor:=nil; 
+         Successor:=nil;
          Optimizer.PruningNode:=BestPosition;
          end;
       end;
@@ -21417,7 +21489,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
   function  Search:Boolean;
   var  BoxPermutationsCount,MethodIndex,
-       OldPlayerPos,SuccessiveGlobalSearchesCountDown:Integer;
+       OldPlayerPos,SuccessiveGlobalSearchesCountDown:Int;
        TimeMS:TTimeMS;
        OriginalSearchLimits:TSearchLimits;
        FullGameSearch{,IsFirstVicinitySearch}:Boolean;
@@ -21425,7 +21497,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
        ActiveMethodSet:TOptimizationMethodSet;
        MethodEnabled:TOptimizationMethodEnabled; MethodOrder:TOptimizationMethodOrder;
 
-    function  RecalculateMetricsForPositionsOnBestPath(BoxNo__:Integer; Direction__:TDirection):Boolean;
+    function  RecalculateMetricsForPositionsOnBestPath(BoxNo__:Int; Direction__:TDirection):Boolean;
     var BestPositionMetricsChanged:Boolean; LastOpenPositionOnPath,Position:PPosition; GameMetrics:TOptimizerGameMetrics;
     begin {recalculates the metrics for the positions on the best path, in particular the player lines; this metric is not calculated during the search; it's only calculated here so the user can get the correct status information}
       //Result:=True; exit;
@@ -21503,17 +21575,17 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
     var   StartTimeMS:TTimeMS;
 
       // forward declarations
-      function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection; BoxSquare__:Integer):Boolean; forward;
+      function  IsALegalPush(BoxNo__:Int; Direction__:TDirection; BoxSquare__:Int):Boolean; forward;
 
       procedure DoPushUpdatingGameMetrics(Position__:PPosition; CalculatePlayersDistances__,UpdatePosition__:Boolean);
-      var PlayerFromSquare:Integer;
+      var PlayerFromSquare:Int;
       begin
         with Solver.SearchStates[0].PlayersReachableSquares do
           with Position__^ do begin
             if CalculatePlayersDistances__ then CalculatePlayersDistanceToReachableSquares(0);
             PlayerFromSquare:=PlayerPos-Game.SquareOffsetForward[TDirection(Ord(Move.Direction) and DIRECTION_BIT_MASK)];
             Inc(Optimizer.GameMetrics.MoveCount,Pred(Squares[PlayerFromSquare]-TimeStamp)); // update the number of moves in the game with the non-pushing player-moves
-            DoPush(Move.BoxNo,TDirection(Cardinal(Move.Direction) and DIRECTION_BIT_MASK));
+            DoPush(Move.BoxNo,TDirection(UInt(Move.Direction) and DIRECTION_BIT_MASK));
             if UpdatePosition__ then with POptimizerPosition(Position__)^ do with Position do begin // 'True': update the information stored for this position, e.g., its game metrics
                PushCount             :=Optimizer.GameMetrics.PushCount;         // update the game-metrics for the position
                MoveCount             :=Optimizer.GameMetrics.MoveCount;
@@ -21527,7 +21599,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
             end;
       end; // DoPushUpdatingGameMetrics
 
-      function  DoPushes(Start__,Stop__:PPosition; BoxNo__:Integer; UpdatePositions__:Boolean; var Last__:PPosition):Integer;
+      function  DoPushes(Start__,Stop__:PPosition; BoxNo__:Int; UpdatePositions__:Boolean; var Last__:PPosition):Int;
       var Position:PPosition;
       begin // performs pushes from the position 'Start__' up to, but not including the position 'Stop__'; if 'BoxNo' <> 0 then only a sequence of pushes with that box-number is performed
         Result:=0; Last__:=Start__^.Parent; Position:=Start__;
@@ -21542,7 +21614,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
               end;
       end; // DoPushes
 
-      function  IsALegalPush(BoxNo__:Integer; Direction__:TDirection; BoxSquare__:Integer):Boolean;
+      function  IsALegalPush(BoxNo__:Int; Direction__:TDirection; BoxSquare__:Int):Boolean;
       begin // precondition: player's distance to reachable squares have been calculated, using index = 0}
         Direction__:=TDirection(Ord(Direction__) and DIRECTION_BIT_MASK);
         with Game do with Solver.SearchStates[0].PlayersReachableSquares do
@@ -21569,7 +21641,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end; // UndoAllPushes
 
       function  UpdatePositionsOnBestPath(var CurrentPosition__:PPosition):Boolean;
-      var LastPositionSimpleLowerBound:Integer; BestPositionMetricsChanged:Boolean;
+      var LastPositionSimpleLowerBound:Int; BestPositionMetricsChanged:Boolean;
           LastPosition:PPosition;
       begin // updates game-metrics, hash-values, and parent-chain for all positions on the best path
             // precondition: 'Positions.CurrentPosition = nil'; otherwise 'CalculateMetricsForPositionsOnBestPath()' tries to undo the pushes on the path leading to 'Positions.CurrentPosition', and 'UndoAllPushes()' has already done that
@@ -21588,7 +21660,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
               if Positions.BestPosition<>nil then with Positions.BestPosition^.Move do
                  Direction:=TDirection(Ord(Direction) and (not POSITION_TARGET_TAG)); // remove the 'target' tag from the best existing position; maybe it isn't the last position on the path anymore
               UpdateBestPosition(LastPosition);
-              with LastPosition^.Move do Direction:=TDirection(Cardinal(Ord(Direction)) or POSITION_TARGET_TAG); // ensure that the last position on the best path is tagged as a target position
+              with LastPosition^.Move do Direction:=TDirection(UInt(Ord(Direction)) or POSITION_TARGET_TAG); // ensure that the last position on the best path is tagged as a target position
 
               if RemoveCyclesFromBestPath(False) then begin                     // changing the push sequence may have introduced cycles; remove them, if any
                  // theoretically, cycle removal can destroy the solution if two
@@ -21631,7 +21703,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       type
         TNextBoxPosition=array[TBoxNo] of PPosition;               // roots of the per-box position-chains
       var
-        PromoteBoxNo:Integer; OK:Boolean; LastStatusTimeMS,TimeMS:TTimeMS;
+        PromoteBoxNo:Int; OK:Boolean; LastStatusTimeMS,TimeMS:TTimeMS;
         CurrentPosition,LastPromoteBoxPosition,BestPushSequenceCandidate,LastPushSequenceCandidate,q,r,s,t,u:PPosition;
         GameMetrics1,GameMetrics2,GameMetrics3:TOptimizerGameMetrics;
         NextBoxPosition:TNextBoxPosition;
@@ -21994,10 +22066,10 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
          TBoard__            = record // a local board type including width and height
           Directions         : TDirectionMap; // mapping the original directions to the transformed directions
           DirectionOffsets   : TDirectionArrayOfIntegers; // mapping the original directions (not the transformed directions) directly to relative movements on the transformed board
-          Height             : Integer;
-          PlayerPos          : Integer;
+          Height             : Int;
+          PlayerPos          : Int;
           Squares            : TBoard;
-          Width              : Integer;
+          Width              : Int;
         end;
         TTransformation2D    = (t2DRotate0DegreesClockwise, {order must not change}
                                 t2DRotate90DegreesClockwise,
@@ -22024,7 +22096,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       var
         Boards:array[TTransformation2D] of TBoard__;
         Direction:TDirection;
-        BoxSquare,BoxSquareCol,BoxSquareRow:Integer;
+        BoxSquare,BoxSquareCol,BoxSquareRow:Int;
         //StartTimeMS:TTimeMS;
         T:TTransformation2D;
         Position:PPosition;
@@ -22039,12 +22111,12 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           Game.BoardWidth:=OldBoard.Width; Game.BoardHeight:=OldBoard.Height; Game.Board:=OldBoard.Squares; // restore the game board
         end;
 
-        function  ColRowToSquare(Col__,Row__,BoardWidth__:Integer):Integer;
+        function  ColRowToSquare(Col__,Row__,BoardWidth__:Int):Int;
         begin
           Result:=Row__ * (BoardWidth__+2) + Col__;
         end;
 
-        procedure SquareToColRow(Square__,BoardWidth__:Integer; var Col__,Row__:Integer);
+        procedure SquareToColRow(Square__,BoardWidth__:Int; var Col__,Row__:Int);
         begin
           Row__:=Square__   div   (BoardWidth__+2);
           Col__:=Square__ - Row__*(BoardWidth__+2);
@@ -22073,8 +22145,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                end; {case}
           end;
 
-          procedure RotateClockwise(Count__:Integer);
-          var i:Integer; Direction:TDirection;
+          procedure RotateClockwise(Count__:Int);
+          var i:Int; Direction:TDirection;
           begin
             for Direction:=Low(NewDirections__) to High(NewDirections__) do
                 for i:=1 to Count__ do
@@ -22097,7 +22169,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           end; {case}
         end; {TransformDirections}
 
-        procedure TransformColRow(Transformation2D__:TTransformation2D; Col__,Row__,Width__,Height__:Integer; var NewCol__,NewRow__:Integer);
+        procedure TransformColRow(Transformation2D__:TTransformation2D; Col__,Row__,Width__,Height__:Int; var NewCol__,NewRow__:Int);
         begin
           case Transformation2D__ of
             t2DRotate0DegreesClockwise           : begin NewCol__:=Col__;                NewRow__:=Row__; end;
@@ -22122,8 +22194,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           end; {case}
         end; {TransformColRow}
 
-        function  TransformSquare(T__:TTransformation2D; Square__:Integer):Integer;
-        var Col,Row:Integer;
+        function  TransformSquare(T__:TTransformation2D; Square__:Int):Int;
+        var Col,Row:Int;
         begin
           SquareToColRow(Square__,Game.BoardWidth,Col,Row);
           TransformColRow(T__,Col,Row,Game.BoardWidth,Game.BoardHeight,Col,Row);
@@ -22145,17 +22217,17 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         end;
 
         procedure TransformBoard(T__:TTransformation2D;
-                                 SourceBoardWidth__          :Integer;
-                                 SourceBoardHeight__         :Integer;
+                                 SourceBoardWidth__          :Int;
+                                 SourceBoardHeight__         :Int;
                                  const SourceBoard__         :TBoard;
-                                 var TargetBoardWidth__      :Integer;
-                                 var TargetBoardHeight__     :Integer;
+                                 var TargetBoardWidth__      :Int;
+                                 var TargetBoardHeight__     :Int;
                                  var TargetBoard__           :TBoard;
-                                 var TargetPlayerPos__       :Integer;
+                                 var TargetPlayerPos__       :Int;
                                  var TargetDirections__      :TDirectionMap;
                                  var TargetDirectionOffsets__:TDirectionArrayOfIntegers;
-                                 SquareMask__                :Integer);
-        var Col,Row,NewCol,NewRow,NewSquare,SquareValue:Integer;
+                                 SquareMask__                :Int);
+        var Col,Row,NewCol,NewRow,NewSquare,SquareValue:Int;
             Direction:TDirection;
             SquareOffsetForward:TDirectionArrayOfIntegers;
         begin // each square on the transformed board contains the original value masked with 'SquareMask__'
@@ -22202,8 +22274,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                              Boards[T].PlayerPos,Boards[T].Directions,Boards[T].DirectionOffsets,WALL+FLOOR+BOX);  // the symmetry tests only deals with walls, floors, and boxes, hence, the transformed boards don't contain the player or the goals
         end;
 
-        function  DoPushOnTransformedBoard(T__:TTransformation2D; BoxSquareCol__,BoxSquareRow__:Integer; Direction__:TDirection):Boolean;
-        var Col,Row,BoxSquare:Integer;
+        function  DoPushOnTransformedBoard(T__:TTransformation2D; BoxSquareCol__,BoxSquareRow__:Int; Direction__:TDirection):Boolean;
+        var Col,Row,BoxSquare:Int;
         begin // for efficiency, the function only deals with board transformations having the same dimensions as the game board;
           Result:=True;
           with Boards[T__] do
@@ -22220,13 +22292,13 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                   //if T__= t2DRotate0DegreesClockwise then ShowBoard(Boards[T__]);
                   //Dec(Squares[BoxSquare],PLAYER);
                   end
-               else 
+               else
                   Result:=Msg(TEXT_INTERNAL_ERROR+': "Optimize.Search.RearrangementOptimization.SymmetryOptimization.DoPushOnTransformedBoard',TEXT_APPLICATION_TITLE);
                end;
         end;
 
         function  IsSymmetricalBoard(T__:TTransformation2D):Boolean;
-        var BoxNo:Integer;
+        var BoxNo:Int;
         begin // returns 'True' is the transformed board and the game state are symmetrical with respect to boxes
           Result:=(Game.BoardWidth=Boards[T__].Width) and (Game.BoardHeight=Boards[T__].Height);
           if Result then
@@ -22238,7 +22310,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         end;
 
         function  IsPlayerPathToNextPushShorterOnTransformedBoard(T__:TTransformation2D):Boolean;
-        var NeighborSquare,TransformedNeighborSquare:Integer;
+        var NeighborSquare,TransformedNeighborSquare:Int;
         begin
           Result:=False;
           if Positions.CurrentPosition^.Successor<>nil then with Positions.CurrentPosition^.Successor^ do begin // 'True': the current position isn't the last push on the best path
@@ -22255,7 +22327,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         end;
 
         function  AreRemainingPushesLegalAndBetterAfterTransformation(T__:TTransformation2D):Boolean;
-        var BoxNo:Integer; InverseTransformation:TTransformation2D;
+        var BoxNo:Int; InverseTransformation:TTransformation2D;
             LastPosition,NextPosition:PPosition;
             NewBoxNumbers,OldBoxNumbers:TBoxNumbers;
         begin // side-effect: if the transformed path is legal and better, then the path is transformed accordingly
@@ -22415,13 +22487,13 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       // Write('Rearrangement: ',Result,' Time: ',CalculateElapsedTimeMS(StartTimeMS,GetTimeMS)); Readln;
     end; // Optimize.Search.RearrangementOptimization
 
-//  function  SearchBackwards(PullBoxNo__:Integer; PullDirection__:TDirection; Depth__,BoxCountDown__:Integer; SuccessorPosition__:PPosition):Boolean; forward;
-    function  SearchBackwards(PullBoxNo__:Integer; PullDirection__:TDirection; Depth__,BoxCountDown__:Integer; var Position__:PPosition):Boolean; forward;
+//  function  SearchBackwards(PullBoxNo__:Int; PullDirection__:TDirection; Depth__,BoxCountDown__:Int; SuccessorPosition__:PPosition):Boolean; forward;
+    function  SearchBackwards(PullBoxNo__:Int; PullDirection__:TDirection; Depth__,BoxCountDown__:Int; var Position__:PPosition):Boolean; forward;
 
-    function  EnumerateTargetPositions(Position__:PPosition; DepthLimit__:Integer):Boolean;
+    function  EnumerateTargetPositions(Position__:PPosition; DepthLimit__:Int):Boolean;
     var BoxNo,SquareNo,OldDepthLimit,OldPlayerPos,NeighborSquareNo,
-        SuccessorDepth,SuccessorBoxCountDown,SuccessorScore:Integer;
-        OldPositionCount:Cardinal; Direction:TDirection;
+        SuccessorDepth,SuccessorBoxCountDown,SuccessorScore:Int;
+        OldPositionCount:UInt; Direction:TDirection;
         SuccessorPosition:PPosition;
     begin
       Result:=False; //exit;
@@ -22450,7 +22522,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                    if TTLookup(1,ppmExact,dUp,SuccessorPosition) then with SuccessorPosition^ do begin
                       if WasALegalPush(SuccessorPosition) then begin
                          if Position__=Positions.BestPosition then
-                            Move.Direction:=TDirection(Integer(Ord(Move.Direction)) or POSITION_TARGET_TAG); {mark the node as a target position}
+                            Move.Direction:=TDirection(Int(Ord(Move.Direction)) or POSITION_TARGET_TAG); {mark the node as a target position}
 //>>>                    SuccessorPosition^.BoxCountDown:=SuccessorBoxCountDown; {mark the position as visited with this count-down value}
                          //ShowBoard; Write('Old:'); Readln;
                          CalculatePlayersDistanceToReachableSquares(SuccessorDepth);
@@ -22465,8 +22537,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                          with SuccessorPosition^ do begin
                            if (Ord(Move.Direction) and POSITION_OPEN_TAG)<>0 then OPENRemove(SuccessorPosition);
                            if Position__=Positions.BestPosition then
-                              Move.Direction:=TDirection(Integer(Ord(Move.Direction)) or POSITION_TARGET_TAG); {mark the node as a target position}
-                           Move.Direction:=TDirection(Integer(Ord(Move.Direction)) or POSITION_TARGET_PATH_TAG); {mark the node as a position on a path to the target position (this procedure is only applied to positions where this holds)}
+                              Move.Direction:=TDirection(Int(Ord(Move.Direction)) or POSITION_TARGET_TAG); {mark the node as a target position}
+                           Move.Direction:=TDirection(Int(Ord(Move.Direction)) or POSITION_TARGET_PATH_TAG); {mark the node as a position on a path to the target position (this procedure is only applied to positions where this holds)}
                            //ShowBoard; Write('New:'); Readln;
                            CalculatePlayersDistanceToReachableSquares(SuccessorDepth);
                            Result:=SearchBackwards(BoxNo,Direction,SuccessorDepth,SuccessorBoxCountDown,SuccessorPosition) or Result;
@@ -22485,10 +22557,10 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
          end;
     end; // OptimizeGame.Search.EnumerateTargetPositions
 
-    function  SearchBackwards(PullBoxNo__:Integer; PullDirection__:TDirection; Depth__,BoxCountDown__:Integer; var Position__:PPosition):Boolean;
+    function  SearchBackwards(PullBoxNo__:Int; PullDirection__:TDirection; Depth__,BoxCountDown__:Int; var Position__:PPosition):Boolean;
     {precondition: 'Solver.SearchStates[Depth__].PlayersReachableSquares.Calculated' indicates whether the calculation has been performed for this depth}
     var BoxNo,SetBoxNo,SquareNo,NeighborSquareNo,
-        SuccessorBoxCountDown,SuccessorDepth:Integer;
+        SuccessorBoxCountDown,SuccessorDepth:Int;
         Direction:TDirection; SuccessorPosition:PPosition;
     begin // OptimizeGame.Search.SearchBackwards
       Result:=False; //exit;
@@ -22525,7 +22597,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         if (Position__<>nil) and
            (BoxCountDown__>0) and
            (Depth__<MAX_HISTORY_BOX_MOVES) then begin
-           with Position__^ do Move.Direction:=TDirection(Integer(Ord(Move.Direction)) or POSITION_TARGET_PATH_TAG); {mark the node as a position on a path to the target position (this procedure is only applied to positions where this holds)}
+           with Position__^ do Move.Direction:=TDirection(Int(Ord(Move.Direction)) or POSITION_TARGET_PATH_TAG); {mark the node as a position on a path to the target position (this procedure is only applied to positions where this holds)}
            SuccessorDepth:=Succ(Depth__); SuccessorPosition:=nil;
            DoPull(PullBoxNo__,PullDirection__);
            CalculatePlayersDistanceToReachableSquares(SuccessorDepth);
@@ -22614,11 +22686,11 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
     {the current version of 'SearchForwards()' is only a template and not ready for production anymore;}
     {it requires a supporting 'UpdateSearchTree' function which has been removed from the source because}
     {it wasn't justifiable to retain that many unused and complex (potentially "rotting") code-lines in the program}
-    function  SearchForwards(Position__:PPosition; Depth__,BoxCountDown__{///,BoxesNotOnBestPathCountDown__}:Integer; var BoxSet__:TBoxSet):Boolean;
+    function  SearchForwards(Position__:PPosition; Depth__,BoxCountDown__{///,BoxesNotOnBestPathCountDown__}:Int; var BoxSet__:TBoxSet):Boolean;
     {precondition: 'Solver.SearchStates[Depth__].PlayersReachableSquares.Calculated' indicates whether the calculation has been performed for this depth}
     var BoxNo,NeighborOffset,PlayerDistance,SquareNo,
         SuccessorBoxCountDown,///SuccessorBoxesNotOnBestPathCountDown,
-        SuccessorDepth,SuccessorScore:Integer;
+        SuccessorDepth,SuccessorScore:Int;
         Direction:TDirection;
         SuccessorPosition:PPosition;
 
@@ -22783,7 +22855,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
                           if (Game.SimpleLowerBound=0) and                      {'0': this is a solved position}
                              (SuccessorPosition<>nil) then begin                {'<>nil': the start-position in a level with a trivial 0-push solution has successors (if there are any legal moves)}
-                             with SuccessorPosition^.Move do Direction:=TDirection(Integer(Ord(Direction)) or POSITION_TARGET_TAG);
+                             with SuccessorPosition^.Move do Direction:=TDirection(Int(Ord(Direction)) or POSITION_TARGET_TAG);
                              if (Positions.SolutionPosition=nil)
                                 or
                                 (not HasABetterOrEqualScore(Positions.SolutionPosition))
@@ -22811,10 +22883,10 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
            end;
     end; // OptimizeGame.Search.SearchForwards
 
-    function  BoxPermutationsSearch(var BoxPermutationsCount__:Integer; MaxBoxPermutationsCount__:Integer; StopAfterSuccessfulIteration__:Boolean; var TimeMS__:TTimeMS):Boolean;
+    function  BoxPermutationsSearch(var BoxPermutationsCount__:Int; MaxBoxPermutationsCount__:Int; StopAfterSuccessfulIteration__:Boolean; var TimeMS__:TTimeMS):Boolean;
     var SliceResult:Boolean; BoxNumberSet:TBoxNumberSet; SliceStart,SliceEnd:PPosition;
 
-      function  InitializeSlicing(var BoxPermutationsCount__,MaxBoxPermutationsCount__:Integer):Boolean;
+      function  InitializeSlicing(var BoxPermutationsCount__,MaxBoxPermutationsCount__:Int):Boolean;
       begin
         Optimizer.IterationResult:=False;
         MaxBoxPermutationsCount__:=Min(MaxBoxPermutationsCount__,Game.BoxCount );
@@ -22832,8 +22904,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                  Result:=Result^.Successor;
       end; // OptimizeGame.Search.BoxPermutationsSearch.LastBoxSessionPosition
 
-      function  GetNextSlice(BoxPermutationsCount__:Integer; var SliceStart__,SliceEnd__:PPosition; var BoxNumberSet__:TBoxNumberSet; SliceResult__:Boolean):Boolean;
-      var //SliceBoxCountDown:Integer;
+      function  GetNextSlice(BoxPermutationsCount__:Int; var SliceStart__,SliceEnd__:PPosition; var BoxNumberSet__:TBoxNumberSet; SliceResult__:Boolean):Boolean;
+      var //SliceBoxCountDown:Int;
           OldSliceEnd,p:PPosition; BoxSet:TBoxSet;
       begin
         Result:=(not SearchHasTerminated) and (TTPurge(Positions.Capacity,False)>=0);
@@ -22942,7 +23014,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
            end;
       end; // OptimizeGame.Search.BoxPermutationsSearch.GetNextSlice
 
-      function  GetFirstSlice({var} BoxPermutationsCount__:Integer; var SliceStart__,SliceEnd__:PPosition; var BoxNumberSet__:TBoxNumberSet):Boolean;
+      function  GetFirstSlice({var} BoxPermutationsCount__:Int; var SliceStart__,SliceEnd__:PPosition; var BoxNumberSet__:TBoxNumberSet):Boolean;
       begin
         //BoxPermutationsCount__:=3;
         SliceStart__:=Positions.StartPosition; SliceEnd__:=SliceStart__; BoxNumberSet__.Count:=0;
@@ -22957,7 +23029,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         }
       end; // OptimizeGame.Search.BoxPermutationsSearch.GetFirstSlice
 
-      function  IncreaseBoxPermutationsCount(var BoxPermutationsCount__:Integer; MaxSlizeSize__:Integer; IterationResult__,StopAfterSuccessfulIteration__:Boolean):Boolean;
+      function  IncreaseBoxPermutationsCount(var BoxPermutationsCount__:Int; MaxSlizeSize__:Int; IterationResult__,StopAfterSuccessfulIteration__:Boolean):Boolean;
       begin
         Result:=(not SearchHasTerminated) and
                 (not (IterationResult__ and StopAfterSuccessfulIteration__)) and
@@ -22965,17 +23037,17 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         if Result then Inc(BoxPermutationsCount__);
       end; // OptimizeGame.Search.BoxPermutationsSearch.IncreaseBoxPermutationsCount
 
-      function  SearchSlice(BoxPermutationsCount__:Integer; SliceStart__,SliceEnd__:PPosition; const BoxNumberSet__:TBoxNumberSet):Boolean;
+      function  SearchSlice(BoxPermutationsCount__:Int; SliceStart__,SliceEnd__:PPosition; const BoxNumberSet__:TBoxNumberSet):Boolean;
       var p:PPosition;
 
         function  BreadthFirstSearch(const BoxNumberSet__:TBoxNumberSet):Boolean;
         var BoxIndex,BoxNo,NeighborOffset,PlayerDistance,
-            SquareNo,{SuccessorBoxCountDown,}SuccessorScore{,PositionSimpleLowerBound}:Integer;
+            SquareNo,{SuccessorBoxCountDown,}SuccessorScore{,PositionSimpleLowerBound}:Int;
             Direction:TDirection;
             Position,SuccessorPosition{,P}:PPosition;
 
           procedure UpdateTree;
-          var NewScore,Score:Integer; p,q,Root:PPosition;
+          var NewScore,Score:Int; p,q,Root:PPosition;
           begin // precondition: 'SetPosition' has been called to set the game state to the best position found so far
             // 'UpdateTree' is called to update the tree after a new best path has been found;
             // the open nodes are re-sorted, so nodes closest to the new best path have first priority
@@ -23011,7 +23083,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                   end;
           end; // OptimizeGame.Search.BoxPermutationsSearch.SearchSlice.BreadthFirstSearch.UpdateTree
 
-          function  UpdatePosition(BoxNo__:Integer; Direction__:TDirection; BoxCountDown__:Integer; Parent__,Position__:PPosition):Boolean;
+          function  UpdatePosition(BoxNo__:Int; Direction__:TDirection; BoxCountDown__:Int; Parent__,Position__:PPosition):Boolean;
           var p:PPosition;
           begin
             Result:=False;
@@ -23268,7 +23340,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                                     if (Game.SimpleLowerBound=0) and            {'0': this is a solved position}
                                        (SuccessorPosition<>nil) and             {'<>nil': the start-position in a level with a trivial 0-push solution has successors (if there are any legal pushes)}
                                        (SuccessorPosition^.PushCount<>0) then begin {'<>0': this isn't the start position; if the start position was updated to be the best position, then the result would be a 0-push solution}
-                                       with SuccessorPosition^.Move do Direction:=TDirection(Integer(Ord(Direction)) or POSITION_TARGET_TAG);
+                                       with SuccessorPosition^.Move do Direction:=TDirection(Int(Ord(Direction)) or POSITION_TARGET_TAG);
                                        if (YASS.Positions.SolutionPosition=nil)
                                           or
                                           (not HasABetterOrEqualScore(YASS.Positions.SolutionPosition))
@@ -23340,7 +23412,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       TimeMS__:=CalculateElapsedTimeMS(TimeMS__,GetTimeMS);
     end; // OptimizeGame.Search.BoxPermutationsSearch
 
-    function  IterativeBoxPermutationsSearch(var BoxPermutationsCount__:Integer; TimeLimitMS__:TTimeMS; var TimeMS__:TTimeMS):Boolean;
+    function  IterativeBoxPermutationsSearch(var BoxPermutationsCount__:Int; TimeLimitMS__:TTimeMS; var TimeMS__:TTimeMS):Boolean;
     begin
       Result:=False; BoxPermutationsCount__:=1;
       repeat  Inc(BoxPermutationsCount__);
@@ -23361,19 +23433,19 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       Optimizer.IterationResult:=Optimizer.IterationResult or Result;
     end; // OptimizeGame.Search.IterativeBoxPermutationsSearch
 
-    function  GlobalOptimizationSearch:Boolean;
-    var //BoxNo,NeighborOffset,PlayerDistance,SquareNo,SuccessorScore{,PositionSimpleLowerBound}:Integer;
+    function  GlobalOptimizationSearch( var IsExhaustiveSearch__ : Boolean ) : Boolean;
+    var //BoxNo,NeighborOffset,PlayerDistance,SquareNo,SuccessorScore{,PositionSimpleLowerBound}:Int;
         //Direction:TDirection;
         NewBestResult:Boolean;
         Position{,SuccessorPosition{,P}:PPosition;
 
       function  AStarSearch:Boolean;
-      var BoxNo,NeighborOffset,PlayerDistance,SquareNo,SuccessorScore{,PositionSimpleLowerBound}:Integer;
+      var BoxNo,NeighborOffset,PlayerDistance,SquareNo,SuccessorScore{,PositionSimpleLowerBound}:Int;
           Direction:TDirection;
           Position,SuccessorPosition{,P}:PPosition;
 
         procedure UpdateTree;
-        var NewScore,Score:Integer; p,q,Root:PPosition;
+        var NewScore,Score:Int; p,q,Root:PPosition;
         begin // precondition: 'SetPosition' has been called to set the game state to the best position found so far
           // 'UpdateTree' is called to update the tree after a new best path has been found;
           // the open nodes are re-sorted, so nodes closest to the new best path have first priority
@@ -23409,8 +23481,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                 end;
         end; // OptimizeGame.Search.GlobalOptimizationSearch.AStarSearch.UpdateTree
 
-        function  UpdatePosition(BoxNo__:Integer; Direction__:TDirection; Parent__,Position__:PPosition):Boolean;
-        var OldMoveCount:Integer; p:PPosition;
+        function  UpdatePosition(BoxNo__:Int; Direction__:TDirection; Parent__,Position__:PPosition):Boolean;
+        var OldMoveCount:Int; p:PPosition;
         begin // updates a position when a new better path (or a first forward path) to this position has been found
           Result:=False;
           {
@@ -23664,7 +23736,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
                                   if (Game.SimpleLowerBound=0) and              {'0': this is a solved position}
                                      (SuccessorPosition<>nil) then begin        {'<>nil': the start-position in a level with a trivial 0-push solution has successors (if there are any legal moves)}
-                                     with SuccessorPosition^.Move do Direction:=TDirection(Integer(Ord(Direction)) or POSITION_TARGET_TAG);
+                                     with SuccessorPosition^.Move do Direction:=TDirection(Int(Ord(Direction)) or POSITION_TARGET_TAG);
                                      if (YASS.Positions.SolutionPosition=nil)
                                         or
                                         (not HasABetterOrEqualScore(YASS.Positions.SolutionPosition))
@@ -23692,8 +23764,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
             end;
       end; // OptimizeGame.Search.GlobalOptimizationSearch.AStarSearch
 
-      function  OPENAddBestPathPermutations:Integer;
-      var PositionsLimit:Cardinal; Position,Next:PPosition;
+      function  OPENAddBestPathPermutations:Int;
+      var PositionsLimit:UInt; Position,Next:PPosition;
 
         function  AddToList(Position__,List__:PPosition):PPosition;
         begin // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.AddToList
@@ -23701,8 +23773,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           Result:=Position__;
         end; // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.AddToList
 
-        function  IsALegalPush(Depth__:Integer; Position__:PPosition; var BoxNo__:Integer; var Direction__:TDirection):Boolean;
-        var NeighborOffset,SquareNo:Integer;
+        function  IsALegalPush(Depth__:Int; Position__:PPosition; var BoxNo__:Int; var Direction__:TDirection):Boolean;
+        var NeighborOffset,SquareNo:Int;
         begin // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.IsALegalPush
           with Solver.SearchStates[Depth__].PlayersReachableSquares do with Position__^ do begin
             Result             :=False;
@@ -23732,10 +23804,10 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
             end;
         end; // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.IsALegalPush
 
-        procedure DoMove(Depth__,BoxNo__:Integer; Direction__:TDirection;
+        procedure DoMove(Depth__,BoxNo__:Int; Direction__:TDirection;
                          var OldGameMetrics__:TOptimizerGameMetrics;
-                         var OldPlayerPos__:Integer);
-        var PlayerDistance:Integer;
+                         var OldPlayerPos__:Int);
+        var PlayerDistance:Int;
         begin // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.DoMove
           OldGameMetrics__:=Optimizer.GameMetrics; OldPlayerPos__:=Game.PlayerPos;
           with Solver.SearchStates[Depth__].PlayersReachableSquares do
@@ -23767,7 +23839,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
              end;
         end; //OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.DoMove
 
-        procedure UndoMove(BoxNo__:Integer; Direction__:TDirection; const OldGameMetrics__:TOptimizerGameMetrics; OldPlayerPos__:Integer);
+        procedure UndoMove(BoxNo__:Int; Direction__:TDirection; const OldGameMetrics__:TOptimizerGameMetrics; OldPlayerPos__:Int);
         begin // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.UndoMove
           //Dec(Optimizer.MovesFromSquare[Game.BoxPos[BoxNo__]-Game.SquareOffsetForward[Direction__],Direction__]); // update move map
           YASS.UndoPush(BoxNo__,Direction__); // update board
@@ -23775,8 +23847,8 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           Optimizer.GameMetrics:=OldGameMetrics__; //restore game metrics
         end; // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.UndoMove
 
-        procedure DelayPushesSearch(Position__,PendingPositions__,Parent__:PPosition; Depth__:Integer);
-        var BoxNo,OldPlayerPos:Integer; Direction,OldDirection:TDirection;
+        procedure DelayPushesSearch(Position__,PendingPositions__,Parent__:PPosition; Depth__:Int);
+        var BoxNo,OldPlayerPos:Int; Direction,OldDirection:TDirection;
             p,SuccessorPosition:PPosition; OldGameMetrics:TOptimizerGameMetrics;
         begin // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations.DelayPushesSearch
           if (Depth__<=MAX_OPTIMIZER_SEARCH_DEPTH_FOR_ADDING_BEST_PATH_PERMUTATIONS) and
@@ -23874,7 +23946,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end; // OptimizeGame.Search.GlobalOptimizationSearch.OPENAddBestPathPermutations
 
     begin // OptimizeGame.Search.GlobalOptimizationSearch
-      Result:=False; Optimizer.IterationResult:=False;
+      Result:=False; Optimizer.IterationResult:=False; IsExhaustiveSearch__:=False;
       if not SearchHasTerminated then with Positions do begin
          Optimizer.PruningNode:=BestPosition;
          Result:=EnumerateTargetPositions(BestPosition,1) or Result;
@@ -23889,12 +23961,27 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
          Position:=BestPosition; // put the game path on the open-queue
          while Position<>nil do with Position^ do begin
-           Move.Direction:=TDirection(Cardinal(Ord(Move.Direction)) or POSITION_TARGET_PATH_TAG);
+           Move.Direction:=TDirection(UInt(Ord(Move.Direction)) or POSITION_TARGET_PATH_TAG);
            Score:=0; OPENAdd(Position,True); Position:=Parent;
            end;
 
+         // restrict the number of generated pushes. global optimization is a weak optimization method,
+         // hence don't spend too much time on it
+         if   Solver.PushCount                   <= High( Solver.SearchLimits.PushCountLimit ) - MAX_GLOBAL_OPTIMIZATION_PUSH_COUNT then
+              Solver.SearchLimits.PushCountLimit := Solver.PushCount + MAX_GLOBAL_OPTIMIZATION_PUSH_COUNT
+         else Solver.SearchLimits.PushCountLimit := High( Solver.SearchLimits.PushCountLimit );
+
          // repeat expanding nodes (mostly in breadth-first order) until the search terminates, e.g., when the user terminates the search manually
          Result:=AStarSearch or Result;
+
+         if Solver.SearchLimits.PushCountLimit > 0 then begin // 'True': the search hasn't been terminated
+            IsExhaustiveSearch__ := ( Solver.PushCount < Solver.SearchLimits.PushCountLimit ) // 'True': the search wasn't stopped by the push count limit
+                                    and
+                                    ( ( UninitializedItemCount > 0 )            // 'True: the transposition table isn't full
+                                      or
+                                      ( FreeList <> nil ) );                    // 'True: there are unused items in the transposition table
+            Solver.SearchLimits.PushCountLimit := Optimizer.SearchLimits.PushCountLimit; // restore the push count limit
+            end;
 
          if CalculateMetricsForPositionsOnBestPath(NewBestResult) and NewBestResult then begin
             Optimizer.Result:=prOK; // 'prOK': the optimizer improved the caller's solution/snapshot
@@ -23916,32 +24003,32 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       RED_BLACK_TREE_ITEM_COLOR_RED=1;                                          // the 'red' flag is stored in the 'left' link pointer for binary search tree items, i.e., 'TBinaryTreeItem.Left'
     type
       PByte=^Byte;
-      TByteVector=array[0..MaxInt-1] of Byte;
+      TByteVector=array[0..MaxInt-1] of Byte;                                   // the declared size limit is merely a formality. range checking is disabled
       PByteVector=^TByteVector;
       TBloomFilter=record                                                       // note that a lookup in a Bloom filter can return false positives but never false negatives (currently, the Bloom filter is not in production)
-        ByteSize:Integer;
+        ByteSize:Int;
         Memory:PByteVector;
       end;
       TBoxConfiguration=array[0..(MAX_BOARD_SIZE+BITS_PER_BYTE-1) div BITS_PER_BYTE] of Byte; // bit-set representation of the boxes on the board; must be a 0-based vector
       PBoxConfiguration=^TBoxConfiguration;
       TBoxConfigurations=record
-        Count:Integer;                                                          // number of box configurations in the collection
+        Count:Int;                                                              // number of box configurations in the collection
         First:PBoxConfiguration;                                                // pointer to the first box configuration in the collection
       end;
       PBinaryTreeItem=^TBinaryTreeItem;
       TBinaryTreeItem=record
         BoxConfiguration:PBoxConfiguration;                                     // note that it's a pointer to a box configuration, not the box configuration itself
-        Key:Integer;
+        Key:Int;
         case Boolean of
           False : (Left :PBinaryTreeItem;                                       // left/right order cannot change; see the overlapping 'Links' declaration
                    Right:PBinaryTreeItem;
                    );
           True  : (Links:array[Boolean] of PBinaryTreeItem);                    // 'left' = 'False'; 'right' = 'True'; this must hold, e.g., for the red-black tree updating
       end;
-      BinaryTreeItemPointerVector=array[0..(MaxInt div SizeOf(PBinaryTreeItem))-1] of PBinaryTreeItem; // array of pointers to binary tree items; must be a 0-based vector
+      BinaryTreeItemPointerVector=array[0..(MaxInt div SizeOf(PBinaryTreeItem))-1] of PBinaryTreeItem; // array of pointers to binary tree items; must be a 0-based vector; the declared size limit is merely a formality. range checking is disabled
       PBinaryTreeItemPointerVector=^BinaryTreeItemPointerVector;                // pointer to an array of pointers to binary tree items
       TBinaryTree=record
-        Count:Integer;                                                          // number of items in the tree
+        Count:Int;                                                              // number of items in the tree
         Root:PBinaryTreeItem;
       end;
       TDataStructureType=(dstVicinitySquares,dstBinaryTree,dstPointerVector,dstBoxConfigurationVector,dstVisitedBitSet,dstBloomFilter,dstPositionVector);
@@ -23949,7 +24036,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       TGameState=UInt32;                                                        // a game state is a [box-configuration, player-square] tuple; the concrete representation is "BoxConfigurationIndex*PlayerSquareCount+PlayerSquare"
       PMemoryBlock=^TMemoryBlock;
       TMemoryBlock=record
-        ByteSize:Cardinal;
+        ByteSize:UInt;
         Memory:Pointer;
         Next:PMemoryBlock;                                                      // memory-blocks are linked together as a circular list, using the fields 'Next' and 'Previous'
         Previous:PMemoryBlock;
@@ -23963,12 +24050,12 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         Left:PTernarySearchTreeItem;
         Mid:PTernarySearchTreeItem;
         Right:PTernarySearchTreeItem;
-        SplitChar:Integer;
-        Value:Integer;
+        SplitChar:Int;
+        Value:Int;
       end;
       TTernarySearchTree=record                                                 // ternary search tree (not in production)
-        Count:Integer;
-        MaxDepth:Integer;
+        Count:Int;
+        MaxDepth:Int;
         Root:PTernarySearchTreeItem;
       end;
       TVicinitySquaresVector=array[0..MAX_BOARD_SIZE*MAX_BOARD_SIZE] of UInt16; // vicinity squares for all the box-squares organized as a flat vector
@@ -23981,70 +24068,70 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
     var
 //    BloomFilter:TBloomFilter;                                                 // using a Bloom filter only speeds up box configuration lookups by approx. 5%; this doesn't seem to be worth the memory footprint, hence, the filter is not in use
-      BoxConfigurationByteSize:Integer;                                         // number of bytes required to hold a bit-set representation of a box configuration
+      BoxConfigurationByteSize:Int;                                             // number of bytes required to hold a bit-set representation of a box configuration
       BoxConfigurations:TBoxConfigurations;                                     // the box configurations considered by the vicinity search
 //    BoxConfigurationsTernarySearchTree:TTernarySearchTree;                    // the box configurations considered by the vicinity search, stored as a ternary search tree
       BoxExternalToInternalSquare:TBoardOfIntegers;                             // maps external game square numbers to internal box  square numbers
       BoxInternalToExternalSquare:TBoardOfIntegers;                             // maps internal box  square numbers to external game square numbers
-      BoxSquareCount:Cardinal;                                                  // number of box squares, reachable squares only
-      BoxSquareNeighbor:array[0..MAX_BOARD_SIZE,TDirection] of Integer;         // square neighbors for each direction, using internal box square numbers; 'NONE' indicates an unreachable square, e.g., a wall square
+      BoxSquareCount:UInt;                                                      // number of box squares, reachable squares only
+      BoxSquareNeighbor:array[0..MAX_BOARD_SIZE,TDirection] of Int;             // square neighbors for each direction, using internal box square numbers; 'NONE' indicates an unreachable square, e.g., a wall square
       BoxSquareToPlayerSquare:TBoardOfIntegers;                                 // maps internal box square numbers to internal player square numbers
       Deadlocks:TBoxConfigurations;                                             // bit-set representations of the player-independent members of the pre-calculated deadlocks (not in production)
-      DeadlockSetInternalToExternalNo:array[0..MAX_DEADLOCK_SETS] of Integer;   // maps bit-set deadlock numbers to external numbers (not in production)
-      MaxBoxConfigurationCount:Integer;                                         // maximum number of box configurations that may be generated for the currently analyzed slice of the game
-      MaxSearchDepth:Integer;                                                   // maximum search depth for the currently analyzed slice of the game
+      DeadlockSetInternalToExternalNo:array[0..MAX_DEADLOCK_SETS] of Int;       // maps bit-set deadlock numbers to external numbers (not in production)
+      MaxBoxConfigurationCount:Int;                                             // maximum number of box configurations that may be generated for the currently analyzed slice of the game
+      MaxSearchDepth:Int;                                                       // maximum search depth for the currently analyzed slice of the game
       MemoryPool:TMemoryPool;                                                   // the memory available for the vicinity-search
       NewPathPositions:POptimizerPositionVector;                                // memory area allocated for a new best path found by the vicinity search
       PreallocatedTreeItemsMemoryBlock:TMemoryBlock;                            // preallocated tree items for the binary search tree(s), i.e., a free-list of items
       PlayerExternalToInternalSquare:TBoardOfIntegers;                          // maps external game   square numbers to internal player square numbers
       PlayerInternalToExternalSquare:TBoardOfIntegers;                          // maps internal player square numbers to external game   square numbers
-      PlayerSquareCount:Cardinal;                                               // number of player squares, reachable squares only
-      PlayerSquareNeighbor:array[0..MAX_BOARD_SIZE,TDirection] of Integer;      // square neighbors for each direction, using internal player square numbers; 'NONE' indicates an unreachable square, e.g., a wall square
+      PlayerSquareCount:UInt;                                                   // number of player squares, reachable squares only
+      PlayerSquareNeighbor:array[0..MAX_BOARD_SIZE,TDirection] of Int;          // square neighbors for each direction, using internal player square numbers; 'NONE' indicates an unreachable square, e.g., a wall square
       PlayerSquareToBoxSquare:TBoardOfIntegers;                                 // maps internal player square numbers to internal box square numbers; 'NONE' indicates the square isn't a box square
       SliceEndPosition:POptimizerPosition;                                      // the search slices the game up in small sections if the game is too big to handle as a whole
       SliceStartPosition:POptimizerPosition;                                    // the search slices the game up in small sections if the game is too big to handle as a whole
       StartTimeMS:TTimeMS;
       VicinitySquares:TVicinitySquares;                                         // the nearest squares for each box-square
       VicinitySettingsAsText:String;
-      VisitedMultiplicationFactor:Cardinal;                                     // the size of 'Visited' depends on the optimization type; optimizing boxlines requires saving the last push direction for all visited game states
+      VisitedMultiplicationFactor:UInt;                                         // the size of 'Visited' depends on the optimization type; optimizing boxlines requires saving the last push direction for all visited game states
 
       // forward declarations, i.e., functions that are referenced before they are defined in the source code
-      function  CalculateDataStructuresByteSize(Count__:Cardinal; DataStructureTypeSet__:TDataStructureTypeSet):Cardinal; forward;
-      function  CalculateMaximumNumberOfVicinitySquaresPerSquare(BoxSquareCount__:Integer; const VicinitySettings__:TVicinitySettings):Integer; forward;
-      function  CalculateMaximumSearchDepth(StartPosition__,EndPosition__:POptimizerPosition):Integer; forward;
-      function  CompareBoxConfigurations(const BoxConfiguration1__,BoxConfiguration2__:TBoxConfiguration):Integer; forward;
-      function  GetMemory(ByteSize__:Cardinal; AllocateMemoryFromTheTop__:Boolean):Pointer; forward;
-      function  HashValuePJW(Key__:PByteVector; KeyByteSize__:Integer):Cardinal; forward;
-      function  HashValueDEK(Key__:PByteVector; KeyByteSize__:Integer):Cardinal; forward;
+      function  CalculateDataStructuresByteSize(Count__:UInt; DataStructureTypeSet__:TDataStructureTypeSet):UInt; forward;
+      function  CalculateMaximumNumberOfVicinitySquaresPerSquare(BoxSquareCount__:Int; const VicinitySettings__:TVicinitySettings):Int; forward;
+      function  CalculateMaximumSearchDepth(StartPosition__,EndPosition__:POptimizerPosition):Int; forward;
+      function  CompareBoxConfigurations(const BoxConfiguration1__,BoxConfiguration2__:TBoxConfiguration):Int; forward;
+      function  GetMemory(ByteSize__:UInt; AllocateMemoryFromTheTop__:Boolean):Pointer; forward;
+      function  HashValuePJW(Key__:PByteVector; KeyByteSize__:Int):UInt; forward;
+      function  HashValueDEK(Key__:PByteVector; KeyByteSize__:Int):UInt; forward;
       function  InitializeMemoryPool(var MemoryPool__:TMemoryPool; ProtectedUpperMemoryArea__:Pointer):Boolean; forward;
       function  InternalError(const FunctionName__:String):Boolean; forward;
-      function  IsABoxSquare(SquareNo__:Cardinal; const BoxConfiguration__:TBoxConfiguration):Boolean; forward;
+      function  IsABoxSquare(SquareNo__:UInt; const BoxConfiguration__:TBoxConfiguration):Boolean; forward;
       procedure LoadBoxConfigurationFromGame(var BoxConfiguration__:TBoxConfiguration); forward;
       procedure MarkMemory(var MemoryMark__:TMemoryBlock); forward;
       procedure ReleaseMemory(const MemoryMark__:TMemoryBlock); forward;
-      procedure RemoveBox(SquareNo__:Cardinal; var BoxConfiguration__:TBoxConfiguration); forward;
-      procedure SavePlayerAndBoxConfigurationToGame(InternalPlayerSquare__:Integer; const BoxConfiguration__:TBoxConfiguration); forward;
+      procedure RemoveBox(SquareNo__:UInt; var BoxConfiguration__:TBoxConfiguration); forward;
+      procedure SavePlayerAndBoxConfigurationToGame(InternalPlayerSquare__:Int; const BoxConfiguration__:TBoxConfiguration); forward;
 
-      procedure AddBox(SquareNo__:Cardinal; var BoxConfiguration__:TBoxConfiguration);
+      procedure AddBox(SquareNo__:UInt; var BoxConfiguration__:TBoxConfiguration);
       begin
         Inc(BoxConfiguration__[SquareNo__ div BITS_PER_BYTE],1 shl (SquareNo__ mod BITS_PER_BYTE));
       end; // AddBox
 
       // Bloom filter (not in production)
 
-      function  BFAdd(const BoxConfiguration__:TBoxConfiguration; var BloomFilter__:TBloomFilter):Cardinal;
-      var BitIndex:Cardinal;
+      function  BFAdd(const BoxConfiguration__:TBoxConfiguration; var BloomFilter__:TBloomFilter):UInt;
+      var BitIndex:UInt;
       begin // adds item to Bloom filter
         with BloomFilter__ do begin
-          BitIndex:=HashValueDEK(Addr(BoxConfiguration__),BoxConfigurationByteSize) mod Cardinal(ByteSize*BITS_PER_BYTE);
+          BitIndex:=HashValueDEK(Addr(BoxConfiguration__),BoxConfigurationByteSize) mod UInt(ByteSize*BITS_PER_BYTE);
           Memory[BitIndex div BITS_PER_BYTE]:=Memory[BitIndex div BITS_PER_BYTE] or (1 shl (BitIndex mod BITS_PER_BYTE));
-          BitIndex:=HashValuePJW(PByteVector(Addr(BoxConfiguration__)),BoxConfigurationByteSize) mod Cardinal(ByteSize*BITS_PER_BYTE);
+          BitIndex:=HashValuePJW(PByteVector(Addr(BoxConfiguration__)),BoxConfigurationByteSize) mod UInt(ByteSize*BITS_PER_BYTE);
           Memory[BitIndex div BITS_PER_BYTE]:=Memory[BitIndex div BITS_PER_BYTE] or (1 shl (BitIndex mod BITS_PER_BYTE));
           Result:=BitIndex; // return the primary hash-key value
           end;
       end; // BFAdd
 
-      procedure BFInitialize(Memory__:PByteVector; ByteSize__:Integer; var BloomFilter__:TBloomFilter);
+      procedure BFInitialize(Memory__:PByteVector; ByteSize__:Int; var BloomFilter__:TBloomFilter);
       begin // inititalizes Bloom filter; precondition: 'Memory__^' is a memory area of byte-size 'ByteSize__'
         with BloomFilter__ do begin
           Memory:=Memory__; ByteSize:=ByteSize__;
@@ -24052,15 +24139,15 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           end;
       end; // BFInitialize
 
-      function  BFLookup(const BoxConfiguration__:TBoxConfiguration; const BloomFilter__:TBloomFilter; var HashKey__:Cardinal):Boolean; // note that a Bloom filter can return false positives but never false negatives
-      var BitIndex:Cardinal;
+      function  BFLookup(const BoxConfiguration__:TBoxConfiguration; const BloomFilter__:TBloomFilter; var HashKey__:UInt):Boolean; // note that a Bloom filter can return false positives but never false negatives
+      var BitIndex:UInt;
       begin // searches for an item in Bloom filter
         Result:=False;
         with BloomFilter__ do begin
-          BitIndex:=HashValuePJW(PByteVector(Addr(BoxConfiguration__)),BoxConfigurationByteSize) mod Cardinal(ByteSize*BITS_PER_BYTE);
+          BitIndex:=HashValuePJW(PByteVector(Addr(BoxConfiguration__)),BoxConfigurationByteSize) mod UInt(ByteSize*BITS_PER_BYTE);
           HashKey__:=BitIndex; // return the primary hash-key value
           if (Memory[BitIndex div BITS_PER_BYTE] and (1 shl (BitIndex mod BITS_PER_BYTE)))=0 then exit; // '0': the key isn't in the set; quick-and-dirty exit
-          BitIndex:=HashValueDEK(Addr(BoxConfiguration__),BoxConfigurationByteSize) mod Cardinal(ByteSize*BITS_PER_BYTE);
+          BitIndex:=HashValueDEK(Addr(BoxConfiguration__),BoxConfigurationByteSize) mod UInt(ByteSize*BITS_PER_BYTE);
           if (Memory[BitIndex div BITS_PER_BYTE] and (1 shl (BitIndex mod BITS_PER_BYTE)))=0 then exit; // '0': the key isn't in the set; quick-and-dirty exit
           end;
         Result:=True; // note: a Bloom filter can return false positives but never false negatives
@@ -24070,10 +24157,10 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
       // Ternary Search Tree (not in production)
 
-      function  TSTAdd(const BoxConfiguration__:TBoxConfiguration; Value__:Integer; var Tree__:TTernarySearchTree; var Item__:PTernarySearchTreeItem):Boolean;
-      var Index,Depth,Char:Integer; Parent:PTernarySearchTreeItem;
+      function  TSTAdd(const BoxConfiguration__:TBoxConfiguration; Value__:Int; var Tree__:TTernarySearchTree; var Item__:PTernarySearchTreeItem):Boolean;
+      var Index,Depth,Char:Int; Parent:PTernarySearchTreeItem;
 
-        function  MakeNewItem(Char__:Integer; var Item__:PTernarySearchTreeItem):Boolean;
+        function  MakeNewItem(Char__:Int; var Item__:PTernarySearchTreeItem):Boolean;
         begin
           Item__:=GetMemory(SizeOf(Item__^),True); // 'True' parameter: allocate the memory from the top of the free memory
           Result:=Item__<>nil;
@@ -24136,7 +24223,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
       end; // TSTInitialize
 
       function  TSTLookup(const BoxConfiguration__:TBoxConfiguration; const Tree__:TTernarySearchTree; var Item__:PTernarySearchTreeItem):Boolean;
-      var Char,Index:Integer;
+      var Char,Index:Int;
       begin // searches item in ternary search tree
         Result:=False; Item__:=Tree__.Root; Index:=1; Char:=BoxConfiguration__[0];
         while (Item__<>nil) {and (not Result)} do with Item__^ do               // 'not Result': this is commented out because it's unnecessary with the "quick-and-dirty" exit a few lines further down
@@ -24158,19 +24245,19 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
       // end of ternary search tree functions
 
-      function  ByteAlignment(ByteAlignment__:Integer; var Memory__:Pointer):Integer;
+      function  ByteAlignment(ByteAlignment__:Int; var Memory__:Pointer):Int;
       begin // aligns 'Memory__' to the memory alignment boundary; returns the number of bytes added for proper alignment;
-           // preconditions: 1) 'ByteAlignment__' is a '2^n' integer where 'n' >=0; 2) Cardinal('Memory__') + 'MemoryAlignment' - 1 is a valid memory address
-        Result:=Cardinal(Memory__) and (ByteAlignment__-1);
+           // preconditions: 1) 'ByteAlignment__' is a '2^n' integer where 'n' >=0; 2) UInt('Memory__') + 'MemoryAlignment' - 1 is a valid memory address
+        Result:=UInt(Memory__) and (ByteAlignment__-1);
         if Result<>0 then begin
            Result:=ByteAlignment__-Result;
-           Cardinal(Memory__):=Cardinal(Memory__)+Cardinal(Result);
+           UInt(Memory__):=UInt(Memory__)+UInt(Result);
            end;
       end; // ByteAlignment
 
-      function  CalculateDataStructuresByteSize(Count__:Cardinal; DataStructureTypeSet__:TDataStructureTypeSet):Cardinal;
+      function  CalculateDataStructuresByteSize(Count__:UInt; DataStructureTypeSet__:TDataStructureTypeSet):UInt;
 
-        function  Add(A,B:Cardinal):Cardinal;
+        function  Add(A,B:UInt):UInt;
         begin // add with saturation and byte alignment
           if   High(Result)-A>=B then begin
                Result:=A+B;
@@ -24181,58 +24268,60 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           else Result:=High(Result);
         end;
 
-        function  Divide(A,B:Cardinal):Cardinal;
+        function  Divide(A,B:UInt):UInt;
         begin // divide with saturation
           if   (A<>High(Result)) then Result:=A div B
           else Result:=High(Result);
         end;
 
-        function  Multiply(A,B:Cardinal):Cardinal;
-        var LongResult:Int64;
+        function  Multiply( A, B : UInt ) : UInt;
         begin // multiply with saturation
-          LongResult:=Int64(A)*Int64(B);
-          if   LongResult<High(Result) then Result:=LongResult
-          else Result:=High(Result);
+          if   ( A <> 0 ) and ( B <> 0 ) then begin
+               if   A <= ( High( Result ) div B ) then
+                    Result := A * B
+               else Result := High( Result );
+               end
+          else Result := 0;
         end;
 
       begin // CalculateDataStructuresByteSize
         Result:=0;
         if dstVicinitySquares in DataStructureTypeSet__ then begin              // vicinity squares; they are organized as a flat vector, with 'VicinitySquaresFirstIndex[]' containing the index of the first neighbor for each of the box-squares
            Result:=Add(Result,BoxSquareCount*
-                              Cardinal(CalculateMaximumNumberOfVicinitySquaresPerSquare(
-                                         BoxSquareCount,Optimizer.VicinitySettings))*
-                              Cardinal(SizeOf(VicinitySquares.Squares^[Low(VicinitySquares.Squares^)])));
+                              UInt(CalculateMaximumNumberOfVicinitySquaresPerSquare(
+                                     BoxSquareCount,Optimizer.VicinitySettings))*
+                              UInt(SizeOf(VicinitySquares.Squares^[Low(VicinitySquares.Squares^)])));
            end;
         if dstBinaryTree in DataStructureTypeSet__ then begin
-           Result:=Add(Result,Count__*Cardinal(SizeOf(TBinaryTreeItem)));       // binary tree items
-           Result:=Add(Result,Count__*Cardinal(BoxConfigurationByteSize));      // the box configurations belonging to the binary tree items
+           Result:=Add(Result,Count__*UInt(SizeOf(TBinaryTreeItem)));           // binary tree items
+           Result:=Add(Result,Count__*UInt(BoxConfigurationByteSize));          // the box configurations belonging to the binary tree items
            end;
         if dstPointerVector in DataStructureTypeSet__ then begin
-           Result:=Add(Result,Count__*Cardinal(SizeOf(PBinaryTreeItem)));
+           Result:=Add(Result,Count__*UInt(SizeOf(PBinaryTreeItem)));
            end;
         if dstBoxConfigurationVector in DataStructureTypeSet__ then begin
-           Result:=Add(Result,Count__*Cardinal(BoxConfigurationByteSize));
+           Result:=Add(Result,Count__*UInt(BoxConfigurationByteSize));
            end;
         if dstVisitedBitSet in DataStructureTypeSet__ then begin
            Result:=Add(Result,
                        Add(1,
                            Divide(Multiply(Count__,
-                                           Cardinal(PlayerSquareCount)*VisitedMultiplicationFactor),
+                                           UInt(PlayerSquareCount)*VisitedMultiplicationFactor),
                                   BITS_PER_BYTE)));
            end;
         if dstBloomFilter in DataStructureTypeSet__ then begin
            Result:=Add(Result,((Count__+(BITS_PER_BYTE div 2)) div BITS_PER_BYTE)*8); // reserve 8 bits per item; this implementation sets 2 bits per item, so by reserving 8 bits the 'false positives' rate is expected to be rather small
            end;
         if dstPositionVector in DataStructureTypeSet__ then begin               // positions (nodes) on a new best path
-           Result:=Add(Result,Cardinal(Succ(CalculateMaximumSearchDepth(            // 'Succ': element 0 is not used by the path reconstruction after the search
+           Result:=Add(Result,UInt(Succ(CalculateMaximumSearchDepth(            // 'Succ': element 0 is not used by the path reconstruction after the search
                                               POptimizerPosition(YASS.Positions.StartPosition), // note that the calculation here conservatively reserves memory for a fully new path; the search may later split the game in smaller pieces
                                               POptimizerPosition(YASS.Positions.BestPosition ))
                                            )*SizeOf(TOptimizerPosition)));
            end;
       end; // CalculateDataStructuresByteSize
 
-      function  CalculateMaximumNumberOfVicinitySquaresPerSquare(BoxSquareCount__:Integer; const VicinitySettings__:TVicinitySettings):Integer;
-      var Index:Integer;
+      function  CalculateMaximumNumberOfVicinitySquaresPerSquare(BoxSquareCount__:Int; const VicinitySettings__:TVicinitySettings):Int;
+      var Index:Int;
       begin // calculates the upper bound on the number of neighbor-squares-per-square used in this search
         Result:=-1;
         for Index:=Low(VicinitySettings__) to High(VicinitySettings__) do
@@ -24240,7 +24329,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         Result:=Succ(Min(Result,BoxSquareCount__));                             // 'Succ': +1 because for each square, the square itself is a member of its neighbor-square list
       end; // CalculateMaximumNumberOfVicinitySquaresPerSquare
 
-      function  CalculateMaximumSearchDepth(StartPosition__,EndPosition__:POptimizerPosition):Integer;
+      function  CalculateMaximumSearchDepth(StartPosition__,EndPosition__:POptimizerPosition):Int;
       begin // calculates the maximum search depth which depends on the type of optimization
         if   (StartPosition__<>nil) and (EndPosition__<>nil) then
              if Optimizer.Optimization=opMovesPushes then
@@ -24253,13 +24342,13 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         else Result:=0;
       end; // CalculateMaximumSearchDepth
 
-      function  CompareBoxConfigurations(const BoxConfiguration1__,BoxConfiguration2__:TBoxConfiguration):Integer;
-      var Index:Integer;
+      function  CompareBoxConfigurations(const BoxConfiguration1__,BoxConfiguration2__:TBoxConfiguration):Int;
+      var Index:Int;
       begin // returns <0, =0, >0 as the result of 'subtracting' the second argument from the first one
         Result:=0;
         for Index:=0 to Pred(BoxConfigurationByteSize) do
             if   Result=0 then
-                 Result:=Integer(BoxConfiguration1__[Index]) - Integer(BoxConfiguration2__[Index])
+                 Result:=Int(BoxConfiguration1__[Index]) - Int(BoxConfiguration2__[Index])
             else exit; // quick-and-dirty exit of the function as soon as the outcome of the comparison has been determined
       end; // CompareBoxConfigurations
 
@@ -24281,7 +24370,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         function  BTRedBlackTreeCheck(const Tree__:TBinaryTree):Boolean; forward;
 
         function  BTAdd(const BoxConfiguration__:TBoxConfiguration; ExistingItem__:PBinaryTreeItem; var Tree__:TBinaryTree; var Item__:PBinaryTreeItem):Boolean;
-        var i,Depth:Integer; IsRightBranch:Boolean;
+        var i,Depth:Int; IsRightBranch:Boolean;
             GrandParent,Node,Parent,Uncle:PBinaryTreeItem;
             Parents:array[0..8*BITS_PER_UNSIGNED_INTEGER] of PBinaryTreeItem; // a red-black tree has maximum height 2*log2(n+1) where 'n' is the number of nodes in the tree; '*8': for safety
 
@@ -24289,29 +24378,29 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
           begin // rotates the tree item 'Item__'  left or right, depending on the parameter 'RotateRight__'
                 // returns the item which has been rotated upwards; the rotated items are updated with appropriate red/black colors
                 // preconditions: the rotated items are present, i.e., non-nil, and 'Parent__' is the parent of 'Item__'
-            Result                           := PBinaryTreeItem(Cardinal(Item__^.Links[not RotateRight__]) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
-            Item__^.Links[not RotateRight__] := PBinaryTreeItem(Cardinal(Result^.Links[    RotateRight__]) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
+            Result                           := PBinaryTreeItem(UInt(Item__^.Links[not RotateRight__]) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
+            Item__^.Links[not RotateRight__] := PBinaryTreeItem(UInt(Result^.Links[    RotateRight__]) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
             Result^.Links[    RotateRight__] := Item__;
 
             if   Item__<>Tree__.Root then begin
                  if   Item__=Parent__^.Right then
                       Parent__^.Right:=Result
-                 else Parent__^.Left:=PBinaryTreeItem(Cardinal(Result) or (Cardinal(Parent__^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED));
+                 else Parent__^.Left:=PBinaryTreeItem(UInt(Result) or (UInt(Parent__^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED));
                  end
             else Tree__.Root:=Result; // keep the tree root item updated
 
-            Item__^.Left:=PBinaryTreeItem(Cardinal(Item__^.Left) or       RED_BLACK_TREE_ITEM_COLOR_RED);  // the item which has been rotated downwards is colored red
-            Result^.Left:=PBinaryTreeItem(Cardinal(Result^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // the item which has been rotated upwards   is colored black
+            Item__^.Left:=PBinaryTreeItem(UInt(Item__^.Left) or       RED_BLACK_TREE_ITEM_COLOR_RED);  // the item which has been rotated downwards is colored red
+            Result^.Left:=PBinaryTreeItem(UInt(Result^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // the item which has been rotated upwards   is colored black
           end; // BTRotate
 
         begin // 'BTAdd'; returns 'True' if the box configuration is added to the tree; the new item, or the already existing item, is returned in 'Item__'
           Item__:=Tree__.Root; Depth:=0; Parents[0]:=nil; i:=-1;
           while (Item__<>nil) and (i<>0) and (Depth<High(Parents)) do begin     // 'i<>0': the item hasn't been found in the tree
             Inc(Depth); Parents[Depth]:=Item__;                                 // remember what will be the parent item after descending one step further down the tree
-            //if (Cardinal(Item__) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0 then
+            //if (UInt(Item__) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0 then
             //   InternalError('BTAdd');
             i:=CompareBoxConfigurations(BoxConfiguration__,Item__^.BoxConfiguration^);
-            if        i<0 then Item__:=PBinaryTreeItem(Cardinal(Item__^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED))
+            if        i<0 then Item__:=PBinaryTreeItem(UInt(Item__^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED))
             else if   i>0 then Item__:=Item__^.Right;
             end;
           Result:=Item__=nil;
@@ -24328,37 +24417,37 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                 Parent:=Parents[Depth];
                 if   Parent<>nil then
                      if   i<0 then
-                          Parent^.Left :=PBinaryTreeItem(Cardinal(Parent^.Left)+Cardinal(Item__)) // '<0': the new item is less than the parent item; ('Cardinal(...)' keep the red-black tree item color, if any)
+                          Parent^.Left :=PBinaryTreeItem(UInt(Parent^.Left)+UInt(Item__)) // '<0': the new item is less than the parent item; ('UInt(...)' keep the red-black tree item color, if any)
                      else Parent^.Right:=Item__                                 // '>0': the new item is bigger than the parent item
                 else Tree__.Root:=Item__;                                       // this it the first item added to the tree
 //(*
                 // red-black tree updating, i.e., set item colors and rotate items to maintain the red-black tree properties
-                Item__^     .Left:=PBinaryTreeItem(Cardinal(Item__^     .Left) or       RED_BLACK_TREE_ITEM_COLOR_RED ); // color the new item red
+                Item__^     .Left:=PBinaryTreeItem(UInt(Item__^     .Left) or       RED_BLACK_TREE_ITEM_COLOR_RED ); // color the new item red
                 Node:=Item__;
                 while (Node<>Tree__.Root) and
-                      ((Cardinal(Parents[Depth]^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) do begin // if the parent node is red, then it's necessary to check if any immediate successor nodes also are red
+                      ((UInt(Parents[Depth]^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) do begin // if the parent node is red, then it's necessary to check if any immediate successor nodes also are red
                   Parent     :=Parents[Depth];
                   GrandParent:=Parents[Pred(Depth)]; // the grand parent node is guaranteed to exist because the root node always is black
 
                   IsRightBranch:=Parent=GrandParent^.Right;
-                  Uncle:=PBinaryTreeItem(Cardinal(GrandParent^.Links[not IsRightBranch]) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
+                  Uncle:=PBinaryTreeItem(UInt(GrandParent^.Links[not IsRightBranch]) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
 
                   if (Uncle<>nil) and
-                     ((Cardinal(Uncle^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) then begin // the parent and its sibling are both red; swap their colors with the grandparent
-                     Parent     ^.Left:=PBinaryTreeItem(Cardinal(Parent     ^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // color the parent black
-                     Uncle      ^.Left:=PBinaryTreeItem(Cardinal(Uncle      ^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // color the uncle  black
-                     GrandParent^.Left:=PBinaryTreeItem(Cardinal(GrandParent^.Left) or       RED_BLACK_TREE_ITEM_COLOR_RED ); // color the grandparent red
+                     ((UInt(Uncle^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) then begin // the parent and its sibling are both red; swap their colors with the grandparent
+                     Parent     ^.Left:=PBinaryTreeItem(UInt(Parent     ^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // color the parent black
+                     Uncle      ^.Left:=PBinaryTreeItem(UInt(Uncle      ^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // color the uncle  black
+                     GrandParent^.Left:=PBinaryTreeItem(UInt(GrandParent^.Left) or       RED_BLACK_TREE_ITEM_COLOR_RED ); // color the grandparent red
                      Node             :=GrandParent; Dec(Depth,2); // backtrack to the grandparent item on the path down to the new item
                      end
                   else begin
-                     if Cardinal(Node)=Cardinal(Parent^.Links[not IsRightBranch]) and (not RED_BLACK_TREE_ITEM_COLOR_RED) then
+                     if UInt(Node)=UInt(Parent^.Links[not IsRightBranch]) and (not RED_BLACK_TREE_ITEM_COLOR_RED) then
                         BTRotate(Tree__,Parent,GrandParent,IsRightBranch);
                      BTRotate(Tree__,GrandParent,Parents[Depth-2],not IsRightBranch);
                      Node:=Tree__.Root; // update complete; terminate the 'while' loop
                      end;
                   end;
 
-                Tree__.Root^.Left:=PBinaryTreeItem(Cardinal(Tree__.Root^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // color the root item black, thereby ensuring that the 'GrandParent' item exists in the preceding 'while' loop
+                Tree__.Root^.Left:=PBinaryTreeItem(UInt(Tree__.Root^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // color the root item black, thereby ensuring that the 'GrandParent' item exists in the preceding 'while' loop
 
                 //BTShowTree(Tree__);
                 //BTRedBlackTreeCheck(Tree__);
@@ -24370,7 +24459,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
         function  BTAverageNodeDepth(const Tree__:TBinaryTree):Double;
 
-          function  TreeWalk(TreeNode__:PBinaryTreeItem; Depth__:Cardinal):Cardinal;
+          function  TreeWalk(TreeNode__:PBinaryTreeItem; Depth__:UInt):UInt;
           begin
             if   TreeNode__<>nil then with TreeNode__^ do
                  Result:=Depth__+TreeWalk(Left,Succ(Depth__))+TreeWalk(Right,Succ(Depth__))
@@ -24389,12 +24478,12 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         end; // BTInitialize
 
         function  BTLookup(const BoxConfiguration__:TBoxConfiguration; const Tree__:TBinaryTree; var Item__:PBinaryTreeItem):Boolean;
-        var i:Integer;
+        var i:Int;
         begin // searches item in binary tree
           Result:=False; Item__:=Tree__.Root;
           while (Item__<>nil) {and (not Result)} do begin                       // 'not Result': this is commented out because it's unnecessary with the "quick-and-dirty" exit a few lines further down
             i:=CompareBoxConfigurations(BoxConfiguration__,Item__^.BoxConfiguration^);
-            if        i<0 then Item__:=PBinaryTreeItem(Cardinal(Item__^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED))
+            if        i<0 then Item__:=PBinaryTreeItem(UInt(Item__^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED))
             else if   i>0 then Item__:=Item__^.Right
                  else begin Result:=True; exit;                                 // 'exit': quick-and-dirty exit when a matching box configuration has been found
                       end;
@@ -24402,7 +24491,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         end; // BTLookup
 
         function  BTMakeNewItem(const BoxConfiguration__:TBoxConfiguration; const Tree__:TBinaryTree):PBinaryTreeItem;
-        var NewCount,PreallocatedItemsCount,NewDataStructuresByteSize,NewVisitedByteSize:Cardinal;
+        var NewCount,PreallocatedItemsCount,NewDataStructuresByteSize,NewVisitedByteSize:UInt;
         begin // makes a new binary tree item, possibly preallocating a new memory block
           with PreallocatedTreeItemsMemoryBlock do begin
             if ByteSize<SizeOf(TBinaryTreeItem)+SizeOf(TBoxConfiguration) then begin // 'SizeOf(TBoxConfiguration)': a static calculation with slightly more efficient machine code than a precise dynamic calculation using 'BoxConfigurationByteSize'
@@ -24411,12 +24500,12 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                repeat PreallocatedItemsCount    :=PreallocatedItemsCount div 2;     // first try to get 50%, then 25% more items, etc.
                       ByteSize                  :=Max(SizeOf(TBinaryTreeItem)+SizeOf(TBoxConfiguration),
                                                       CalculateDataStructuresByteSize(PreallocatedItemsCount,[dstBinaryTree]));
-                      NewCount                  :=Cardinal(Tree__.Count)+PreallocatedItemsCount;
+                      NewCount                  :=UInt(Tree__.Count)+PreallocatedItemsCount;
                       NewDataStructuresByteSize :=CalculateDataStructuresByteSize(NewCount,[dstPointerVector,dstBoxConfigurationVector,dstBloomFilter,dstPositionVector]);
                       NewVisitedByteSize        :=CalculateDataStructuresByteSize(NewCount,[dstVisitedBitSet]);
 
 
-                      if   (NewCount<=Cardinal(MaxBoxConfigurationCount))
+                      if   (NewCount<=UInt(MaxBoxConfigurationCount))
                            and
                            (MemoryPool.FreeBlock.ByteSize>=ByteSize)            // '>=': there is room for 'TreeItemPoolFreeCount' new items
                            and
@@ -24425,14 +24514,14 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
                             NewDataStructuresByteSize
                            )
                            and
-                           (High(Cardinal)-NewVisitedByteSize>=NewDataStructuresByteSize)
+                           (High(UInt)-NewVisitedByteSize>=NewDataStructuresByteSize)
                            and
                            (MemoryPool.MemoryBlock.ByteSize
                             >=                                                  // '>=': after allocating the new nodes, the total amount of memory is large enough to hold the final datastructures and work areas which will be allocated later
                             NewDataStructuresByteSize+NewVisitedByteSize
                            ) then begin
                            Memory:=GetMemory(ByteSize,False);
-                           if ((Cardinal(Memory) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0)
+                           if ((UInt(Memory) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0)
                               or
                               {$WARNINGS OFF}
                                 {warning: Comparison always evaluates to True}
@@ -24451,9 +24540,9 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
             Result:=Memory;
             if Result<>nil then with Result^ do begin                           // 'True': there is enough memory for the new item
-               Cardinal(Memory):=Cardinal(Memory)+SizeOf(TBinaryTreeItem);      // allocate the new tree item from the bottom of the memory block
-               ByteSize:=ByteSize-Cardinal(SizeOf(TBinaryTreeItem))-Cardinal(BoxConfigurationByteSize); // reserve bytes for the tree item as well as the box configuration
-               BoxConfiguration:=PBoxConfiguration(Cardinal(Memory)+ByteSize);  // allocate memory for the box configuration from the top of the memory block; that way, box configurations don't destroy the proper alignment of the tree item nodes
+               UInt(Memory):=UInt(Memory)+SizeOf(TBinaryTreeItem);      // allocate the new tree item from the bottom of the memory block
+               ByteSize:=ByteSize-UInt(SizeOf(TBinaryTreeItem))-UInt(BoxConfigurationByteSize); // reserve bytes for the tree item as well as the box configuration
+               BoxConfiguration:=PBoxConfiguration(UInt(Memory)+ByteSize);  // allocate memory for the box configuration from the top of the memory block; that way, box configurations don't destroy the proper alignment of the tree item nodes
                Move(BoxConfiguration__,BoxConfiguration^,BoxConfigurationByteSize); // store the box configuration belonging to this tree item
                Left :=nil;                                                      // 'nil': the new item is a leaf node
                Right:=nil;                                                      // 'nil': the new item is a leaf node
@@ -24470,7 +24559,7 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
             ListTail:=ListHead__;           // 'ListTail' points to the last node of the 'flattened' part of the tree, i.e., the part with no left branches
             Rest:=ListTail^.Right;          // 'Rest' always points to 'ListTail^.Right'
             while Rest<>nil do begin        // 'True': there are more nodes which haven't been 'flattened' yet, i.e., there may be more nodes having a left branch
-              L:=PBinaryTreeItem(Cardinal(Rest^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // get the left branch without its red-black tree item color flag
+              L:=PBinaryTreeItem(UInt(Rest^.Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)); // get the left branch without its red-black tree item color flag
               Rest^.Left:=L;                // remove any red-black tree item colors from the node
               if L<>nil then begin          // 'True': the node has a left branch, 'flatten' it by rotating the left branch up into to list
 //               L:=Rest^.Left;             //  ListTail          ListTail
@@ -24486,11 +24575,11 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
               end;
           end; // TreeToList
 
-          procedure ListToBalancedTree(ListHead__:PBinaryTreeItem; Count__:Integer);
-          var CompleteTreeCount:Integer;
+          procedure ListToBalancedTree(ListHead__:PBinaryTreeItem; Count__:Int);
+          var CompleteTreeCount:Int;
 
-            procedure Compression(ListHead__:PBinaryTreeItem; Count__:Integer);
-            var i:Integer; N,This:PBinaryTreeItem;
+            procedure Compression(ListHead__:PBinaryTreeItem; Count__:Int);
+            var i:Int; N,This:PBinaryTreeItem;
             begin // change 'Count__' list-nodes to tree-nodes having both a left subtree and a right subtree
               This:=ListHead__;
               for i:=0 to Pred(Count__) do begin
@@ -24532,14 +24621,14 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
         end; // BTRebalance
 
         function  BTRedBlackTreeCheck(const Tree__:TBinaryTree):Boolean;
-        var ItemCount,BlackHeight:Integer;
+        var ItemCount,BlackHeight:Int;
 
-          function  TreeWalk(Item__:PBinaryTreeItem; var ItemCount__,BlackHeight__:Integer):Boolean;
-          var i,LeftCount,RightCount,LeftHeight,RightHeight:Integer; L:PBinaryTreeItem;
+          function  TreeWalk(Item__:PBinaryTreeItem; var ItemCount__,BlackHeight__:Int):Boolean;
+          var i,LeftCount,RightCount,LeftHeight,RightHeight:Int; L:PBinaryTreeItem;
           begin
             Result:=True; ItemCount__:=0; BlackHeight__:=0;
             if Item__<>nil then with Item__^ do begin
-               L:=PBinaryTreeItem(Cardinal(Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
+               L:=PBinaryTreeItem(UInt(Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED));
                if L<>nil then begin
                   i:=CompareBoxConfigurations(BoxConfiguration^,L^.BoxConfiguration^);
                   if i<=0 then Result:=False;
@@ -24557,12 +24646,12 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
                ItemCount__  :=Succ(LeftCount+RightCount);
                BlackHeight__:=Max(LeftHeight,RightHeight);
-               if (Cardinal(Left) and RED_BLACK_TREE_ITEM_COLOR_RED)=0 then
+               if (UInt(Left) and RED_BLACK_TREE_ITEM_COLOR_RED)=0 then
                   Inc(BlackHeight__)
                else begin
-                  if (L    <>nil) and ((Cardinal(L^    .Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) then
+                  if (L    <>nil) and ((UInt(L^    .Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) then
                      Result:=False;
-                  if (Right<>nil) and ((Cardinal(Right^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) then
+                  if (Right<>nil) and ((UInt(Right^.Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0) then
                      Result:=False;
                   end;
                end;
@@ -24579,16 +24668,16 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
         procedure BTShowTree(const Tree__:TBinaryTree);
 
-          function  TreeWalk(Item__:PBinaryTreeItem; Depth__:Integer):Integer;
-          var i:Integer;
+          function  TreeWalk(Item__:PBinaryTreeItem; Depth__:Int):Int;
+          var i:Int;
           begin
             if   Item__<>nil then with Item__^ do begin
                  Result:=TreeWalk(Right,Succ(Depth__));
                  for i:=1 to Depth__ do Write(SPACE,SPACE);
                  Write(Item__^.Key);
-                 if (Cardinal(Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0 then Write('r');
+                 if (UInt(Left) and RED_BLACK_TREE_ITEM_COLOR_RED)<>0 then Write('r');
                  Writeln;
-                 Result:=TreeWalk(PBinaryTreeItem(Cardinal(Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)),Succ(Depth__))+Succ(Result);
+                 Result:=TreeWalk(PBinaryTreeItem(UInt(Left) and (not RED_BLACK_TREE_ITEM_COLOR_RED)),Succ(Depth__))+Succ(Result);
                  end
             else Result:=0;
           end;
@@ -24601,9 +24690,9 @@ function  OptimizeGame(MovesAsTextBufferByteSize__:Integer; MovesAsText__:PChar)
 
         function  GenerateBoxConfigurationsRecursively(var BoxConfiguration__          :TBoxConfiguration;
                                                        var ChangedBoxSquares__         :TBoxSquares;
-                                                       VicinitySettingsIndex__         :Integer;
-                                                       PreviousDepthBoxNo__            :Integer;
-                                                       PreviousDepthBoxOriginalSquare__:Integer; // internal format
+                                                       VicinitySettingsIndex__         :Int;
+                                                       PreviousDepthBoxNo__            :Int;
+                                                       PreviousDepthBoxOriginalSquare__:Int; // internal format
                                                        IsBasePosition__                :Boolean):Boolean;
 {
 Some duplicate box configurations can be pruned already before they are
@@ -24644,13 +24733,13 @@ A---B-
     cannot reach within its limit, and A moves to B's original square.
 }
         var BoxNo,i,Index,FirstIndex,ExternalSquareNo,ExternalVicinitySquareNo,
-            InternalSquareNo,PreviousDepthVicinitySquaresLimit,VicinitySquareNo:Integer; Item:PBinaryTreeItem;
+            InternalSquareNo,PreviousDepthVicinitySquaresLimit,VicinitySquareNo:Int; Item:PBinaryTreeItem;
 
-          function  IsABitSetDeadlock(const BoxConfiguration__:TBoxConfiguration):Integer; // (not in production)
-          var Index:Integer;
+          function  IsABitSetDeadlock(const BoxConfiguration__:TBoxConfiguration):Int; // (not in production)
+          var Index:Int;
 
             function  IsASubSet(const SubSet__,BoxConfiguration__:TBoxConfiguration):Boolean;
-            var Index:Integer;
+            var Index:Int;
             begin
               Result:=True;
               for Index:=0 to Pred(BoxConfigurationByteSize) do
@@ -24662,14 +24751,14 @@ A---B-
           begin // IsABitSetDeadlock; (not in production) returns the external number of the (first) violated player-independent bit-set deadlock, if any, otherwise the return value is 'NONE'
             with Deadlocks do
               for Index:=0 to Pred(Count) do
-                  if   IsASubSet(PBoxConfiguration(Cardinal(First)+Cardinal(Index*BoxConfigurationByteSize))^,BoxConfiguration__) then begin
+                  if   IsASubSet(PBoxConfiguration(UInt(First)+UInt(Index*BoxConfigurationByteSize))^,BoxConfiguration__) then begin
                        Result:=DeadlockSetInternalToExternalNo[Index];
                        exit;                                                    // quick-and-dirty exit when the box configuration has been classified as a deadlock
                        end;
              Result:=NONE;
           end; // IsABitSetDeadlock
 
-          function  IsACapacityCountedDeadlock:Integer;
+          function  IsACapacityCountedDeadlock:Int;
           begin //returns the number of the (first) violated player-independent deadlock-set, if any, otherwise the return value is 'NONE'
             with Game.DeadlockSets do
               for Result:=1 to Count do
@@ -24680,8 +24769,8 @@ A---B-
             Result:=NONE; // 'NONE': the current box configuration doesn't violate any of the player-independent members of the precalculated deadlocks
           end; // IsACapacityCountedDeadlock
 
-          function  IsAFreezeTestDeadlock(const ChangedBoxSquares__:TBoxSquares; VicinitySettingsIndex__:Integer):Boolean;
-          var Index,BoxSquareNo:Integer;
+          function  IsAFreezeTestDeadlock(const ChangedBoxSquares__:TBoxSquares; VicinitySettingsIndex__:Int):Boolean;
+          var Index,BoxSquareNo:Int;
           begin
             for Index:=VicinitySettingsIndex__ to MAX_VICINITY_BOX_COUNT do begin
                 BoxSquareNo:=ChangedBoxSquares__[Index];
@@ -24806,7 +24895,7 @@ A---B-
              end;
         end; // GenerateBoxConfigurationsRecursively
 
-        function  MakeBloomFilter(Count__:Integer; var BloomFilter__:TBloomFilter):Boolean;
+        function  MakeBloomFilter(Count__:Int; var BloomFilter__:TBloomFilter):Boolean;
         begin // creates a Bloom filter for 'Count__' items; returns 'False' if the creation fails, e.g., if the necessary memory isn't available
          with BloomFilter__ do begin
            ByteSize:=CalculateDataStructuresByteSize(Count__,[dstBloomFilter]);
@@ -24823,12 +24912,12 @@ A---B-
         // calculations suffice; the 'left' item for a node n is located at
         // position 2*n+1, and its 'right' item is located at position 2*n+2
 
-          procedure MakeBoxConfigurationVectorRecursively(Item__:PBinaryTreeItem; Index__:Integer);
+          procedure MakeBoxConfigurationVectorRecursively(Item__:PBinaryTreeItem; Index__:Int);
           begin // the tree has just been balanced before calling this recursive function; therefore, the tree height is guaranteed to be so small that recursion doesn't risk causing a stack overflow here
             if Item__<>nil then
                if   (Index__>=0) and (Index__<Tree__.Count) then begin
                     //BFAdd(Item__^.BoxConfiguration^,BloomFilter);              // add this box configuration to the Bloom filter
-                    Move(Item__^.BoxConfiguration^,PBoxConfiguration(Cardinal(BoxConfigurations__.First)+Cardinal(Index__*BoxConfigurationByteSize))^,BoxConfigurationByteSize); // store the current item's box configuration at its final location
+                    Move(Item__^.BoxConfiguration^,PBoxConfiguration(UInt(BoxConfigurations__.First)+UInt(Index__*BoxConfigurationByteSize))^,BoxConfigurationByteSize); // store the current item's box configuration at its final location
                     MakeBoxConfigurationVectorRecursively(Item__^.Left ,Index__*2+1);
                     MakeBoxConfigurationVectorRecursively(Item__^.Right,Index__*2+2);
                     end
@@ -24855,7 +24944,7 @@ A---B-
 
         function  MakeBoxConfigurationsTernarySearchTree(const Tree__:TBinaryTree; var TernarySearchTree__:TTernarySearchTree):Boolean;
 
-          function  TreeWalk(BinaryTreeItem__:PBinaryTreeItem; Index__:Integer):Boolean;
+          function  TreeWalk(BinaryTreeItem__:PBinaryTreeItem; Index__:Int):Boolean;
           var TernarySearchTreeItem:PTernarySearchTreeItem;
           begin
             if   BinaryTreeItem__<>nil then
@@ -24877,7 +24966,7 @@ A---B-
 }
         end; // MakeBoxConfigurationsTernarySearchTree
 
-        function  ReserveMemoryForNewPathPositions(Count__:Integer; var Positions__:POptimizerPositionVector):Boolean;
+        function  ReserveMemoryForNewPathPositions(Count__:Int; var Positions__:POptimizerPositionVector):Boolean;
         begin // allocates memory for a new best path found by the vicinity search; this area must be reserved before the search starts because the search uses the rest of the available memory for its open-queue
           Positions__:=POptimizerPositionVector(GetMemory(Succ(Count__)*SizeOf(Positions__^[Low(Positions__^)]),True)); // 'Succ': element 0 is not used by the path reconstruction after the search
           Result:=Positions__<>nil;
@@ -24885,7 +24974,7 @@ A---B-
 
         function  CalculateBoxSquareVicinitySquares(var VicinitySquares__:TVicinitySquares):Boolean;
         var CountDown,MaxVicinitySquaresPerSquare,NeighborSquareNo,QueueBottom,QueueTop,
-            TimeStamp,SquareNo,VicinitySquareNo:Integer;
+            TimeStamp,SquareNo,VicinitySquareNo:Int;
             d,Direction:TDirection; Visited:TBoardOfIntegers;
         begin // calculates vicinity-squares for each square; precondition: the memory has been allocated for them, i.e., 'VicinitySquares__.Squares' is non-nil
               // returns 'True' if the vicinity-squares are ready for use;
@@ -24983,10 +25072,10 @@ A---B-
 
         MaxBoxConfigurationCount:=Max(0, // '0': guard against any programming errors where unsigned numbers by mistake are interpreted as negative signed numbers
                                       Min((MAX_BOX_CONFIGURATION_COUNT*10) div 9, // the vicinity search is a simple breadth-first search so it's best to limit the number of nodes to a reasonable small number
-                                          Min( (High(MaxBoxConfigurationCount)-2) div          Max(2,PlayerSquareCount), // so 'BoxConfigurationIndex * Max(2,PlayerSquare)' doesn't overflow ('2': for conveniency in 'LookupBoxConfiguration')
-                                              ((High(TGameState)                  div Cardinal(Max(2,PlayerSquareCount)))-1)))); // High('TGameState') is reserved for span marks on the queue
+                                          Min( (High(MaxBoxConfigurationCount)-2) div      Max(2,PlayerSquareCount), // so 'BoxConfigurationIndex * Max(2,PlayerSquare)' doesn't overflow ('2': for conveniency in 'LookupBoxConfiguration')
+                                              ((High(TGameState)                  div UInt(Max(2,PlayerSquareCount)))-1)))); // High('TGameState') is reserved for span marks on the queue
         repeat MaxBoxConfigurationCount:=9*(MaxBoxConfigurationCount div 10);    // 9/10: reduce the size slowly so the final result gets close to the target size for the box configurations
-        until  CalculateDataStructuresByteSize(Cardinal(MaxBoxConfigurationCount),[dstBoxConfigurationVector,dstVisitedBitSet])
+        until  CalculateDataStructuresByteSize(UInt(MaxBoxConfigurationCount),[dstBoxConfigurationVector,dstVisitedBitSet])
                <=
                2*(MemoryPool.MemoryBlock.ByteSize div 5);                       // '2/5 : reserve approx. 60% of the available memory for the open-queue
 
@@ -25036,20 +25125,20 @@ A---B-
         // isn't required anymore
         with MemoryPool do begin
           FreeBlock.ByteSize:=FreeBlock.ByteSize+
-                              (Cardinal(FreeBlock.Memory)-Cardinal(MemoryBlock.Memory)); // the difference between 'FreeBlock.Memory' and 'MemoryBlock.Memory' is the size of the area allocated from the bottom of the available memory
+                              (UInt(FreeBlock.Memory)-UInt(MemoryBlock.Memory)); // the difference between 'FreeBlock.Memory' and 'MemoryBlock.Memory' is the size of the area allocated from the bottom of the available memory
           FreeBlock.Memory:=MemoryBlock.Memory;                                 // reset the pointer to the bottom of the allocated memory block
           end;
         PreallocatedTreeItemsMemoryBlock.ByteSize:=0;                           // reset the binary tree item pool
       end; // GenerateBoxConfigurations
 
-      function  GetMemory(ByteSize__:Cardinal; AllocateMemoryFromTheTop__:Boolean):Pointer;
+      function  GetMemory(ByteSize__:UInt; AllocateMemoryFromTheTop__:Boolean):Pointer;
       begin // returns a memory-block from the memory pool; returns 'nil' if there isn't enough memory available
         if   (ByteSize__>0) and
              (ByteSize__<High(ByteSize__)-MEMORY_ALIGNMENT_BYTES) then with MemoryPool.FreeBlock do begin
              ByteAlignment(MEMORY_ALIGNMENT_BYTES,Pointer(ByteSize__));         // ensure that memory always is allocated in multiples of 'MEMORY_ALIGNMENT_BYTES'
              if   ByteSize__<=ByteSize then begin
                   if AllocateMemoryFromTheTop__ then begin
-                     Cardinal(Result):=Cardinal(Memory)+Pred(ByteSize)-ByteSize__+1; // 'Pred(ByteSize)...+1': a straightforward calculation like 'Memory+Size-ByteSize' could theoretically overflow after the addition 'Memory+Size'
+                     Result:=Pointer(UInt(Memory)+Pred(ByteSize)-ByteSize__+1); // 'Pred(ByteSize)...+1': a straightforward calculation like 'Memory+Size-ByteSize' could theoretically overflow after the addition 'Memory+Size'
                      end
                   else begin
                      Result:=Memory;
@@ -25062,13 +25151,13 @@ A---B-
         else Result:=nil;
       end; // GetMemory
 
-      function  HashValuePJW(Key__:PByteVector; KeyByteSize__:Integer):Cardinal; // a hashpjw-based function (Peter J. Weinberger), adding in the length of the key (e.g., the text)
+      function  HashValuePJW(Key__:PByteVector; KeyByteSize__:Int):UInt; // a hashpjw-based function (Peter J. Weinberger), adding in the length of the key (e.g., the text)
       const BITS_PER_BYTE         = YASS.BITS_PER_BYTE;
-            BITS_PER_HASH_KEY     = SizeOf(Cardinal) * BITS_PER_BYTE;
-            HIGH_4_BITS           = Cardinal($f) shl (BITS_PER_HASH_KEY-4);
-      var   Index:Integer; HighBits:Cardinal;
+            BITS_PER_HASH_KEY     = SizeOf(UInt) * BITS_PER_BYTE;
+            HIGH_4_BITS           = UInt($f) shl (BITS_PER_HASH_KEY-4);
+      var   Index:Int; HighBits:UInt;
       begin
-        Result:=Cardinal(KeyByteSize__);
+        Result:=UInt(KeyByteSize__);
         for Index:=0 to Pred(KeyByteSize__) do begin
             Result:=(Result shl 4) + Ord(Key__^[Index]);
             HighBits:=Result and HIGH_4_BITS;
@@ -25076,25 +25165,25 @@ A---B-
             end;
       end; // HashValuePJW
 
-      function  HashValueDEK(Key__:PByteVector; KeyByteSize__:Integer):Cardinal; // a hashdek function (Donald E. Knuth, "The Art Of Computer Programming Volume 3", 6.4)
+      function  HashValueDEK(Key__:PByteVector; KeyByteSize__:Int):UInt; // a hashdek function (Donald E. Knuth, "The Art Of Computer Programming Volume 3", 6.4)
       const BITS_PER_BYTE         = YASS.BITS_PER_BYTE;
-            BITS_PER_HASH_KEY     = SizeOf(Cardinal) * BITS_PER_BYTE;
+            BITS_PER_HASH_KEY     = SizeOf(UInt) * BITS_PER_BYTE;
             LEFT_SHIFT            = 5;
             RIGHT_SHIFT           = BITS_PER_HASH_KEY - LEFT_SHIFT;
-      var   Index:Integer;
+      var   Index:Int;
       begin
-        Result:=Cardinal(KeyByteSize__);
+        Result:=UInt(KeyByteSize__);
         for Index:=0 to Pred(KeyByteSize__) do
             Result:=((Result shl LEFT_SHIFT) xor (Result shr RIGHT_SHIFT)) xor Ord(Key__^[Index]);
       end; // HashValueDEK
 
-      function  IsABoxSquare(SquareNo__:Cardinal; const BoxConfiguration__:TBoxConfiguration):Boolean;
+      function  IsABoxSquare(SquareNo__:UInt; const BoxConfiguration__:TBoxConfiguration):Boolean;
       begin
         Result:=(BoxConfiguration__[SquareNo__ div BITS_PER_BYTE] and (1 shl (SquareNo__ mod BITS_PER_BYTE)))<>0;
       end; // IsABoxSquare
 
       function  Initialize:Boolean;
-      var BoxNo,Index,InternalSquareNo,SquareNo:Integer; Direction:TDirection;
+      var BoxNo,Index,InternalSquareNo,SquareNo:Int; Direction:TDirection;
 
         function  ReserveMemoryForBoxSquareVicinitySquares(var VicinitySquares__:TVicinitySquares):Boolean;
         var  Direction:TDirection;
@@ -25118,8 +25207,8 @@ A---B-
         end; // ReserveMemoryForBoxSquareVicinitySquares
 
         function  MakeBitSetDeadlocks(var Deadlocks__:TBoxConfigurations):Boolean; // not in production; the normal capacity counting deadlock detection is much faster than bit-set testing
-        var ByteSize,Index,SquareNo,SetNo:Integer;
-            DeadlockSetExternalToInternalNo:array[0..MAX_DEADLOCK_SETS] of Integer;
+        var ByteSize,Index,SquareNo,SetNo:Int;
+            DeadlockSetExternalToInternalNo:array[0..MAX_DEADLOCK_SETS] of Int;
         begin // makes bit-set representations of the player-independent members of the pre-calculated deadlocks
           with Deadlocks__ do begin
             FillChar(Deadlocks__,SizeOf(Deadlocks__),0);                        // clear the deadlock bit-sets, e.g., set the count to 0
@@ -25141,7 +25230,7 @@ A---B-
                          SetNo:=Game.DeadlockSets.SquareSetNumbers[SquareNo]^[Index];
                          if DeadlockSetExternalToInternalNo[SetNo]<>NONE then   // 'True': add a box at the current square for the current deadlock-set number
                             AddBox(BoxExternalToInternalSquare[SquareNo],
-                                   PBoxConfiguration(Cardinal(First)+Cardinal(DeadlockSetExternalToInternalNo[SetNo]*BoxConfigurationByteSize))^);
+                                   PBoxConfiguration(UInt(First)+UInt(DeadlockSetExternalToInternalNo[SetNo]*BoxConfigurationByteSize))^);
                         end;
                  end
             else Count:=0;
@@ -25251,7 +25340,7 @@ A---B-
       begin // 'InitializeMemoryPool'; precondition: 'TTPurge': had been called to compact the best game path at the bottom of the transposition table
         FillChar(MemoryPool__,SizeOf(MemoryPool__),0);
         if (Positions.Positions<>nil) and
-           (Cardinal(Positions.HighWaterMark)>Cardinal(Positions.Positions)) and // '>': per square precalculated deadlock-set numbers and hash table buckets are allocated above the nodes stored in the transposition table
+           (UInt(Positions.HighWaterMark)>UInt(Positions.Positions)) and // '>': per square precalculated deadlock-set numbers and hash table buckets are allocated above the nodes stored in the transposition table
            (Positions.UninitializedItemCount*SizeOf(TOptimizerPosition)>2*MEMORY_ALIGNMENT_BYTES) then
            with MemoryPool__ do with MemoryBlock do begin
              // preserve the best game path at the bottom of the allocated memory,
@@ -25265,34 +25354,34 @@ A---B-
              // hash bucket table before all positions on the best path have been
              // compacted at the bottom of the memory;
              Memory:=Pointer(System.Addr(POptimizerPositionVector(Positions.Positions)^[Positions.Count])); // this is the address of the next free node in the transposition table
-             if   (Positions.BestPosition=nil) or (Cardinal(Positions.BestPosition)+Cardinal(SizeOf(TOptimizerPosition))<=Cardinal(Memory)) then begin
+             if   (Positions.BestPosition=nil) or (UInt(Positions.BestPosition)+UInt(SizeOf(TOptimizerPosition))<=UInt(Memory)) then begin
                   ByteAlignment(MEMORY_ALIGNMENT_BYTES,Memory);
-                  //ByteSize:=(Cardinal(Positions.Positions)+Cardinal(Pred(Positions.MemoryByteSize))-Cardinal(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)); // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
-                  ByteSize:=(Cardinal(Positions.HighWaterMark)-Cardinal(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)); // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
+                  //ByteSize:=(UInt(Positions.Positions)+UInt(Pred(Positions.MemoryByteSize))-UInt(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)); // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
+                  ByteSize:=(UInt(Positions.HighWaterMark)-UInt(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)); // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
 
                   if ProtectedUpperMemoryArea__<>nil then // 'ProtectedUpperMemoryArea__' is used for protecting an upper memory area (e.g. vicinity-squares) when the memory-pool is reallocated after a successful call to 'TTPurge'
-                     if   (Cardinal(ProtectedUpperMemoryArea__)>=Cardinal(Memory))
+                     if   (UInt(ProtectedUpperMemoryArea__)>=UInt(Memory))
                           and
-                          (Cardinal(ProtectedUpperMemoryArea__)-Cardinal(Memory)<=ByteSize) then
-                          ByteSize:=(Cardinal(ProtectedUpperMemoryArea__)-Cardinal(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)) // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
+                          (UInt(ProtectedUpperMemoryArea__)-UInt(Memory)<=ByteSize) then
+                          ByteSize:=(UInt(ProtectedUpperMemoryArea__)-UInt(Memory)) and (not (MEMORY_ALIGNMENT_BYTES-1)) // 'and (not...)': truncate the size to a multiple of 'MEMORY_ALIGNMENT_BYTES'
                      else InternalError('InitializeMemoryPool (A)'
                                         +NL+'Positions: '+IntToStr(Positions.Count)
                                         +NL+'Bytes....: '+IntToStr(ByteSize)
-                                        +NL+'Memory...: '+IntToStr(Cardinal(Memory))
-                                        +NL+'Protect..: '+IntToStr(Cardinal(ProtectedUpperMemoryArea__))
-                                        +NL+'Hash.....: '+IntToStr(Cardinal(Positions.HashBuckets))
+                                        +NL+'Memory...: '+IntToStr(UInt(Memory))
+                                        +NL+'Protect..: '+IntToStr(UInt(ProtectedUpperMemoryArea__))
+                                        +NL+'Hash.....: '+IntToStr(UInt(Positions.HashBuckets))
                                        );
 
                   FreeBlock:=MemoryBlock;              // the entire memory block is free at the moment
                   Positions.UninitializedItemCount:=0; // '0'  : ensure that no more positions are added to the transposition table by the normal transposition table functions
                   Positions.FreeList:=nil;             // 'nil': ensure that no more positions are added to the transposition table by the normal transposition table functions
-                  //Write(Positions.Count,SPACE,Positions.MemoryByteSize,SPACE,Cardinal(Positions.Positions),SPACE,Cardinal(Positions.HashBuckets),SPACE,Cardinal(MemoryBlock.Addr),SPACE,MemoryBlock.Size);
+                  //Write(Positions.Count,SPACE,Positions.MemoryByteSize,SPACE,UInt(Positions.Positions),SPACE,UInt(Positions.HashBuckets),SPACE,UInt(MemoryBlock.Addr),SPACE,MemoryBlock.Size);
                   //Readln;
                   end
              else InternalError('InitializeMemoryPool (B)'
                                 +NL+'Positions: '+IntToStr(Positions.Count)
-                                +NL+'Memory...: '+IntToStr(Cardinal(Memory))
-                                +NL+'Best.....: '+IntToStr(Cardinal(Positions.BestPosition))
+                                +NL+'Memory...: '+IntToStr(UInt(Memory))
+                                +NL+'Best.....: '+IntToStr(UInt(Positions.BestPosition))
                                );
              end;
         Result:=MemoryPool__.FreeBlock.ByteSize>0;
@@ -25305,13 +25394,13 @@ A---B-
       end; // InternalError
 
       procedure LoadBoxConfigurationFromGame(var BoxConfiguration__:TBoxConfiguration);
-      var BoxNo,SquareNo:Integer;
+      var BoxNo,SquareNo:Int;
       begin // create a bit-set representation of the current game state
         FillChar(BoxConfiguration__,BoxConfigurationByteSize,0);
         for BoxNo:=1 to Game.BoxCount do begin
             SquareNo:=BoxExternalToInternalSquare[Game.BoxPos[BoxNo]];
             if   SquareNo>=0 then
-                 AddBox(Cardinal(SquareNo),BoxConfiguration__)
+                 AddBox(UInt(SquareNo),BoxConfiguration__)
             else InternalError('LoadBoxConfigurationFromGame');
             end;
       end; // LoadBoxConfigurationFromGame
@@ -25321,7 +25410,7 @@ A---B-
         MemoryMark__:=MemoryPool.FreeBlock;
       end; // MarkMemory
 
-      function  PositionOnBestPathWithPushNumber(Count__:Integer):POptimizerPosition;
+      function  PositionOnBestPathWithPushNumber(Count__:Int):POptimizerPosition;
       begin // returns the position on the best path with the given push number, if any
         Result:=POptimizerPosition(YASS.Positions.StartPosition);
         while (Result<>nil) and (Result^.Position.PushCount<>Count__) do
@@ -25333,13 +25422,13 @@ A---B-
         MemoryPool.FreeBlock:=MemoryMark__;
       end; // ReleaseMemory
 
-      procedure RemoveBox(SquareNo__:Cardinal; var BoxConfiguration__:TBoxConfiguration);
+      procedure RemoveBox(SquareNo__:UInt; var BoxConfiguration__:TBoxConfiguration);
       begin // removes a box from a box configuration
         Dec(BoxConfiguration__[SquareNo__ div BITS_PER_BYTE],1 shl (SquareNo__ mod BITS_PER_BYTE));
       end; // RemoveBox
 
-      procedure SavePlayerAndBoxConfigurationToGame(InternalPlayerSquare__:Integer; const BoxConfiguration__:TBoxConfiguration);
-      var InternalSquareNo,SquareNo:Integer;
+      procedure SavePlayerAndBoxConfigurationToGame(InternalPlayerSquare__:Int; const BoxConfiguration__:TBoxConfiguration);
+      var InternalSquareNo,SquareNo:Int;
       begin // updates the external game state, i.e., the board, the player position, and the box positions
         Game.BoxCount:=0; MovePlayer(0);
         for SquareNo:=0 to Game.BoardSize do begin
@@ -25378,7 +25467,7 @@ A---B-
         TQueue=record
           Block:PMemoryBlock;                                                   // current block for enqueueing new items; 'Top' points inside this block
           Bottom:Pointer;                                                       // bottom of the unexpanded items on the queue; 'Bottom' points inside 'MemoryBlocks.Root' if the queue recycles memory blocks as soon as their items have been expanded
-          ItemByteSize:Cardinal;                                                // byte size of the items on the queue
+          ItemByteSize:UInt;                                                    // byte size of the items on the queue
           MemoryBlocks:TMemoryBlockList;                                        // the memory blocks allocated to the queue
           Top:Pointer;                                                          // top of the queue; it's either the next free memory address in the current memory block, or it points to the end of the current memory block
         end;
@@ -25394,36 +25483,36 @@ A---B-
         end;
       var
         SearchDepth,StartBoxConfigurationIndex,StartPlayerSquare,               // note that 'SearchDepth' for conveniency follows the actual number of moves/pushes in the name; it's not a 0-based relative depth
-        TargetBoxConfigurationIndex,TargetPlayerSquare:Integer;
+        TargetBoxConfigurationIndex,TargetPlayerSquare:Int;
         SearchSliceHasTerminated:Boolean;
         Queues:TQueues;
         VisitedArea:PByteVector;                                                // memory for keeping track of visited game states, i.e., [box-configurations, player-squares] tuples
         {$IFDEF CONSOLE_APPLICATION}
           LastConsoleStatusMoveCount:Int64;
         {$ENDIF}
-        // BC,PS:array[0..1000] of Integer; NextBC:Integer;                     // debugging variables
+        // BC,PS:array[0..1000] of Int; NextBC:Int;                             // debugging variables
 
         // forward declarations, i.e., functions that are referenced before they are defined in the source code
-        function  EnlargeQueue(BlockByteSize__:Cardinal; var Queue__:TQueue):Boolean; forward;
+        function  EnlargeQueue(BlockByteSize__:UInt; var Queue__:TQueue):Boolean; forward;
         function  DumpPath(Item__:PQueueItem):Boolean; forward;
-        function  FirstItemInBlock(Block__:PMemoryBlock; ItemByteSize__:Cardinal):Pointer; forward;
-        function  GetBoxConfigurationByIndex(Index__:Integer):PBoxConfiguration; forward;
+        function  FirstItemInBlock(Block__:PMemoryBlock; ItemByteSize__:UInt):Pointer; forward;
+        function  GetBoxConfigurationByIndex(Index__:Int):PBoxConfiguration; forward;
         function  IsNewBetterPath(QueueItem__:PQueueItem; RestPath__:POptimizerPosition):Boolean; forward;
         function  IsEmptySpan(SpanItem__:PSpanItem; const SpanQueue__,MovesOrPushesQueue__:TQueue):Boolean; forward;
         function  IsVisited(GameState__:TGameState):Boolean; forward;
         function  LastItemOnQueue(const Queue__:TQueue):Pointer; forward;
-        function  LookupBoxConfiguration(const BoxConfiguration__:TBoxConfiguration):Integer; forward;
+        function  LookupBoxConfiguration(const BoxConfiguration__:TBoxConfiguration):Int; forward;
         function  MakeSpan(FirstItem__:PQueueItem; var SpanQueue__:TQueue):Boolean; forward;
         procedure MemoryBlockListRemoveItem(Item__:PMemoryBlock; var List__:TMemoryBlockList); forward;
         procedure ResetVisited(GameState__:TGameState); forward;
         procedure SetVisited(GameState__:TGameState); forward;
-        procedure ShowGameState(InternalPlayerSquare__:Integer; const BoxConfiguration__:TBoxConfiguration; const Caption__:String; Log__:Boolean); forward;
+        procedure ShowGameState(InternalPlayerSquare__:Int; const BoxConfiguration__:TBoxConfiguration; const Caption__:String; Log__:Boolean); forward;
         function  ShowSearchStatus:Boolean; forward;
         function  StopSearch:PQueueItem; forward;
 
         // Memory blocks
 
-        function  AllocateMemoryBlock(MinBlockByteSize__:Cardinal; var Block__:PMemoryBlock; var FreeMemoryBlocks__:TMemoryBlockList):Boolean;
+        function  AllocateMemoryBlock(MinBlockByteSize__:UInt; var Block__:PMemoryBlock; var FreeMemoryBlocks__:TMemoryBlockList):Boolean;
 
           function  IsBlockBigEnough(Block__:PMemoryBlock):Boolean;
           begin // returns 'True' if the block size is equal to, or bigger than the requested size
@@ -25433,7 +25522,7 @@ A---B-
         begin // AllocateMemoryBlock; tries to allocate a memory block
           Result:=False; Block__:=nil;
           if (not SearchSliceHasTerminated) and                                 // 'True': the search through the current slice of the game hasn't been terminated
-             (MinBlockByteSize__>=Cardinal(SizeOf(TMemoryBlock))) then begin
+             (MinBlockByteSize__>=UInt(SizeOf(TMemoryBlock))) then begin
              if Queues.FreeMemoryBlocks.Root<>nil then begin                    // 'True': the free list isn't empty
                 Block__:=FreeMemoryBlocks__.Root;
                 repeat Block__:=Block__^.Previous;                              // search for a memory block of the requested size, or bigger
@@ -25447,9 +25536,9 @@ A---B-
              if Block__=nil then begin                                          // 'nil': no block matching the requested size was found on the free-list
                 Block__:=GetMemory(MinBlockByteSize__,False);                   // try to allocate a new memory block from the pool
                 if Block__<>nil then begin
-                   Cardinal(Block__):=Cardinal(Block__)+(MinBlockByteSize__-Cardinal(SizeOf(Block__^))); // the block is represented by its links which are located after the data area
+                   UInt(Block__):=UInt(Block__)+(MinBlockByteSize__-UInt(SizeOf(Block__^))); // the block is represented by its links which are located after the data area
                    Block__^.ByteSize:=MinBlockByteSize__;                       // save the block byte size
-                   Cardinal(Block__^.Memory):=Cardinal(Block__)-Cardinal(MinBlockByteSize__-Cardinal(SizeOf(Block__^))); // save the memory address where the data area begins
+                   UInt(Block__^.Memory):=UInt(Block__)-UInt(MinBlockByteSize__-UInt(SizeOf(Block__^))); // save the memory address where the data area begins
                    end;
                 end;
 
@@ -25466,8 +25555,8 @@ A---B-
         function  FindMemoryBlockWithItem(Item__:Pointer; const MemoryBlocks__:TMemoryBlockList):PMemoryBlock;
         begin // returns the memory block to which the item belongs; precondition: the item belongs to one of the memory blocks on the list
           Result:=MemoryBlocks__.Root^.Previous;                                // start the search by examining the most recently added memory block; often the item either belongs to this one, or to the root block
-          while (Cardinal(Item__)<Cardinal(Result^.Memory)) or
-                (Cardinal(Item__)>Cardinal(Result)) do begin
+          while (UInt(Item__)<UInt(Result^.Memory)) or
+                (UInt(Item__)>UInt(Result)) do begin
                 Result:=Result^.Next;                                           // try the next memory block
                 if Result=MemoryBlocks__.Root^.Previous then begin              // 'True': circular list wrap around, i.e., the item does not belong to any of the memory blocks on the list
                    Result:=nil; exit;
@@ -25475,8 +25564,8 @@ A---B-
                 end;
         end; // FindMemoryBlockWithItem
 
-        function  FirstItemInBlock(Block__:PMemoryBlock; ItemByteSize__:Cardinal):Pointer;
-        var TagBitMask:Cardinal;
+        function  FirstItemInBlock(Block__:PMemoryBlock; ItemByteSize__:UInt):Pointer;
+        var TagBitMask:UInt;
         begin // returns the memory address of the first item in the memory block; the items are right-justified, thereby making it more efficient to check if a block is full
           if   ItemByteSize__>DIRECTION_BIT_MASK then                           // 'True': the items are big enough to store a direction in the low bits of an item pointer; this is used for items on the game state queues
                TagBitMask:=DIRECTION_BIT_MASK                                   // reserve tag bits in the item pointers for a direction
@@ -25485,11 +25574,11 @@ A---B-
                Result:=Block__.Memory;
                while (Result<>Block__)
                      and
-                     (((Cardinal(Result) and TagBitMask)<>0)                    // '<>': it's not possible to store tag bits in the low bits of a pointer to an item
+                     (((UInt(Result) and TagBitMask)<>0)                        // '<>': it's not possible to store tag bits in the low bits of a pointer to an item
                       or
-                     ((Cardinal(Block__)-Cardinal(Result)) mod ItemByteSize__<>0) // 'Cardinal(Block__)': the block is represented by its links, and they a placed after the data area; that way, the block is its own end-of-data-area pointer
+                     ((UInt(Block__)-UInt(Result)) mod ItemByteSize__<>0)       // 'UInt(Block__)': the block is represented by its links, and they a placed after the data area; that way, the block is its own end-of-data-area pointer
                      ) do
-                     Inc(Cardinal(Result));
+                     Inc(UInt(Result));
                end
           else begin Msg(TEXT_INTERNAL_ERROR+': FirstItemInBlock: Item misalignment. Size: '+IntToStr(ItemByteSize__),TEXT_APPLICATION_TITLE);
                      Result:=Block__;                                           // empty block
@@ -25558,16 +25647,16 @@ A---B-
           Result:=EndOfBlock__<>nil;                                            // return 'True' if advancing to the next memory block succeeded, i.e., if the circular list of memory blocks isn't empty
         end; // AdvanceToNextMemoryBlock
 
-        function  CalculateQueueItemPushPathLength(Item__:PQueueItem):Integer;
+        function  CalculateQueueItemPushPathLength(Item__:PQueueItem):Int;
         begin  // returns the number of pushes on the path to the game state represented by 'Item__'; the root node (the slice starting position) is not counted
           Result:=-1;                                                           // '-1': // the first node on the path is the slice start position (the root node), and it's not counted; the new path begins with the next node
           while Item__<>nil do begin
-            Inc(Result); Item__:=PQueueItem(Cardinal(Item__^.PushAncestor) and (not DIRECTION_BIT_MASK)); // '(not DIRECTION_BIT_MASK)': the push ancestor pointer may contain a direction stored in the low bits
+            Inc(Result); Item__:=PQueueItem(UInt(Item__^.PushAncestor) and (not DIRECTION_BIT_MASK)); // '(not DIRECTION_BIT_MASK)': the push ancestor pointer may contain a direction stored in the low bits
             end;
         end; // CalculateQueueItemPushPathLength
 
         procedure ClearQueue(var Queue__:TQueue);
-        var ItemByteSize:Cardinal;
+        var ItemByteSize:UInt;
         begin // clears the queue, recycling any attached memory blocks
           MemoryBlockListAddList(Queue__.MemoryBlocks.Root,Queues.FreeMemoryBlocks); // put any memory blocks allocated to the queue back on the free-list
           ItemByteSize:=Queue__.ItemByteSize;                                   // remember the item byte-size
@@ -25594,7 +25683,7 @@ A---B-
             else Result:=nil;                                                   // 'nil': the span queue is empty
         end; // DequeueSpan
 
-        function  EnlargeQueue(BlockByteSize__:Cardinal; var Queue__:TQueue):Boolean;
+        function  EnlargeQueue(BlockByteSize__:UInt; var Queue__:TQueue):Boolean;
         var NewBlock:PMemoryBlock;
         begin // adds a new memory block to the queue and prepares the queue for adding items to the new block
           with Queue__ do begin
@@ -25631,8 +25720,8 @@ A---B-
         begin // returns the last item on the queue, if any
           with Queue__ do
             if   Top<>nil then begin
-                 Cardinal(Result):=Cardinal(Top)-ItemByteSize;                  // 'Top' points right after the most recently added item on the queue, hence, the last item is located 'ItemByteSize' bytes before the top
-                 if Cardinal(Result)<Cardinal(Block.Memory) then Result:=nil;   // 'True': the queue is empty
+                 Result:=Pointer(UInt(Top)-ItemByteSize);                       // 'Top' points right after the most recently added item on the queue, hence, the last item is located 'ItemByteSize' bytes before the top
+                 if UInt(Result)<UInt(Block.Memory) then Result:=nil;           // 'True': the queue is empty
                  end
             else Result:=nil;
         end; // LastItemOnQueue
@@ -25679,7 +25768,7 @@ A---B-
         function  NextItemOnQueue(Item__:Pointer; MemoryBlock__:PMemoryBlock; const Queue__:TQueue):Pointer;
         begin // returns the next item on the queue, if any; precondition: 'Item__' belongs to the given memory block
           if   (Item__<>Queue__.Top) and (Item__<>nil) then begin               // 'True': this isn't the last item on the queue
-               Result:=Pointer(Cardinal(Item__)+Queue__.ItemByteSize);
+               Result:=Pointer(UInt(Item__)+Queue__.ItemByteSize);
                if Result=MemoryBlock__ then                                     // 'True': 'Item__' is the last item in its memory block
                   Result:=FirstItemInBlock(MemoryBlock__^.Next,Queue__.ItemByteSize); // the next item is the first one in the next memory block
                end
@@ -25689,16 +25778,16 @@ A---B-
         // end of queue functions
 
         function  CheckIntermediatePositionsOnBestFoundPath(var LastVisitedPosition__:POptimizerPosition):Boolean;
-        var BoxConfigurationIndex,MatchingGameStatesCount:Integer;
+        var BoxConfigurationIndex,MatchingGameStatesCount:Int;
             GameState:TGameState;
             BoxConfiguration:TBoxConfiguration;
             Position,OldSliceEndPosition:PPosition;
 
-          function  FindMatchingGameStates(BoxConfigurationIndex__:Integer; Position__:PPosition; var {io:} Queue__:TQueue; var {io:} NewBestPath__:Boolean):Integer;
+          function  FindMatchingGameStates(BoxConfigurationIndex__:Int; Position__:PPosition; var {io:} Queue__:TQueue; var {io:} NewBestPath__:Boolean):Int;
           var GameState:TGameState; Item:PQueueItem; EndOfBlock:PMemoryBlock;
 
-            function  IsPlayerSquareInPlayersAccessArea(PlayerSquareNo__,BoxConfigurationIndex__:Integer; ClearVisitedAccessArea__:Boolean):Boolean;
-            var ExternalSquareNo:Integer; Direction:TDirection; GameState,GameState1:TGameState;
+            function  IsPlayerSquareInPlayersAccessArea(PlayerSquareNo__,BoxConfigurationIndex__:Int; ClearVisitedAccessArea__:Boolean):Boolean;
+            var ExternalSquareNo:Int; Direction:TDirection; GameState,GameState1:TGameState;
             begin // returns 'True' if  the square 'PlayerSquareNo__' belongs to the player's access area for the current game board;
                   // as a side-effect, the function can clear the 'IsVisited' flag for all squares in the current access area (not used)
               with Solver.SearchStates[0].PlayersReachableSquares do begin
@@ -25708,7 +25797,7 @@ A---B-
                    for PlayerSquareNo__:=0 to Pred(PlayerSquareCount) do begin
                        ExternalSquareNo:=PlayerInternalToExternalSquare[PlayerSquareNo__];
                        if (Squares[ExternalSquareNo]>TimeStamp) and (not IsAWallSquare(ExternalSquareNo)) then begin
-                          GameState:=TGameState(Cardinal(BoxConfigurationIndex__)*PlayerSquareCount+Cardinal(PlayerSquareNo__));
+                          GameState:=TGameState(UInt(BoxConfigurationIndex__)*PlayerSquareCount+UInt(PlayerSquareNo__));
                           if Optimizer.Optimization<opBoxLinesMoves then begin
                              if IsVisited(GameState) then ResetVisited(GameState);
                              end
@@ -25716,7 +25805,7 @@ A---B-
                              GameState:=GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH;
                              if IsVisited(GameState) then ResetVisited(GameState);
                              for Direction:=Low(Direction) to High(Direction) do begin
-                                 GameState1:=GameState+Cardinal(Succ(DIRECTION_TO_AXIS[Direction]));
+                                 GameState1:=GameState+UInt(Succ(DIRECTION_TO_AXIS[Direction]));
                                  if IsVisited(GameState1) then ResetVisited(GameState1);
                                  end;
                              end;
@@ -25741,7 +25830,7 @@ A---B-
                     GameState:=Item^.GameState;
                     if   Optimizer.Optimization>=opBoxLinesMoves then
                          GameState:=GameState div GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH;
-                    if   ((GameState div PlayerSquareCount)=Cardinal(BoxConfigurationIndex__)) // 'True': the box positions match
+                    if   ((GameState div PlayerSquareCount)=UInt(BoxConfigurationIndex__)) // 'True': the box positions match
                          and
                          IsPlayerSquareInPlayersAccessArea(GameState mod PlayerSquareCount,
                                                            BoxConfigurationIndex__,
@@ -25777,9 +25866,9 @@ A---B-
             LoadBoxConfigurationFromGame(BoxConfiguration);
             BoxConfigurationIndex:=LookupBoxConfiguration(BoxConfiguration);    // check if the game position exists in the box configuration collection
             if BoxConfigurationIndex<>NONE then begin                           // 'True': the game position exists in the box configuration collection
-               GameState:=TGameState(BoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerExternalToInternalSquare[Position^.PlayerPos]);
+               GameState:=TGameState(BoxConfigurationIndex)*PlayerSquareCount+UInt(PlayerExternalToInternalSquare[Position^.PlayerPos]);
                if Optimizer.Optimization>=opBoxLinesMoves then
-                  GameState:=(GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH)+Cardinal(Succ(Ord(DIRECTION_TO_AXIS[TDirection(Ord(Position^.Move.Direction) and DIRECTION_BIT_MASK)])));
+                  GameState:=(GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH)+UInt(Succ(Ord(DIRECTION_TO_AXIS[TDirection(Ord(Position^.Move.Direction) and DIRECTION_BIT_MASK)])));
                if IsVisited(GameState) then with Queues do begin                // 'True': this position on the existing best found path has been visited during the search
                   //ShowBoard;
                   //Write('Pushes: ',Position^.PushCount);
@@ -25809,10 +25898,10 @@ A---B-
         end; // OptimizeGame.Search.VicinitySearch.Search.CheckIntermediatePositionsOnBestFoundPath
 
         function  DumpPath(Item__:PQueueItem):Boolean; // debugging service function
-        var OldBoxCount,OldPlayerSquare:Integer;
+        var OldBoxCount,OldPlayerSquare:Int;
             GameState:TGameState;
             OldBoard:TBoard; OldBoxPos:TBoxSquares;
-            PathLength:Integer;
+            PathLength:Int;
         begin
           Result:=False;
           OldBoard:=Game.Board; OldPlayerSquare:=Game.PlayerPos; OldBoxCount:=Game.BoxCount; OldBoxPos:=Game.BoxPos;
@@ -25827,7 +25916,7 @@ A---B-
                  GameState:=GameState div GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH;
                SavePlayerAndBoxConfigurationToGame(GameState mod PlayerSquareCount,GetBoxConfigurationByIndex(GameState div PlayerSquareCount)^);
                WriteBoardToLogFile(IntToStr(PathLength),0);
-               Item__:=PQueueItem(Cardinal(Item__^.PushAncestor) and (not DIRECTION_BIT_MASK));
+               Item__:=PQueueItem(UInt(Item__^.PushAncestor) and (not DIRECTION_BIT_MASK));
                Dec(PathLength);
                end;
              Result:=CloseLogFile;
@@ -25836,15 +25925,15 @@ A---B-
           Game.Board:=OldBoard; Game.PlayerPos:=OldPlayerSquare; Game.BoxCount:=OldBoxCount; Game.BoxPos:=OldBoxPos;
         end; // DumpPath
 
-        function  GetBoxConfigurationByIndex(Index__:Integer):PBoxConfiguration;
+        function  GetBoxConfigurationByIndex(Index__:Int):PBoxConfiguration;
         begin
-          Result:=PBoxConfiguration(Cardinal(BoxConfigurations.First)+Cardinal(Index__*BoxConfigurationByteSize));
+          Result:=PBoxConfiguration(UInt(BoxConfigurations.First)+UInt(Index__*BoxConfigurationByteSize));
         end; // GetBoxConfigurationByIndex
 
         function  Initialize:Boolean;                                           // initializes searching for a best path through the current slice of the game; don't confuse the search initialization with the vicinity-search method initialization
         var BoxConfiguration:TBoxConfiguration;
-            // BoxConfigurationIndex:Integer; Position:POptimizerPosition;
-            // i:Integer; p:PBoxConfiguration; t:TTimeMS;
+            // BoxConfigurationIndex:Int; Position:POptimizerPosition;
+            // i:Int; p:PBoxConfiguration; t:TTimeMS;
 
           function  MakeQueues(var Queues__:TQueues):Boolean;
           begin // initializes the open-queue for the (breadth-first) vicinity search
@@ -25864,7 +25953,7 @@ A---B-
           end; // MakeQueues
 
           function  MakeVisitedArea(var VisitedArea__:PByteVector):Boolean;
-          var ByteSize:Integer;
+          var ByteSize:Int;
           begin // reserves and initializes a memory area for the bookkeeping of visited game states, i.e., [box configuration, player square] tuples
             ByteSize:=CalculateDataStructuresByteSize(BoxConfigurations.Count,[dstVisitedBitSet]);
             VisitedArea__:=GetMemory(ByteSize,True);                            // 'True': allocate the memory from the top; it's not strictly necessary, but it doesn't hurt either
@@ -25921,7 +26010,7 @@ A---B-
                  LoadBoxConfigurationFromGame(BoxConfiguration);
                  BoxConfigurationIndex:=LookupBoxConfiguration(BoxConfiguration);
                  if   BoxConfigurationIndex<>NONE then                            // 'True': the game position exists in the box configuration collection
-                      Position^.Position.GameState:=TGameState(BoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerExternalToInternalSquare[Position^.Position.PlayerPos])
+                      Position^.Position.GameState:=TGameState(BoxConfigurationIndex)*PlayerSquareCount+UInt(PlayerExternalToInternalSquare[Position^.Position.PlayerPos])
                  else Position^.Position.GameState:=0;                          // this shouldn't happen
                  Position:=POptimizerPosition(Position^.Position.Parent);
           until  (Position=nil) or (Position^.Position.Successor=PPosition(SliceStartPosition));
@@ -25942,7 +26031,7 @@ A---B-
         // and thereby it invalidates all the search data for the current slice;
         // therefore, the caller must be careful not to touch any search data
         // if 'IsNewBetterPath()' succeeds
-        var OldBestPathPushCount:Integer;
+        var OldBestPathPushCount:Int;
             NewBestPathIsASolution:Boolean; NewGameMetrics:TOptimizerGameMetrics;
             FirstPosition:POptimizerPosition; MemoryMark:TMemoryBlock;
 
@@ -25980,7 +26069,7 @@ A---B-
           function  MakePath(QueueItem__        :PQueueItem;
                              RestPath__         :POptimizerPosition;
                              var FirstPosition__:POptimizerPosition):Boolean;
-          var BoxConfigurationIndex,BoxSquareNo,Count,PlayerSquare:Integer;
+          var BoxConfigurationIndex,BoxSquareNo,Count,PlayerSquare:Int;
               GameState:TGameState; BoxConfiguration:PBoxConfiguration;
           begin
             FirstPosition__          :=RestPath__;                              // upon return, 'FirstPosition__' contains the head of the new list of positions leading through the current slice of the game
@@ -26008,13 +26097,13 @@ A---B-
                        HashValue:=HashValue xor YASS.Positions.SquareHashValues[BoxInternalToExternalSquare[BoxSquareNo]];
                 Position.Successor   :=PPosition(FirstPosition__);              // link to the next position on the new path
                 FirstPosition__      :=Addr(Position);                          // this is now the head of the successor-linked list of positions on the new path
-                QueueItem__          :=PQueueItem(Cardinal(QueueItem__^.PushAncestor) and (not DIRECTION_BIT_MASK)); // backtrack to the previous push on the found path
+                QueueItem__          :=PQueueItem(UInt(QueueItem__^.PushAncestor) and (not DIRECTION_BIT_MASK)); // backtrack to the previous push on the found path
                 end;
               end;
 
             Result:=Result and (Count=0) and (FirstPosition__<>RestPath__) and  // 'True': there is a new non-empty path
                     (QueueItem__<>nil) and
-                    (PQueueItem(Cardinal(QueueItem__.PushAncestor) and (not DIRECTION_BIT_MASK))=nil); // 'True': all items on the path were processed
+                    (PQueueItem(UInt(QueueItem__.PushAncestor) and (not DIRECTION_BIT_MASK))=nil); // 'True': all items on the path were processed
             if (not Result) and
                (not ((Optimizer.Optimization>=opBoxLinesMoves) and (Count>MaxSearchDepth))) then // optimizing boxlines may produce paths with more pushes than the reserved memory can accomodate; in that case silently discard the path
                InternalError('Search.IsNewBetterPath.MakePath');
@@ -26033,7 +26122,7 @@ A---B-
           end; // IsNewPathBetter
 
           function  SaveNewBestPath(FirstPosition__:PPosition; NewBestPathIsASolution__:Boolean):Boolean;
-          var SliceStartPushCount,SliceEndPushCount:Integer; b:Boolean; {p1,p2,}Position:PPosition;
+          var SliceStartPushCount,SliceEndPushCount:Int; b:Boolean; {p1,p2,}Position:PPosition;
           begin
             SetPosition(nil);
             OldBestPathPushCount:=YASS.Positions.BestPosition.PushCount;
@@ -26139,7 +26228,7 @@ A---B-
                                                                       ))^.FirstItem; // the span is empty if the next span has the same starting point
         end; // IsEmptySpan
 (*
-        function  LookupBoxConfiguration(const BoxConfiguration__:TBoxConfiguration):Integer;
+        function  LookupBoxConfiguration(const BoxConfiguration__:TBoxConfiguration):Int;
         var TernarySearchTreeItem:PTernarySearchTreeItem;
         begin
           if   TSTLookup(BoxConfiguration__,BoxConfigurationsTernarySearchTree,TernarySearchTreeItem) then
@@ -26148,13 +26237,13 @@ A---B-
         end; // LookupBoxConfiguration
 *)
 
-        function  LookupBoxConfiguration(const BoxConfiguration__:TBoxConfiguration):Integer;
-        var i:Integer; //HashKey:Cardinal;
+        function  LookupBoxConfiguration(const BoxConfiguration__:TBoxConfiguration):Int;
+        var i:Int; //HashKey:UInt;
         begin
 //        if BFLookup(BoxConfiguration__,BloomFilter,HashKey) then begin        // 'True': there is a chance that the position exists in the collection (a Bloom filter can return false positives but never false negatives)
              Result:=0;
              while Result<BoxConfigurations.Count do begin
-               i:=CompareBoxConfigurations(BoxConfiguration__,PBoxConfiguration(Cardinal(BoxConfigurations.First)+Cardinal(Result*BoxConfigurationByteSize))^);
+               i:=CompareBoxConfigurations(BoxConfiguration__,PBoxConfiguration(UInt(BoxConfigurations.First)+UInt(Result*BoxConfigurationByteSize))^);
                if      i<0 then Result:=(Result*2)+1
                else if i>0 then Result:=(Result*2)+2
                     else exit;                                                  // 'exit': quick-and-dirty exit the function when a matching box configuration has been found
@@ -26198,15 +26287,15 @@ A---B-
                                        FirstMarkPushesAsVisitedWhenTheyAreExpanded__,
                                        GenerateSuccessors__:Boolean;
                                        var SourceQueue__:TQueue;
-                                       var SuccessorCount__:Cardinal):Boolean;
+                                       var SuccessorCount__:UInt):Boolean;
           var BoxNeighborSquare,BoxConfigurationIndex,NextBoxNeighborSquare,
-              NewBoxConfigurationIndex,PlayerNeighborSquare,PlayerSquare:Integer;
+              NewBoxConfigurationIndex,PlayerNeighborSquare,PlayerSquare:Int;
               Direction:TDirection; GameState:TGameState;
               PushAncestor:PQueueItem; EndOfBlock:PMemoryBlock;
               BoxConfiguration, NewBoxConfiguration:PBoxConfiguration;
               BoxConfigurationCopy:TBoxConfiguration;
               DestinationQueue:PQueue;
-              //oPlayerPos:Integer; oBoard:TBoard; oBoxPos:TBoxSquares;
+              //oPlayerPos:Int; oBoard:TBoard; oBoxPos:TBoxSquares;
 
           begin // GenerateSuccessors; generates successor game states for all nodes on the queue belonging to the specified span
             Result:=False;
@@ -26241,8 +26330,8 @@ A---B-
                        GameState         :=GameState div GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH; // drop the last push direction axis from the game state
                     BoxConfigurationIndex:=GameState div PlayerSquareCount;
 //                  PlayerSquare         :=GameState mod PlayerSquareCount;
-                    PlayerSquare         :=GameState-PlayerSquareCount*Cardinal(BoxConfigurationIndex); // 'mod' may be slow, hence, the player square is calculated this way instead
-                    BoxConfiguration     :=PBoxConfiguration(Cardinal(BoxConfigurations.First)+Cardinal(BoxConfigurationIndex*BoxConfigurationByteSize)); // inlined 'GetBoxConfigurationByIndex()'
+                    PlayerSquare         :=GameState-PlayerSquareCount*UInt(BoxConfigurationIndex); // 'mod' may be slow, hence, the player square is calculated this way instead
+                    BoxConfiguration     :=PBoxConfiguration(UInt(BoxConfigurations.First)+UInt(BoxConfigurationIndex*BoxConfigurationByteSize)); // inlined 'GetBoxConfigurationByIndex()'
                     NewBoxConfiguration  :=nil;                                 // 'nil': the current box configuration hasn't been copied to 'BoxConfigurationCopy'
 
                     if   IsPushesQueue__ then                                   // 'True': this is the pushes-queue or the boxline-queue
@@ -26278,7 +26367,7 @@ A---B-
                                                    Solver.MoveCount div ONE_MILLION,
                                                    SLASH,
                                                    Solver.PushCount div ONE_MILLION,' million'
-                                                   //,SPACE,Cardinal(Queues.MemoryBlock.Memory)+Queues.MemoryBlock.ByteSize-Cardinal(Queues.MovesQueue.Top)
+                                                   //,SPACE,UInt(Queues.MemoryBlock.Memory)+Queues.MemoryBlock.ByteSize-UInt(Queues.MovesQueue.Top)
                                                    {$IFDEF WINDOWS}
                                                      ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
                                                    {$ENDIF}
@@ -26300,16 +26389,16 @@ A---B-
 
                                        NewBoxConfigurationIndex:=LookupBoxConfiguration(NewBoxConfiguration^);
                                        if NewBoxConfigurationIndex<>NONE then begin // 'True': the new box configuration is in the vicinity of the best found path
-                                          GameState:=TGameState(Cardinal(NewBoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerNeighborSquare));
+                                          GameState:=TGameState(UInt(NewBoxConfigurationIndex)*PlayerSquareCount+UInt(PlayerNeighborSquare));
                                           if Optimizer.Optimization>=opBoxLinesMoves then
-                                             GameState:=GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH+Cardinal(Succ(Ord(DIRECTION_TO_AXIS[Direction])));
+                                             GameState:=GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH+UInt(Succ(Ord(DIRECTION_TO_AXIS[Direction])));
                                           if not IsVisited(GameState) then begin // 'True': this is the first time this [NewBoxConfigurationIndex, PlayerNeighborSquare] game state has been found
                                              if   (Optimizer.Optimization<opBoxLinesMoves)
                                                   or
-                                                  ((Item__^.GameState mod GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH)<>Cardinal(Succ(Ord(DIRECTION_TO_AXIS[Direction]))))
-                                                  //(Cardinal(Ord(Direction))<>(Cardinal(PushAncestor) and DIRECTION_BIT_MASK)) // 'True': the box direction changes, or it's the root game state
+                                                  ((Item__^.GameState mod GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH)<>UInt(Succ(Ord(DIRECTION_TO_AXIS[Direction]))))
+                                                  //(UInt(Ord(Direction))<>(UInt(PushAncestor) and DIRECTION_BIT_MASK)) // 'True': the box direction changes, or it's the root game state
                                                   //or
-                                                  //(Integer(PQueueItem(Cardinal(PushAncestor) and (not DIRECTION_BIT_MASK))^.GameState mod PlayerSquareCount)
+                                                  //(Int(PQueueItem(UInt(PushAncestor) and (not DIRECTION_BIT_MASK))^.GameState mod PlayerSquareCount)
                                                   // <> // 'True': the last move didn't push this box in the same direction
                                                   // PlayerSquareNeighbor[PlayerSquare,OPPOSITE_DIRECTION[Direction]]
                                                   //)
@@ -26317,7 +26406,7 @@ A---B-
                                                   DestinationQueue:=Addr(Queues.PushesQueue)    // pushes which require one more boxline
                                              else DestinationQueue:=Addr(Queues.BoxLinesQueue); // pushes which don't require one more boxline
 
-                                             if EnqueueGameState(GameState,{PQueueItem((Cardinal(PushAncestor) and (not DIRECTION_BIT_MASK)) or Cardinal(Ord(Direction)))}PushAncestor,DestinationQueue^) then begin
+                                             if EnqueueGameState(GameState,{PQueueItem((UInt(PushAncestor) and (not DIRECTION_BIT_MASK)) or UInt(Ord(Direction)))}PushAncestor,DestinationQueue^) then begin
                                                 if not FirstMarkPushesAsVisitedWhenTheyAreExpanded__ then
                                                    SetVisited(GameState);       // optimizing moves/pushes sets the visited flag the first time the game state is seen
                                                 //if Optimizer.Optimization<>opPushesMoves then // optimizing pushes/moves first sets the visited flag when the game state is expanded
@@ -26355,7 +26444,7 @@ A---B-
                                     end;
                                  end
                               else begin // the square next to the player in this direction is an empty floor; put this game state on the open-queue unless it already has been visited
-                                 GameState:=TGameState(Cardinal(BoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerNeighborSquare));
+                                 GameState:=TGameState(UInt(BoxConfigurationIndex)*PlayerSquareCount+UInt(PlayerNeighborSquare));
                                  if Optimizer.Optimization>=opBoxLinesMoves then
                                     GameState:=GameState*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH;
                                  if not IsVisited(GameState) then begin
@@ -26404,7 +26493,7 @@ A---B-
                end;
           end; // GenerateSuccessors
 
-          function  ExpandBoxLinePushes(var SuccessorCount__:Cardinal):Boolean;
+          function  ExpandBoxLinePushes(var SuccessorCount__:UInt):Boolean;
           var FirstItem:PQueueItem;
           begin // expands pushes in the next span on the boxlines-queue
             with Queues do begin
@@ -26416,7 +26505,7 @@ A---B-
               end;
           end; // ExpandBoxLinePushes
 
-          function  ExpandMoves(var SuccessorCount__:Cardinal):Boolean;
+          function  ExpandMoves(var SuccessorCount__:UInt):Boolean;
           var FirstItem:PQueueItem;
           begin // expands non-pushing player moves in the next span on the moves-queue
             with Queues do begin
@@ -26428,7 +26517,7 @@ A---B-
               end;
           end; // ExpandMoves
 
-          function  ExpandPushes(var SuccessorCount__:Cardinal):Boolean;
+          function  ExpandPushes(var SuccessorCount__:UInt):Boolean;
           var FirstItem:PQueueItem;
           begin // expands pushes in the next span on the pushes-queue
             with Queues do begin
@@ -26441,7 +26530,7 @@ A---B-
           end; // ExpandPushes
 
           function  OptimizeMovesPushes:Boolean;
-          var SuccessorCount:Cardinal; FirstSpanWithOneMoreMove:PSpanItem;
+          var SuccessorCount:UInt; FirstSpanWithOneMoreMove:PSpanItem;
               // Position,p:POptimizerPosition;
           {
           moves/pushes optimizer algorithm
@@ -26524,9 +26613,9 @@ A---B-
               if EnlargeQueue     (QUEUE_MEMORY_BLOCK_BYTE_SIZE,MovesQueue ) and // allocate the first memory block for the moves-queue
                  EnlargeQueue     (QUEUE_MEMORY_BLOCK_BYTE_SIZE,PushesQueue) and // allocate the first memory block for the pushes-queue
                  MakeSpansForMovesAndPushes(False) and                          // make spans for moves and pushes respectively
-                 EnqueueGameState (Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare),nil,PushesQueue) then begin // enqueue the start position on the pushes-queue
+                 EnqueueGameState (UInt(StartBoxConfigurationIndex)*PlayerSquareCount+UInt(StartPlayerSquare),nil,PushesQueue) then begin // enqueue the start position on the pushes-queue
 
-                 SetVisited       (Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare)); // mark the start position as visited
+                 SetVisited       (UInt(StartBoxConfigurationIndex)*PlayerSquareCount+UInt(StartPlayerSquare)); // mark the start position as visited
                  FirstSpanWithOneMoreMove:=MoveSpansQueue.Bottom;               // the first span with moves (it's empty at this point; the initial game state is the only member of the first push-span)
 
                  // Position:=SliceStartPosition;
@@ -26597,7 +26686,7 @@ A---B-
           end; // OptimizeMovesPushes
 
           function  OptimizePushesMoves:Boolean;
-          var SuccessorCount:Cardinal; FirstSpanWithOneMorePush:PSpanItem;
+          var SuccessorCount:UInt; FirstSpanWithOneMorePush:PSpanItem;
               // Position,p:POptimizerPosition;
           {
           pushes/moves optimizer algorithm
@@ -26688,7 +26777,7 @@ A---B-
             with Queues do
               if EnlargeQueue    (QUEUE_MEMORY_BLOCK_BYTE_SIZE,PushesQueue) and // allocate the first memory block for the pushes-queue
                  MakeSpan        (PushesQueue.Top,PushSpansQueue) and           // make a start span for the pushes-queue
-                 EnqueueGameState(Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare),PQueueItem(Cardinal(nil) or DIRECTION_BIT_MASK),PushesQueue) // enqueue the start position on the pushes-queue
+                 EnqueueGameState(UInt(StartBoxConfigurationIndex)*PlayerSquareCount+UInt(StartPlayerSquare),PQueueItem(UInt(nil) or DIRECTION_BIT_MASK),PushesQueue) // enqueue the start position on the pushes-queue
                  then begin
                  // Position:=SliceStartPosition;
 
@@ -26765,7 +26854,7 @@ A---B-
           end; // OptimizePushesMoves
 
           function  OptimizeBoxLines:Boolean;
-          var SuccessorCount:Cardinal;
+          var SuccessorCount:UInt;
               FirstSpanWithOneMorePushAndOneMoreBoxLine:PSpanItem;
           begin
             Result:=False;
@@ -26773,8 +26862,8 @@ A---B-
               if EnlargeQueue     (QUEUE_MEMORY_BLOCK_BYTE_SIZE,PushesQueue) and // allocate the first memory block for the pushes-queue
                  EnlargeQueue     (QUEUE_MEMORY_BLOCK_BYTE_SIZE,BoxLinesQueue) and // allocate the first memory block for the pushes-queue
                  MakeSpan         (PushesQueue.Top,PushSpansQueue) and          // make a start span for the pushes-queue
-                 EnqueueGameState ((Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare))*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH,
-                                   {PQueueItem(Cardinal(nil) or DIRECTION_BIT_MASK)}nil,PushesQueue) // enqueue the start position on the pushes-queue
+                 EnqueueGameState ((UInt(StartBoxConfigurationIndex)*PlayerSquareCount+UInt(StartPlayerSquare))*GAME_STATE_MULTIPLICATION_FACTOR_FOR_BOXLINES_SEARCH,
+                                   {PQueueItem(UInt(nil) or DIRECTION_BIT_MASK)}nil,PushesQueue) // enqueue the start position on the pushes-queue
                  then begin
                  repeat                                                         // for each push-depth...
                    ClearQueue(MoveSpansQueue); ClearQueue(MovesQueue);          // clear the moves-queue before starting this iteration with the next higher number of pushes
@@ -26866,10 +26955,10 @@ A---B-
 
         function  OptimizePushesOnly:Boolean;
         // OptimizeGame.Search.VicinitySearch.Search.OptimizePushesOnly
-        var SuccessorCount:Cardinal;
+        var SuccessorCount:UInt;
 
           function  Initialize:Boolean;
-          var ByteSize,PushCount:Cardinal;
+          var ByteSize,PushCount:UInt;
           begin // OptimizeGame.Search.VicinitySearch.Search.OptimizePushesOnly.Initialize
             Result:=False;
             with Queues do begin
@@ -26888,17 +26977,17 @@ A---B-
               end;
           end; // OptimizeGame.Search.VicinitySearch.Search.OptimizePushesOnly.Initialize
 
-          function  ExpandPushes(var SuccessorCount__:Cardinal):Boolean;
+          function  ExpandPushes(var SuccessorCount__:UInt):Boolean;
           var FirstItem:PQueueItem;
 
-            function  GenerateSuccessors(Item__,EndOfSpan__:PQueueItem; var SuccessorCount__:Cardinal):Boolean;
+            function  GenerateSuccessors(Item__,EndOfSpan__:PQueueItem; var SuccessorCount__:UInt):Boolean;
             var BoxNeighborSquare,BoxConfigurationIndex,NextBoxNeighborSquare,
-                NewBoxConfigurationIndex,PlayerNeighborSquare,PlayerSquare:Integer;
+                NewBoxConfigurationIndex,PlayerNeighborSquare,PlayerSquare:Int;
                 Direction:TDirection; GameState:TGameState;
                 EndOfBlock:PMemoryBlock;
                 BoxConfiguration, NewBoxConfiguration:PBoxConfiguration;
                 BoxConfigurationCopy:TBoxConfiguration;
-                MovesQueue:TBoardOfIntegers; MovesQueueBottom,MovesQueueTop:^Integer;
+                MovesQueue:TBoardOfIntegers; MovesQueueBottom,MovesQueueTop:PInt;
             begin // OptimizeGame.Search.VicinitySearch.Search.OptimizePushesOnly.GenerateSuccessors;
                   // generates successor game states for all nodes on the queue belonging to the specified span
               Result:=False;
@@ -26911,15 +27000,15 @@ A---B-
                    GameState            :=Item__^.GameState;                    // get the next game state on the queue
                    BoxConfigurationIndex:=GameState div PlayerSquareCount;
 //                 PlayerSquare         :=GameState mod PlayerSquareCount;
-                   PlayerSquare         :=GameState-PlayerSquareCount*Cardinal(BoxConfigurationIndex); // 'mod' may be slow, hence, the player square is calculated this way instead
-                   BoxConfiguration     :=PBoxConfiguration(Cardinal(BoxConfigurations.First)+Cardinal(BoxConfigurationIndex*BoxConfigurationByteSize)); // inlined 'GetBoxConfigurationByIndex()'
+                   PlayerSquare         :=GameState-PlayerSquareCount*UInt(BoxConfigurationIndex); // 'mod' may be slow, hence, the player square is calculated this way instead
+                   BoxConfiguration     :=PBoxConfiguration(UInt(BoxConfigurations.First)+UInt(BoxConfigurationIndex*BoxConfigurationByteSize)); // inlined 'GetBoxConfigurationByIndex()'
                    NewBoxConfiguration  :=nil;                                  // 'nil': the current box configuration hasn't been copied to 'BoxConfigurationCopy'
 
                    MovesQueue[Low(MovesQueue)]:=PlayerSquare;
                    MovesQueueBottom:=Addr(MovesQueue[Low(MovesQueue)]);
                    MovesQueueTop   :=MovesQueueBottom;
 
-                   while Cardinal(MovesQueueBottom)<=Cardinal(MovesQueueTop) do begin // perform a breadth-first search from the current game state, putting pushes on the pushes-queue that lead to unvisited game states
+                   while UInt(MovesQueueBottom)<=UInt(MovesQueueTop) do begin // perform a breadth-first search from the current game state, putting pushes on the pushes-queue that lead to unvisited game states
                      PlayerSquare:=MovesQueueBottom^; Inc(MovesQueueBottom);
 
                      for Direction:=Low(Direction) to High(Direction) do
@@ -26943,7 +27032,7 @@ A---B-
                                                     Solver.MoveCount div ONE_MILLION,
                                                     SLASH,
                                                     Solver.PushCount div ONE_MILLION,' million'
-                                                    //,SPACE,Cardinal(Queues.PushesQueue.Top)-Cardinal(Queues.MemoryBlock.Memory)
+                                                    //,SPACE,UInt(Queues.PushesQueue.Top)-UInt(Queues.MemoryBlock.Memory)
                                                     {$IFDEF WINDOWS}
                                                       ,' Time: ',(CalculateElapsedTimeMS(Solver.StartTimeMS,GetTimeMS)+500) div 1000
                                                     {$ENDIF}
@@ -26967,7 +27056,7 @@ A---B-
 
                                         NewBoxConfigurationIndex:=LookupBoxConfiguration(NewBoxConfiguration^);
                                         if NewBoxConfigurationIndex<>NONE then begin // 'True': the new box configuration is in the vicinity of the best found path
-                                           GameState:=TGameState(Cardinal(NewBoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerNeighborSquare));
+                                           GameState:=TGameState(UInt(NewBoxConfigurationIndex)*PlayerSquareCount+UInt(PlayerNeighborSquare));
                                            if not IsVisited(GameState) then begin // 'True': this is the first time this [NewBoxConfigurationIndex, PlayerNeighborSquare] game state has been found
                                               if EnqueueGameState(GameState,Item__,Queues.PushesQueue) then begin
                                                  SetVisited(GameState);
@@ -26994,7 +27083,7 @@ A---B-
                                      end;
                                   end
                                else begin // the square next to the player in this direction is an empty floor
-                                  GameState:=TGameState(Cardinal(BoxConfigurationIndex)*PlayerSquareCount+Cardinal(PlayerNeighborSquare));
+                                  GameState:=TGameState(UInt(BoxConfigurationIndex)*PlayerSquareCount+UInt(PlayerNeighborSquare));
                                   if not IsVisited(GameState) then begin
                                      Inc(MovesQueueTop);
                                      MovesQueueTop^:=PlayerNeighborSquare;      // enqueue the non-pushing player moves
@@ -27048,9 +27137,9 @@ A---B-
           with Queues do
             if Initialize and
                MakeSpan     (PushesQueue.Top,PushSpansQueue) and                // make a start span for the pushes-queue
-               EnqueueGameState(Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare),nil,PushesQueue) then begin // enqueue the start position on the pushes-queue
+               EnqueueGameState(UInt(StartBoxConfigurationIndex)*PlayerSquareCount+UInt(StartPlayerSquare),nil,PushesQueue) then begin // enqueue the start position on the pushes-queue
 
-               SetVisited(Cardinal(StartBoxConfigurationIndex)*PlayerSquareCount+Cardinal(StartPlayerSquare)); // mark the start position as visited
+               SetVisited(UInt(StartBoxConfigurationIndex)*PlayerSquareCount+UInt(StartPlayerSquare)); // mark the start position as visited
 
                repeat
                         Inc(SearchDepth); SuccessorCount:=0;
@@ -27082,8 +27171,8 @@ A---B-
           Inc(VisitedArea^[GameState__ div BITS_PER_BYTE],1 shl (GameState__ mod BITS_PER_BYTE)); // precondition: 'Visited' = 'False' for this game state
         end; // OptimizeGame.Search.VicinitySearch.Search.SetVisited
 
-        procedure ShowGameState(InternalPlayerSquare__:Integer; const BoxConfiguration__:TBoxConfiguration; const Caption__:String; Log__:Boolean); // debugging service function
-        var OldBoxCount,OldPlayerSquare:Integer; OldBoard:TBoard; OldBoxPos:TBoxSquares;
+        procedure ShowGameState(InternalPlayerSquare__:Int; const BoxConfiguration__:TBoxConfiguration; const Caption__:String; Log__:Boolean); // debugging service function
+        var OldBoxCount,OldPlayerSquare:Int; OldBoard:TBoard; OldBoxPos:TBoxSquares;
         begin
           OldBoard:=Game.Board; OldPlayerSquare:=Game.PlayerPos; OldBoxCount:=Game.BoxCount; OldBoxPos:=Game.BoxPos;
 
@@ -27166,9 +27255,9 @@ A---B-
 {
         procedure Test1; // debugging service function
         var
-          i,Count,FailCount,OldBoxCount,OldPlayerSquare:Integer;
+          i,Count,FailCount,OldBoxCount,OldPlayerSquare:Int;
           B:array[Low(BC)..High(BC)] of TBoxConfiguration;
-          Dump1:file of TBoxConfiguration; Dump2:file of Integer;
+          Dump1:file of TBoxConfiguration; Dump2:file of Int;
           OldBoard:TBoard; OldBoxPos:TBoxPositions;
         begin
           OldBoard:=Game.Board; OldPlayerSquare:=Game.PlayerPos; OldBoxCount:=Game.BoxCount; OldBoxPos:=Game.BoxPos;
@@ -27219,8 +27308,8 @@ A---B-
 }
 {
         procedure Test2; // debugging service function
-        var i:Integer; Position:POptimizerPosition; BoxConfiguration:TBoxConfiguration;
-            Dump1:file of TBoxConfiguration; Dump2:file of Integer;
+        var i:Int; Position:POptimizerPosition; BoxConfiguration:TBoxConfiguration;
+            Dump1:file of TBoxConfiguration; Dump2:file of Int;
         begin
           Assign(Dump1,'zzz.b'); Rewrite(Dump1);
           Assign(Dump2,'zzz.p'); Rewrite(Dump2);
@@ -27283,11 +27372,11 @@ A---B-
 
     function  QuickVicinitySearch:Boolean;
     const MIN_LIMIT_STEP_SIZE=5;
-    var   Index,BottomIndex:Integer; FullGameSearch:Boolean; OriginalVicinitySettings:TVicinitySettings;
+    var   Index,BottomIndex:Int; FullGameSearch:Boolean; OriginalVicinitySettings:TVicinitySettings;
           VicinitySquareLimits:TVicinitySettings;                               // the user's square limits, plus one extra 'MAX_VICINITY_SQUARES' limit
 
-      function  CalculateBoxSquareCount:Integer;
-      var SquareNo:Integer;
+      function  CalculateBoxSquareCount:Int;
+      var SquareNo:Int;
       begin // calculates the number of reachable squares for the boxes
         Result:=0;
         for SquareNo:=0 to Game.BoardSize do
@@ -27330,8 +27419,8 @@ A---B-
       end;
     end; // OptimizeGame.Search.QuickVicinitySearch
 
-    function  SelectNextOptimizationMethod(ActivateAllOtherMethods__:Boolean; var MethodIndex__:Integer; var ActiveMethodSet__:TOptimizationMethodSet):Boolean;
-    var Index:Integer;
+    function  SelectNextOptimizationMethod(ActivateAllOtherMethods__:Boolean; var MethodIndex__:Int; var ActiveMethodSet__:TOptimizationMethodSet):Boolean;
+    var Index:Int;
     begin
       if MethodIndex__=Low(MethodOrder) then                                    {after box permutations, don't run box permutations with a time-limit before the other enabled methods have been tried}
          for Index:=Succ(Low(MethodOrder)) to Pred(High(MethodOrder)) do
@@ -27492,15 +27581,13 @@ A---B-
                            Result:=Optimizer.IterationResult or Result;
                            end;
                       }
-                      GlobalOptimizationSearch;
+                      GlobalOptimizationSearch(IsExhaustiveSearch);
                       Result:=Optimizer.IterationResult or Result;
                       Dec(SuccessiveGlobalSearchesCountDown);
-                      if   (Positions.UninitializedItemCount<=0)                {'<=0' : the transposition table is full (provided the free-list also is empty), i.e., the global-optimization search was not exhaustive}
-                           and
-                           (Positions.FreeList=nil) then                        {'nil' : the transposition table is full, i.e., the global-optimization search was not exhaustive}
+                      if   not IsExhaustiveSearch then                          {'True': the global optimization wasn't an exhaustive search; maybe activate another method}
                            if Optimizer.IterationResult then begin
                               if BoxPermutationsCount>2 then Dec(BoxPermutationsCount); {start with a lower number of boxes the next time a box-permutations-search is invoked}
-                              if SuccessiveGlobalSearchesCountDown<>0 then begin {continue global-optimization search}
+                              if SuccessiveGlobalSearchesCountDown<>0 then begin {continue global optimization search}
                                  end
                               else begin
                                  SelectNextOptimizationMethod(True,MethodIndex,ActiveMethodSet); {the global optimization succeeded, but change to another method anyway}
@@ -27515,7 +27602,7 @@ A---B-
                               if not SelectNextOptimizationMethod(False,MethodIndex,ActiveMethodSet) then
                                  TerminateSearch;
                               end
-                      else TerminateSearch;                                     {the global-optimization search was exhaustive, hence, exit the main search loop}
+                      else TerminateSearch;                                     {the global optimization search was exhaustive, hence, exit the main search loop}
                 end;
             end; {case}
     until   SearchHasTerminated
@@ -27568,7 +27655,7 @@ A---B-
   end; // OptimizeGame.Search
 
   function  WasALegalPush(Position__:PPosition):Boolean;
-  var SquareOffset:Integer;
+  var SquareOffset:Int;
   begin // returns 'True' if the move stored in 'Position__' can lead to the current game state;
         // (due to transpositions, this might not be the same move as the one currently under investigation)
         // precondition: 'Position__' (its hash-value) matches the current game state;
@@ -27674,14 +27761,14 @@ end; // OptimizeGame
 
 {Process Levels}
 
-procedure ProcessLevels(InputFileName__:String; FirstLevelNo__,LastLevelNo__:Cardinal);
+procedure ProcessLevels(InputFileName__:String; FirstLevelNo__,LastLevelNo__:UInt);
 const TEXT_TITLE_SUFFIX=', '+TEXT_APPLICATION_TITLE+SPACE+TEXT_APPLICATION_VERSION_NUMBER+SPACE+TEXT_SOLUTIONS;
-var i,j,CompareResult:Integer; FirstLevel,Solved:Boolean; LevelStatisticsFlags:TLevelStatisticsFlags;
+var i,j,CompareResult:Int; FirstLevel,Solved:Boolean; LevelStatisticsFlags:TLevelStatisticsFlags;
     OutputFileName:String; F:Text;
 
   {$IFDEF CONSOLE_APPLICATION}
     procedure ShowStatistics;
-    var LevelCount,SolvedCount:Integer; TimeMS:TTimeMS; Item:PLevelStatistics;
+    var LevelCount,SolvedCount:Int; TimeMS:TTimeMS; Item:PLevelStatistics;
     begin
       if Solver.Enabled then begin
          LevelCount:=0; SolvedCount:=0; TimeMS:=0;
@@ -27793,13 +27880,13 @@ begin {ProcessLevels}
                              i:=MoveCount; j:=PushCount; Game.History.Count:=0;
                              if i<Optimizer.OriginalMetrics.MoveCount then Include(LevelStatisticsFlags,lsfMovesImproved);
                              if j<Optimizer.OriginalMetrics.PushCount then Include(LevelStatisticsFlags,lsfPushesImproved);
-                             CompareResult:=Integer(BoxLines)-Integer(Optimizer.OriginalMetrics.BoxLines);
+                             CompareResult:=Int(BoxLines)-Int(Optimizer.OriginalMetrics.BoxLines);
                              if CompareResult=0 then begin
-                                CompareResult:=Integer(BoxChanges)-Integer(Optimizer.OriginalMetrics.BoxChanges);
+                                CompareResult:=Int(BoxChanges)-Int(Optimizer.OriginalMetrics.BoxChanges);
                                 if CompareResult=0 then begin
-                                   CompareResult:=Integer(PushingSessions)-Integer(Optimizer.OriginalMetrics.PushingSessions);
+                                   CompareResult:=Int(PushingSessions)-Int(Optimizer.OriginalMetrics.PushingSessions);
                                    if CompareResult=0 then
-                                      CompareResult:=Integer(PlayerLines)-Integer(Optimizer.OriginalMetrics.PlayerLines);
+                                      CompareResult:=Int(PlayerLines)-Int(Optimizer.OriginalMetrics.PlayerLines);
                                    end;
                                 end;
                              if CompareResult<0 then Include(LevelStatisticsFlags,lsfSecondaryMetricsImproved);
@@ -27876,15 +27963,15 @@ begin
   {$ENDIF}
 end;
 
-function  Initialize(MemoryByteSize__:Cardinal;
+function  Initialize(MemoryByteSize__:UInt;
                      PushCountLimit__:Int64;
                      DepthLimit__,
-                     BackwardSearchDepthLimit__:Cardinal;
+                     BackwardSearchDepthLimit__:UInt;
                      OptimizerPushCountLimit__:Int64;
                      OptimizerDepthLimit__,
                      DeadlockSetsAdjacentOpenSquaresLimit__,
                      DeadlockSetsBoxLimitForDynamicSets__,
-                     DeadlockSetsBoxLimitForPrecalculatedSets__:Cardinal;
+                     DeadlockSetsBoxLimitForPrecalculatedSets__:UInt;
                      SearchMethod__:TSearchMethod;
                      SolverEnabled__,
                      OptimizerEnabled__,
@@ -27895,7 +27982,7 @@ function  Initialize(MemoryByteSize__:Cardinal;
                      ReuseNodesEnabled__,
                      LogFileEnabled__,
                      PackingOrderEnabled__:Boolean;
-                     PackingOrderBoxCountThreshold__:Integer;
+                     PackingOrderBoxCountThreshold__:Int;
                      TimeLimitMS__,
                      OptimizerTimeLimitMS__,
                      BoxPermutationsSearchTimeLimitMS__:TTimeMS;
@@ -27906,7 +27993,7 @@ function  Initialize(MemoryByteSize__:Cardinal;
                      SokobanCallBackFunction__:TSokobanCallBackFunction;
                      SokobanStatusPointer__:PSokobanStatus
                     ):Boolean;
-var a,b,i,j:Integer;
+var a,b,i,j:Int;
 begin
   {ensure that strings are properly released before 'FillChar' clears the data-structures;}
   {after 'FillChar', it's not strictly necessary to initialize the strings to '' because}
@@ -28004,7 +28091,7 @@ begin
   Result:=TTInitialize(MemoryByteSize__);
 end;
 
-procedure Run(const InputFileName__:String; FirstLevelNo__,LastLevelNo__:Cardinal);
+procedure Run(const InputFileName__:String; FirstLevelNo__,LastLevelNo__:UInt);
 begin
   ProcessLevels(InputFileName__,FirstLevelNo__,LastLevelNo__);
 end;
@@ -28022,7 +28109,7 @@ end;
   {Application Toplevel}
 
   function  InitializeApplication:Boolean;
-  var FirstLevelNo,LastLevelNo:Cardinal; InputFileName:String;
+  var FirstLevelNo,LastLevelNo:UInt; InputFileName:String;
   begin
     {$IFDEF WINDOWS}
       ConsoleWindowHandle := GetConsoleWindow;
@@ -28060,7 +28147,7 @@ end;
               (High(MAX_BOX_COUNT)                               <= High(UInt8)) and {various fields and vectors depend on that box numbers and goal numbers fit in a byte, i.e., an 8 bit unsigned integer}
               (High(MAX_BOX_COUNT)                               <= MAX_HISTORY_BOX_MOVES) and {the 'Solver.SearchStates' vector must have room for a depth-first search for each box}
               (MAX_OPTIMIZER_SEARCH_DEPTH*4                      <  MAX_HISTORY_BOX_MOVES) and {*4: the search state areas are used for reachable square timestamps, player lines, player line lengths, and legal parent directions on optimal paths}
-              (High(Positions.Positions^[0].Score)-1             >  High(Positions.OpenPositions.Buckets)*2) and {*2: the 'Global optimization' optimizer method adds 'High(Buckets)' to the score for positions on the delay update queue}
+              (High(Positions.Positions^[0].Score)-1             >  High(Positions.OpenPositions.Buckets)*2) and {*2: the 'global optimization' optimizer method adds 'High(Buckets)' to the score for positions on the delay update queue}
               (High(Positions.Positions^[0].Score)               >= MAX_BOX_COUNT) and
 //            (Low (Positions.Positions^[0].Score)               <=-MAX_BOX_COUNT) and
               (High(Positions.Positions^[0].BestForgottenScore)  >= High(Positions.Positions^[0].PushCount)) and
@@ -28073,8 +28160,8 @@ end;
               (BOX_GOAL_BIT_MASK                                 <  ((1 shl GOAL_BIT_SHIFT_COUNT) shr BOX_BIT_SHIFT_COUNT)) and {goal numbers and boxnumbers are stored in the upper bits for each square}
               (MAX_DEADLOCK_SETS                                 <= High(Game.DeadlockSets.SquareSetNumbers[0]^[0])) and {for compactness, the set numbers for each square are saved as small 16 bit integers}
               (SizeOf(UInt)                                      =  SizeOf(Pointer)) and
-              (SizeOf(Integer)                                   =  SizeOf(Pointer)) and
-              (SizeOf(TSmallBoxSet)                              =  SizeOf(Integer)) and
+              (SizeOf(Int)                                       =  SizeOf(Pointer)) and
+              (SizeOf(TSmallBoxSet)                              =  SizeOf(Int)) and
               (High(Game.DeadlockSets.SquaresOutsideFence)       <= {'outside-fence' squares are only saved for some deadlock-sets, and for compactness the squares are saved as small 16-bit numbers}
                                                                     High(Game.DeadlockSets.SquaresOutsideFenceIndex[ Low(Game.DeadlockSets.SquaresOutsideFenceIndex) ]))
               ;
@@ -28099,13 +28186,13 @@ end;
                                         FirstLevelNo,LastLevelNo,
                                         Positions.MemoryByteSize,
                                         Solver.SearchLimits.PushCountLimit,
-                                        Cardinal(Solver.SearchLimits.DepthLimit),
-                                        Cardinal(Solver.BackwardSearchDepthLimit),
+                                        UInt(Solver.SearchLimits.DepthLimit),
+                                        UInt(Solver.BackwardSearchDepthLimit),
                                         Optimizer.SearchLimits.PushCountLimit,
-                                        Cardinal(Optimizer.SearchLimits.DepthLimit),
-                                        Cardinal(Game.DeadlockSets.AdjacentOpenSquaresLimit),
-                                        Cardinal(Game.DeadlockSets.BoxLimitForDynamicSets),
-                                        Cardinal(Game.DeadlockSets.BoxLimitForPrecalculatedSets),
+                                        UInt(Optimizer.SearchLimits.DepthLimit),
+                                        UInt(Game.DeadlockSets.AdjacentOpenSquaresLimit),
+                                        UInt(Game.DeadlockSets.BoxLimitForDynamicSets),
+                                        UInt(Game.DeadlockSets.BoxLimitForPrecalculatedSets),
                                         Solver.SearchMethod,
                                         Solver.Enabled,
                                         Optimizer.Enabled,
@@ -28116,7 +28203,7 @@ end;
                                         Solver.ReuseNodesEnabled,
                                         LogFile.Enabled,
                                         Solver.PackingOrder.Enabled,
-                                        Cardinal(Solver.PackingOrder.BoxCountThreshold),
+                                        UInt(Solver.PackingOrder.BoxCountThreshold),
                                         Solver.SearchLimits.TimeLimitMS,
                                         Optimizer.SearchLimits.TimeLimitMS,
                                         Optimizer.BoxPermutationsSearchTimeLimitMS,
@@ -28168,10 +28255,10 @@ end;
                                  ) div ONE_MEBI:6,' MiB');
        Write(  'Dynamic memory: ',(Positions.MemoryByteSize +(ONE_MEBI div 2)) div ONE_MEBI:6,' MiB');
        if      Solver.Enabled then
-               Write('   Position capacity: ',( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TPosition ),
+               Write('   Position capacity: ',( UInt( Positions.HighWaterMark ) - UInt( Positions.Positions ) ) div SizeOf( TPosition ),
                      '  Position size: '     ,SizeOf(TPosition))
        else if Optimizer.Enabled then
-               Write('   Position capacity: ',( Cardinal( Positions.HighWaterMark ) - Cardinal( Positions.Positions ) ) div SizeOf( TOptimizerPosition ),
+               Write('   Position capacity: ',( UInt( Positions.HighWaterMark ) - UInt( Positions.Positions ) ) div SizeOf( TOptimizerPosition ),
                      '  Position size: '     ,SizeOf(TOptimizerPosition));
        Writeln;
        end
@@ -28216,4 +28303,5 @@ begin {main}
     UserInterface.Prompt:=True;
   {$ENDIF}
 end.
+
 
