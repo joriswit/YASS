@@ -8,8 +8,8 @@ android {
         applicationId "net.sourceforge.sokobanyasc.joriswit.yass"
         minSdk 14
         targetSdk 34
-        versionCode 12
-        versionName "2.145"
+        versionCode 13
+        versionName "2.152"
         resConfigs "en"
     }
     buildTypes {
