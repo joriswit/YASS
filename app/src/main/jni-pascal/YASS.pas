@@ -1,6 +1,6 @@
 {
 YASS - Yet Another Sokoban Solver and Optimizer - For Small Levels
-Version 2.152 (64-bit) - October 27, 2024
+Version 2.153 (64-bit) - November 17, 2024
 Copyright (c) 2024 by Brian Damgaard, Denmark
 
 This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
@@ -560,7 +560,7 @@ const
   TEXT_APPLICATION_TITLE_LONG
                            = TEXT_APPLICATION_TITLE+' - Yet Another Sokoban Solver and Optimizer - For Small Levels';
   TEXT_APPLICATION_VERSION_NUMBER
-                           = '2.152 (64-bit)';
+                           = '2.153 (64-bit)';
   TEXT_BACKWARD_SEARCH     = 'Backward search';
   TEXT_BEST_RESULT_SO_FAR  = 'Best result so far: ';
   TEXT_CALCULATING_PACKING_ORDER
@@ -2533,7 +2533,7 @@ begin
   Writeln('  -deadlocks <number>          : deadlock-sets complexity level 0-3, default ',DEFAULT_DEADLOCK_SETS_ADJACENT_OPEN_SQUARES_LIMIT);
   Writeln('  -help                        : this overview');
   Writeln('  -level     <number> [ - <number> ] : level numbers to process, default "all"');
-  Writeln('  -log                         : save search information to a logfile');
+  Writeln('  -log                         : save search information to a log file');
   Writeln('  -maxpushes <number> (million): search limit, default none'); // DEFAULT_PUSH_COUNT_LIMIT div ONE_MILLION,' million');
   Writeln('  -maxdepth  <number>          : search limit, default (and max.) ',MAX_HISTORY_BOX_MOVES,' pushes');
   Writeln('  -maxtime   <seconds>         : search limit, default unlimited');
