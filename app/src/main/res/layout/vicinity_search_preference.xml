@@ -3,7 +3,7 @@
     android:orientation="vertical" android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <Switch
+    <CheckBox
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/preferences_optimizer_vicinity_search_enabled_text"
@@ -16,7 +16,7 @@
         android:text="@string/preferences_optimizer_vicinity_search_vicinity_squares_text"
         android:layout_margin="20dp" />
 
-    <NumberPicker
+    <Spinner
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:id="@+id/numberPicker" />

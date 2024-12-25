@@ -1,12 +1,10 @@
 package yass;
 
-import android.app.Activity;
 import android.app.ActivityManager;
 import android.app.AlertDialog;
-import android.app.FragmentManager;
+import android.support.v4.app.FragmentManager;
 import android.content.ClipData;
 import android.content.ClipDescription;
-import android.content.ClipboardManager;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
@@ -14,6 +12,8 @@ import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.os.Handler;
 import android.preference.PreferenceManager;
+import android.support.v4.app.FragmentActivity;
+import android.text.ClipboardManager;
 import android.view.Menu;
 import android.view.MenuItem;
 import android.view.MotionEvent;
@@ -23,7 +23,7 @@ import android.widget.ImageButton;
 import android.widget.TextView;
 import android.widget.Toast;
 
-public class YASSActivity extends Activity implements ProgressDialogFragment.SolverStatusUpdate {
+public class YASSActivity extends FragmentActivity implements ProgressDialogFragment.SolverStatusUpdate {
 
     private static boolean mNativeLibLoaded = false;
 
@@ -224,7 +224,7 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
                     edit.putInt("optimizer_vicinity_search_box1", 20);
                     edit.putInt("optimizer_vicinity_search_box2", 10);
                     edit.putInt("optimizer_vicinity_search_box3", -1);
-                    edit.apply();
+                    edit.commit();
 
                     Toast.makeText(this, R.string.settings_reset_to_defaults, Toast.LENGTH_SHORT).show();
                 }
@@ -245,7 +245,7 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
         mIsPaused = false;
         updateToolbar();
 
-        FragmentManager fm = getFragmentManager();
+        FragmentManager fm = getSupportFragmentManager();
         mDialog = (ProgressDialogFragment) fm.findFragmentByTag(TAG_PROGRESS_DIALOG_FRAGMENT);
 
         if (mShouldDismissProgressDialog && mDialog != null) {
@@ -324,14 +324,12 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
             }
             return true;
         } else if (itemId == R.id.action_copy_puzzle) {
-            ClipboardManager clipboardBoard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            ClipData clipBoard = ClipData.newPlainText(getString(R.string.clipboard_description), mBoard.toXSB());
-            clipboardBoard.setPrimaryClip(clipBoard);
+            ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+            clipboard.setText(mBoard.toXSB());
             return true;
         } else if (itemId == R.id.action_copy_solution) {
             ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-            ClipData clip = ClipData.newPlainText(getString(R.string.clipboard_description), mSolution);
-            clipboard.setPrimaryClip(clip);
+            clipboard.setText(mSolution);
             return true;
         } else if (itemId == R.id.action_settings) {
             Intent intent = new Intent(this, SettingsActivity.class);
@@ -345,18 +343,21 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
 
     private String getClipboardText() {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        if (clipboard.hasPrimaryClip()) {
-            ClipData data = clipboard.getPrimaryClip();
-            if (data != null)
-                return String.valueOf(data.getItemAt(0).coerceToText(this));
+        if (clipboard.hasText()) {
+            CharSequence text = clipboard.getText();
+            if (text != null) {
+                return text.toString();
+            } else {
+                return null;
+            }
+        } else {
+            return null;
         }
-        return null;
     }
 
     private boolean hasClipboardText() {
         ClipboardManager clipboard = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-        return (clipboard.hasPrimaryClip()
-                && clipboard.getPrimaryClipDescription().hasMimeType(ClipDescription.MIMETYPE_TEXT_PLAIN));
+        return clipboard.hasText();
     }
 
     private ProgressDialogFragment mDialog;
@@ -381,7 +382,7 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
             BoardView boardView = (BoardView) findViewById(R.id.view);
             boardView.setEnableEdit(false);
 
-            FragmentManager fm = getFragmentManager();
+            FragmentManager fm = getSupportFragmentManager();
             if (mDialog == null) {
                 mDialog = new ProgressDialogFragment();
                 mDialog.mBoard = mBoard;
@@ -410,7 +411,7 @@ public class YASSActivity extends Activity implements ProgressDialogFragment.Sol
     public void onSolverDone(String solution) {
         if (solution != null && solution.length() > 0) {
             mSolution = solution;
-            invalidateOptionsMenu();
+            //invalidateOptionsMenu();
 
             boolean alreadyPlaying = mPlayback;
             mPlaybackBoard = (Board)mBoard.clone();

@@ -5,8 +5,9 @@ import android.content.res.TypedArray;
 import android.preference.DialogPreference;
 import android.util.AttributeSet;
 import android.view.View;
-import android.widget.NumberPicker;
-import android.widget.Switch;
+import android.widget.ArrayAdapter;
+import android.widget.CheckBox;
+import android.widget.Spinner;
 import android.widget.TextView;
 
 public class VicinitySearchPreference extends DialogPreference {
@@ -61,24 +62,21 @@ public class VicinitySearchPreference extends DialogPreference {
         return mDefaultValue;
     }
 
-    private NumberPicker mPicker;
-    private Switch mSwitch1;
+    private Spinner mPicker;
+    private CheckBox mSwitch1;
 
     @Override
     protected void onBindDialogView(View view) {
         super.onBindDialogView(view);
-        mPicker = (NumberPicker)view.findViewById(R.id.numberPicker);
-        mSwitch1 = (Switch)view.findViewById(R.id.switch1);
+        mPicker = (Spinner)view.findViewById(R.id.numberPicker);
+        mSwitch1 = (CheckBox)view.findViewById(R.id.switch1);
         TextView defaultValueTextView = (TextView)view.findViewById(R.id.default_value);
-        mPicker.setMinValue(0);
-        mPicker.setMaxValue(mValues.length - 1);
-        mPicker.setDisplayedValues(mValues);
-        mPicker.setWrapSelectorWheel(false);
+        mPicker.setAdapter(new ArrayAdapter<String>(this.getContext(), android.R.layout.simple_spinner_item, mValues));
         if(this.mValue == -1) {
-            mPicker.setValue(findIndex(mDefaultValue));
+            mPicker.setSelection(findIndex(mDefaultValue));
             mSwitch1.setChecked(false);
         } else {
-            mPicker.setValue(findIndex(this.mValue));
+            mPicker.setSelection(findIndex(this.mValue));
             mSwitch1.setChecked(true);
         }
         if (mDefaultValue != -1) {
@@ -105,7 +103,7 @@ public class VicinitySearchPreference extends DialogPreference {
 
         if (positiveResult) {
             if(mSwitch1.isChecked()) {
-                mValue = Integer.parseInt(mValues[mPicker.getValue()]);
+                mValue = Integer.parseInt(mValues[mPicker.getSelectedItemPosition()]);
             } else {
                 mValue = -1;
             }

@@ -2,13 +2,13 @@ package yass;
 
 import android.app.Activity;
 import android.app.Dialog;
-import android.app.DialogFragment;
-import android.app.ProgressDialog;
+import android.support.v4.app.DialogFragment;
 import android.content.DialogInterface;
 import android.os.AsyncTask;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.WindowManager;
+import android.widget.TextView;
 
 import java.lang.ref.WeakReference;
 
@@ -70,7 +70,7 @@ public class ProgressDialogFragment extends DialogFragment {
 
     @Override
     public Dialog onCreateDialog(Bundle savedInstanceState) {
-        ProgressDialog progressDialog = new ProgressDialog(getActivity());
+        Dialog progressDialog = new Dialog(getActivity());
         if (mMessage == null) {
             if (!mOptimizer) {
                 mMessage = getString(R.string.solving_initial_status_text);
@@ -78,8 +78,9 @@ public class ProgressDialogFragment extends DialogFragment {
                 mMessage = getString(R.string.optimizing_initial_status_text);
             }
         }
-        progressDialog.setMessage(mMessage);
-        progressDialog.setProgressStyle(ProgressDialog.STYLE_SPINNER);
+        progressDialog.setContentView(R.layout.progress_layout);
+        TextView text = (TextView)progressDialog.findViewById(R.id.progress_text);
+        text.setText(mMessage);
         progressDialog.setCancelable(true);
         progressDialog.setCanceledOnTouchOutside(false);
         progressDialog.getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -153,9 +154,10 @@ public class ProgressDialogFragment extends DialogFragment {
         @Override
         protected void onProgressUpdate(String... progress) {
             mMessage = progress[0];
-            ProgressDialog progressDialog = ((ProgressDialog) ProgressDialogFragment.this.getDialog());
+            Dialog progressDialog = ((Dialog) ProgressDialogFragment.this.getDialog());
             if (progressDialog != null) {
-                progressDialog.setMessage(mMessage);
+                TextView text = (TextView)progressDialog.findViewById(R.id.progress_text);
+                text.setText(mMessage);
             }
         }
         @Override

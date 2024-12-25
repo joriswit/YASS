@@ -14,7 +14,6 @@ public class SettingsActivity extends PreferenceActivity implements
     @Override
     public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        this.getListView().setFitsSystemWindows(true);
         addPreferencesFromResource(R.xml.preferences);
 
         initSummary(getPreferenceScreen());
@@ -37,7 +36,7 @@ public class SettingsActivity extends PreferenceActivity implements
 
         SharedPreferences.Editor edit = PreferenceManager.getDefaultSharedPreferences(this).edit();
         edit.putLong("last_settings_date", System.currentTimeMillis());
-        edit.apply();
+        edit.commit();
     }
 
     public void onSharedPreferenceChanged(SharedPreferences sharedPreferences,
