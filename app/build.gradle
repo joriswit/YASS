@@ -1,13 +1,13 @@
 apply plugin: 'com.android.application'
 
 android {
-    compileSdk 34
+    compileSdk 36
     namespace 'yass'
 
     defaultConfig {
         applicationId "net.sourceforge.sokobanyasc.joriswit.yass"
         minSdk 14
-        targetSdk 34
+        targetSdk 36
         versionCode 13
         versionName "2.152"
         resConfigs "en"
