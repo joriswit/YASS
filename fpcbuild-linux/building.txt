@@ -1,0 +1,30 @@
+How to build on Linux:
+
+1. Go to fpcbuild-linux folder
+
+cd ~/yass/fpcbuild-linux
+
+
+2. Build the fpc cross compiler:
+
+./buildfpc.sh
+
+
+3. Prepare environment:
+
+source set-environment.sh
+
+
+4. Go to yass folder
+
+cd ~/yass
+
+
+5. Build unsigned apk
+
+./gradlew build
+
+
+6. Sign the apk
+
+apksigner sign --ks my_release_key.jks --ks-key-alias my_release_key ~/yass/app/build/outputs/apk/release/app-release-unsigned.apk
