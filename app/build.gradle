@@ -6,7 +6,7 @@ android {
 
     defaultConfig {
         applicationId "net.sourceforge.sokobanyasc.joriswit.yass"
-        minSdk 10
+        minSdk 8
         targetSdk 36
         versionCode 14
         versionName "2.153"
@@ -47,7 +47,7 @@ def compilePascal(String taskName, String compiler, String outputDir) {
     }
 }
 
-compilePascal('compilePascalArm', 'ppcrossarm', 'src/main/jniLibs/armeabi-v7a')
+compilePascal('compilePascalArm', 'ppcrossarm', 'src/main/jniLibs/armeabi')
 compilePascal('compilePascalX86', 'ppcross386', 'src/main/jniLibs/x86')
 compilePascal('compilePascalArm64', 'ppcrossa64', 'src/main/jniLibs/arm64-v8a')
 compilePascal('compilePascalX86_64', 'ppcrossx64', 'src/main/jniLibs/x86_64')
