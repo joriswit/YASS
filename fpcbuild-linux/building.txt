@@ -20,11 +20,13 @@ source set-environment.sh
 cd ~/yass
 
 
-5. Build unsigned apk
+5. Build unsigned apk; dont re-use a daemon, because we just changed the PATH environment
 
-./gradlew build
+./gradlew assembleRelease --no-daemon
 
 
 6. Sign the apk
 
-apksigner sign --ks my_release_key.jks --ks-key-alias my_release_key ~/yass/app/build/outputs/apk/release/app-release-unsigned.apk
+cp ~/yass/app/build/outputs/apk/release/app-release-unsigned.apk ~/yass/app/build/outputs/apk/release/app-release-signed.apk
+
+apksigner sign --ks my_release_key.jks --ks-key-alias my_release_key --alignment-preserved ~/yass/app/build/outputs/apk/release/app-release-signed.apk
