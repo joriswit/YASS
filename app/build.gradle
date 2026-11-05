@@ -1,24 +1,24 @@
 apply plugin: 'com.android.application'
 
 android {
-    compileSdk 36
-    namespace 'yass'
+    compileSdk = 36
+    namespace = 'yass'
 
     defaultConfig {
-        applicationId "net.sourceforge.sokobanyasc.joriswit.yass"
-        minSdk 14
-        targetSdk 36
-        versionCode 14
-        versionName "2.153"
-        resConfigs "en"
+        applicationId = "net.sourceforge.sokobanyasc.joriswit.yass"
+        minSdk = 14
+        targetSdk = 36
+        versionCode = 14
+        versionName = "2.153"
+        resourceConfigurations += ["en"]
     }
     buildTypes {
         release {
-            minifyEnabled true
+            minifyEnabled = true
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
     }
-    ndkVersion "16.1.4479499"
+    ndkVersion = "16.1.4479499"
 }
 
 dependencies {
